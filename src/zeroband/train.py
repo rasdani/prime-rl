@@ -7,11 +7,10 @@ import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
+from zeroband.models import ModelName, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
-from zeroband.training.data import TEST_VOCAB_SIZE, DataConfig, get_dataloader, get_tokenizer
+from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.lr_scheduler import get_scheduler
-from zeroband.models.llama import get_model
-from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.training.utils import (
     PerfCounter,
     get_peak_flops,
@@ -58,8 +57,7 @@ class CkptConfig(BaseConfig):
 
 
 class Config(BaseConfig):
-    name_model: Literal["debugmodel", "70M", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"
-    type_model: Literal["llama2", "llama3"] = "llama3"
+    name_model: ModelName = "150M"
 
     ckpt: CkptConfig = CkptConfig()
 
@@ -82,9 +80,9 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int) -> int:
 def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
 
-    for layer_id, transformer_block in model.layers.items():
+    for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
-            reshard_after_forward = int(layer_id) < len(model.layers) - 1
+            reshard_after_forward = layer_id < len(model.model.layers) - 1
         else:
             reshard_after_forward = False
         fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
@@ -96,14 +94,12 @@ def train(config: Config):
 
     gradient_accumulation_steps = get_gradient_accumulation_steps(config.optim.batch_size, config.train.micro_bs)
 
-    tokenizer = get_tokenizer(config.data.fake, config.name_model, config.type_model)
+    model, model_config, tokenizer = get_model_and_tokenizer(config.name_model)
 
     # fmt: skip
     train_dataloader = get_dataloader(tokenizer=tokenizer,world_size=world_info.world_size,rank=world_info.rank,batch_size=config.train.micro_bs,data_config=config.data)  # fmt: skip
 
     train_dataloader_iterator = iter(train_dataloader)
-
-    model, model_config = get_model(type_model=config.type_model,name_model=config.name_model,seq_length=config.data.seq_length,vocab_size=len(tokenizer) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE)  # fmt: skip
 
     gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
     logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
@@ -146,10 +142,8 @@ def train(config: Config):
             batch = next(train_dataloader_iterator)
             input_ids = batch["input_ids"].to("cuda")
             labels = batch["labels"].to("cuda")
-            seqlens = [seqlen.to("cuda") for seqlen in batch["seqlens"]]
-            block_mask = create_block_mask_from_seqlens(seqlens) if seqlens is not None else None
 
-            logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+            logits = model(input_ids=input_ids).logits.contiguous()
             flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
             flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
 

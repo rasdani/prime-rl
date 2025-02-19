@@ -16,9 +16,6 @@ from datasets import load_dataset_builder, BuilderConfig
 from pyarrow import parquet as pq
 from transformers import PreTrainedTokenizer
 
-from zeroband.training.utils import FakeTokenizer
-from transformers import AutoTokenizer
-
 
 TEST_VOCAB_SIZE = 1024
 
@@ -313,18 +310,6 @@ def get_dataloader(
         collate_fn=collate_fn,
         num_workers=data_config.num_workers,
     )
-
-
-def get_tokenizer(fake: bool, name_model: str, type_model: str) -> PreTrainedTokenizer:
-    # Load tokenizer
-    if fake and name_model == "debugmodel":
-        return FakeTokenizer()
-    elif type_model == "llama2":
-        return AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
-    elif type_model == "llama3":
-        return AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B", use_fast=True)
-    else:
-        raise ValueError(f"Model type {type_model} not supported")
 
 
 @functools.lru_cache(maxsize=None)

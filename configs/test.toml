@@ -1,6 +1,5 @@
 name_model = "debugmodel"
 project = "debug_150m_zero_band"
-type_model = "llama2"
 
 [train]
 micro_bs = 4  # change this base on the gpu
