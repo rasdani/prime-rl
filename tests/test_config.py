@@ -4,7 +4,7 @@ Need to be run from the root folder
 """
 
 import os
-from zeroband.training.train import Config
+from zeroband.train import Config
 import pytest
 import tomli
 
