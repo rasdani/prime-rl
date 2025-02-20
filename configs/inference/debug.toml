@@ -1,0 +1,4 @@
+name_model = "debugmodel"
+max_samples = 32
+batch_size = 8
+dataset = "justus27/test-vcu"
