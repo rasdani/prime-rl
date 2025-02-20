@@ -30,6 +30,7 @@ allow-direct-references = true # allow direct references to git repos in depende
 
 [tool.ruff]
 line-length = 140
+ignore = ["F722", "F821"]
 
 [tool.uv]
 dev-dependencies = ["ruff>=0.5.0", "pre-commit>=3.0.0","pytest>=7.0.0", "faker"]

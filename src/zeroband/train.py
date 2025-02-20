@@ -10,6 +10,7 @@ import wandb
 from zeroband.models import ModelName, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.training.data import DataConfig, get_dataloader
+from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import (
     PerfCounter,
@@ -21,7 +22,7 @@ from zeroband.training.utils import (
 from zeroband.logger import get_logger
 
 from pydantic_config import BaseConfig, parse_argv
-import torch.nn.functional as F
+from jaxtyping import Float, Int
 
 from zeroband.training.world_info import get_world_info
 
@@ -96,8 +97,7 @@ def train(config: Config):
 
     model, model_config, tokenizer = get_model_and_tokenizer(config.name_model)
 
-    # fmt: skip
-    train_dataloader = get_dataloader(tokenizer=tokenizer,world_size=world_info.world_size,rank=world_info.rank,batch_size=config.train.micro_bs,data_config=config.data)  # fmt: skip
+    train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
 
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -140,20 +140,16 @@ def train(config: Config):
             model.set_requires_gradient_sync(not is_accumulating)
 
             batch = next(train_dataloader_iterator)
-            input_ids = batch["input_ids"].to("cuda")
-            labels = batch["labels"].to("cuda")
 
-            logits = model(input_ids=input_ids).logits.contiguous()
-            flatten_logits = logits.reshape(-1, logits.size(-1))  # b seq vocab -> (b * seq) vocab
-            flatten_labels = labels.reshape(-1)  # b seq -> (b * seq)
+            input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
+            advantages: Float[torch.Tensor, "batch"] = batch["advantages"].to("cuda")
+            ref_logprobs: Float[torch.Tensor, "batch seq"] = batch["ref_logprobs"].to("cuda")
 
-            ce_loss = F.cross_entropy(flatten_logits, flatten_labels)
+            policy_logprobs = model(input_ids=input_ids).logits.contiguous()
+            # ref_logprobs: Float[torch.Tensor, "batch seq"] = policy_logprobs.clone()
 
-            del logits
-            del flatten_logits
-            del flatten_labels
+            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages) / gradient_accumulation_steps
 
-            loss = ce_loss / gradient_accumulation_steps
             loss.backward()
             loss_batch += loss.detach().clone()
 
