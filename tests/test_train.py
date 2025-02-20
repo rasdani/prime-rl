@@ -7,7 +7,7 @@ def _test_torchrun(num_gpus, config, extra_args=[]):
         "torchrun",
         f"--nproc_per_node={num_gpus}",
         "src/zeroband/train.py",
-        f"@configs/{config}",
+        f"@configs/training/{config}",
         *extra_args,
     ]
 
@@ -19,4 +19,4 @@ def _test_torchrun(num_gpus, config, extra_args=[]):
 
 @pytest.mark.parametrize("num_gpus", [1, 2])
 def test_train(num_gpus):
-    _test_torchrun(num_gpus=num_gpus, config="debug/normal.toml")
+    _test_torchrun(num_gpus=num_gpus, config="debug.toml")

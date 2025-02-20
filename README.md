@@ -47,9 +47,17 @@ uv run pytest
 
 6. debug run 
 
+training
+
 ```bash
-uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/debug/normal.toml
+uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/debug.toml
 ```
+
+inference
+```bash
+uv run python src/zeroband/inference.py @ configs/inference/debug.toml
+```
+
 
 ...
 
