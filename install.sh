@@ -57,11 +57,6 @@ main() {
     log_info "Updating git submodules..."
     git submodule update --init --recursive
     
-    log_info "Downloading data..."
-    mkdir -p datasets
-    uv run python scripts/subset_data.py --dataset_name PrimeIntellect/fineweb-edu --data_world_size 1 --data_rank 0 --max_shards 128
-    mv fineweb-edu/ datasets/fineweb-edu/
-
     log_info "Installation completed! You can double check that everything is install correctly by running"
 }
 
