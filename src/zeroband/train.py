@@ -146,7 +146,6 @@ def train(config: Config):
             ref_logprobs: Float[torch.Tensor, "batch seq"] = batch["ref_logprobs"].to("cuda")
 
             policy_logprobs = model(input_ids=input_ids).logits.contiguous()
-            # ref_logprobs: Float[torch.Tensor, "batch seq"] = policy_logprobs.clone()
 
             loss = grpo_loss(policy_logprobs, ref_logprobs, advantages) / gradient_accumulation_steps
 
