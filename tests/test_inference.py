@@ -1,5 +1,6 @@
 import subprocess
 import pytest
+import pyarrow.parquet as pq
 
 
 def _test_torchrun(config, extra_args=[]):
@@ -16,5 +17,12 @@ def _test_torchrun(config, extra_args=[]):
         pytest.fail(f"Process {result} failed {result}")
 
 
-def test_inference():
-    _test_torchrun(config="inference/debug.toml")
+def test_inference(tmp_path):
+    _test_torchrun(config="inference/debug.toml", extra_args=["--output_path", str(tmp_path)])
+
+    assert tmp_path.joinpath("step_0").exists()
+
+    for file in tmp_path.joinpath("step_0").iterdir():
+        if file.suffix == ".parquet":
+            table = pq.read_table(file)
+            assert table.num_rows > 0
