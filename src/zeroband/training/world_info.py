@@ -12,10 +12,10 @@ class WorldInfo:
     local_world_size: int
 
     def __init__(self):
-        self.world_size = int(os.environ["WORLD_SIZE"])
-        self.rank = int(os.environ["RANK"])
-        self.local_rank = int(os.environ["LOCAL_RANK"])
-        self.local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+        self.rank = int(os.environ.get("RANK", 0))
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", 1))
         self.nnodes = self.world_size // self.local_world_size
 
         self.global_unique_id = os.environ.get("GLOBAL_UNIQUE_ID", None)

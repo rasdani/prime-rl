@@ -1,11 +1,11 @@
 import os
 import uuid
 from pydantic import model_validator
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from pydantic_config import BaseConfig, parse_argv
 import vllm
 
-from zeroband.models import ModelName, name_to_hf_model
+from zeroband.models import ModelName
 
 from datasets import load_dataset
 import pyarrow as pa
@@ -101,9 +101,6 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
 
 def main(config: Config):  # -> list[dict[str, Any]]:
     prompts = ["Write me a novel" for _ in range(5)]
-
-    llm = LLM(model=name_to_hf_model[config.name_model])
-    # tokenizer = llm.get_tokenizer()
 
     sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
 
