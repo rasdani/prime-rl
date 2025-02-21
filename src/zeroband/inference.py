@@ -51,7 +51,7 @@ pa_schema = pa.schema(
     [
         ("input_tokens", pa.list_(pa.int32())),
         ("output_tokens", pa.list_(pa.int32())),
-        ("advantage", pa.int32()),
+        ("advantages", pa.float32()),
         ("proofs", pa.binary()),
         ("step", pa.int32()),
     ]
@@ -90,7 +90,7 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
     arrays = [
         pa.array(input_tokens_list, type=pa.list_(pa.int32())),
         pa.array(output_tokens_list, type=pa.list_(pa.int32())),
-        pa.array(advantages_list, type=pa.int32()),
+        pa.array(advantages_list, type=pa.float32()),
         pa.array(proofs_list, type=pa.binary()),
         pa.array(steps_list, type=pa.int32()),
     ]

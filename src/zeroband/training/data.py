@@ -1,4 +1,5 @@
 from multiprocessing import Manager
+from pathlib import Path
 import time
 from typing import Any, Generator, Protocol, TypedDict
 
@@ -19,11 +20,11 @@ class DataConfig(BaseConfig):
     path: str = "datasets/fineweb-edu"
     seq_length: int = 1024
     fake: bool = False
-    num_workers: int = 4
+    num_workers: int = 2
 
 
 class UpdateableDataset(Protocol):
-    def update_files(self, files: list[str]): ...
+    def update_files(self, files: list[Path]): ...
 
 
 class FakeTokenizedDataset(IterableDataset, UpdateableDataset):
@@ -35,7 +36,7 @@ class FakeTokenizedDataset(IterableDataset, UpdateableDataset):
         assert vocab_size > 3, "Vocab size must be greater than 3"
         self.step = 0
 
-    def update_files(self, files: list[str]): ...
+    def update_files(self, files: list[Path]): ...
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
         while True:
@@ -61,16 +62,19 @@ class ParquetDataset(IterableDataset):
         self._manager = Manager()
         self._shared_files = self._manager.list()
 
-    def update_files(self, files: list[str]):
+    def update_files(self, files: list[Path]):
         # Update the shared files list
-        worker_info = torch.utils.data.get_worker_info()
-        self._logger.info(f"Updating files for worker {worker_info.id} with {len(files)} files")
-        self._shared_files[:] = files[worker_info.id :: worker_info.num_workers]  # Clear and update atomically
+
+        self._shared_files[:] = files  # Use slice assignment to update manager list
+        self._logger.info(f"Updating files with {len(files)} files")
 
     def __iter__(self):
         while True:
-            for file in self._shared_files:
-                table = pq.ParquetFile(file).read()
+            worker_info = torch.utils.data.get_worker_info()
+            files = self._shared_files[worker_info.id :: worker_info.num_workers]  # split by worker
+            self._logger.info(f"Worker {worker_info.id} has {len(files)} files. shared files: {len(self._shared_files)}")
+            for file in files:
+                table = pq.ParquetFile(str(file)).read()
                 required_columns = ["output_tokens", "advantages"]
 
                 skip = False
@@ -84,7 +88,11 @@ class ParquetDataset(IterableDataset):
                     advantages = table["advantages"]
 
                     for ids, adv in zip(output_tokens, advantages):
-                        yield {"input_ids": ids, "advantages": adv}
+                        ids = torch.tensor(ids.as_py())
+                        adv = torch.tensor(
+                            [adv.as_py()] * len(ids)
+                        )  # advantes at inference is per sample, but here we want it to be per tokens
+                        yield {"input_ids": ids, "advantages": adv}  #
 
             self._logger.info("Waiting for new files")
             time.sleep(0.5)
@@ -92,7 +100,7 @@ class ParquetDataset(IterableDataset):
 
 class BatchOutput(TypedDict):
     input_ids: Int[torch.Tensor, "batch seq"]
-    advantages: Float[torch.Tensor, "batch"]
+    advantages: Float[torch.Tensor, "batch seq"]
 
 
 def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig) -> tuple[DataLoader[BatchOutput], UpdateableDataset]:
@@ -100,6 +108,6 @@ def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig) -> tuple
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
+        train_dataset = ParquetDataset()
 
     return DataLoader(train_dataset, batch_size=batch_size, num_workers=data_config.num_workers), train_dataset

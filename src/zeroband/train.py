@@ -86,21 +86,27 @@ def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
     fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
 
 
-def load_latest_dataset(dataset: UpdateableDataset, step: int, data_path: str, world_info: WorldInfo):
+def load_latest_dataset(dataset: UpdateableDataset, step: int, data_config: DataConfig, world_info: WorldInfo):
     """Load the latest dataset from the given path"""
-    if config.data.fake:
+    if data_config.fake:
         return
 
     step = 0  # for debugging
 
-    path = Path(data_path) / f"step_{step}"
+    path = Path(data_config.path) / f"step_{step}"
 
     ## todo might fail here if there is no data in the folder.
     files = []
     if world_info.rank == 0:
-        files = os.listdir(path)
+        files = [path / f for f in os.listdir(path)]
+        assert len(files) >= data_config.num_workers * world_info.local_world_size, (
+            f"There are not enough files in the folder {path} for {data_config.num_workers=} * {world_info.local_world_size=} workers"
+        )
 
-    dist.broadcast_object_list([files], src=0)
+    files = [files]  # Wrap in list for broadcast
+    dist.broadcast_object_list(files, src=0)
+    files = files[0]  # Unwrap after broadcast
+    print(f"Worker {world_info.local_rank} has {len(files)} files")
 
     # here we split the list of files across the ranks
     file_per_rank = files[world_info.local_rank :: world_info.local_world_size]
@@ -146,7 +152,7 @@ def train(config: Config):
 
         if not config.data.fake:
             # we fetch data from the latest step folder
-            load_latest_dataset(train_dataset, training_progress.step, config.data.path, world_info)
+            load_latest_dataset(train_dataset, training_progress.step, config.data, world_info)
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
@@ -156,12 +162,13 @@ def train(config: Config):
             batch = next(train_dataloader_iterator)
 
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
-            advantages: Float[torch.Tensor, "batch"] = batch["advantages"].to("cuda")
+            advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
 
-            policy_logprobs = model(input_ids=input_ids).logits.contiguous()
+            policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
             ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
             loss = grpo_loss(policy_logprobs, ref_logprobs, advantages) / gradient_accumulation_steps
+            # loss = policy_logprobs.sum() / gradient_accumulation_steps
 
             loss.backward()
             loss_batch += loss.detach().clone()
