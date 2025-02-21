@@ -51,7 +51,7 @@ pa_schema = pa.schema(
     [
         ("input_tokens", pa.list_(pa.int32())),
         ("output_tokens", pa.list_(pa.int32())),
-        ("reward", pa.int32()),
+        ("advantage", pa.int32()),
         ("proofs", pa.binary()),
         ("step", pa.int32()),
     ]
@@ -62,7 +62,7 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
     # Initialize lists for each column
     input_tokens_list = []
     output_tokens_list = []
-    rewards_list = []
+    advantages_list = []
     proofs_list = []
     steps_list = []
 
@@ -76,9 +76,9 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
             # Output tokens from the completion
             output_tokens_list.append(output.token_ids)
 
-            # Initialize with 0 reward as it's not part of RequestOutput
-            # You might want to modify this based on your reward calculation
-            rewards_list.append(0)
+            # Initialize with 0 advantage as it's not part of RequestOutput
+            # You might want to modify this based on your advantage calculation
+            advantages_list.append(0)
 
             # TODO: Add toploc proof
             proofs_list.append("I am toploc proof, handcrafted by jack".encode())
@@ -90,7 +90,7 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
     arrays = [
         pa.array(input_tokens_list, type=pa.list_(pa.int32())),
         pa.array(output_tokens_list, type=pa.list_(pa.int32())),
-        pa.array(rewards_list, type=pa.int32()),
+        pa.array(advantages_list, type=pa.int32()),
         pa.array(proofs_list, type=pa.binary()),
         pa.array(steps_list, type=pa.int32()),
     ]
