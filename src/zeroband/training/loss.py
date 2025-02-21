@@ -7,8 +7,8 @@ from beartype import beartype as typechecker
 # beatype here just make sure we have the correct shape
 @jaxtyped(typechecker=typechecker)
 def grpo_loss(
-    policy_logprobs: Float[Tensor, "batch seq"],
-    ref_logprobs: Float[Tensor, "batch seq"],
+    policy_logprobs: Float[Tensor, "batch seq vocab"],
+    ref_logprobs: Float[Tensor, "batch seq vocab"],
     advantages: Float[Tensor, "batch seq"],
     beta: float = 0.04,
     epsilon: float = 0.2,
