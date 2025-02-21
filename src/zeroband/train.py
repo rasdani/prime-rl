@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
@@ -9,7 +10,7 @@ import wandb
 
 from zeroband.models import ModelName, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
-from zeroband.training.data import DataConfig, get_dataloader
+from zeroband.training.data import DataConfig, UpdateableDataset, get_dataloader
 from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
@@ -19,7 +20,7 @@ from zeroband.logger import get_logger
 from pydantic_config import BaseConfig, parse_argv
 from jaxtyping import Float, Int
 
-from zeroband.training.world_info import get_world_info
+from zeroband.training.world_info import WorldInfo, get_world_info
 
 
 class AdamConfig(BaseConfig):
@@ -85,6 +86,27 @@ def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
     fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
 
 
+def load_latest_dataset(dataset: UpdateableDataset, step: int, data_path: str, world_info: WorldInfo):
+    """Load the latest dataset from the given path"""
+    if config.data.fake:
+        return
+
+    step = 0  # for debugging
+
+    path = Path(data_path) / f"step_{step}"
+
+    ## todo might fail here if there is no data in the folder.
+    files = []
+    if world_info.rank == 0:
+        files = os.listdir(path)
+
+    dist.broadcast_object_list([files], src=0)
+
+    # here we split the list of files across the ranks
+    file_per_rank = files[world_info.local_rank :: world_info.local_world_size]
+    dataset.update_files(file_per_rank)
+
+
 def train(config: Config):
     # batch_size is the total batch size for all GPUs
 
@@ -92,7 +114,7 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 
-    train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
+    train_dataloader, train_dataset = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
 
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -122,6 +144,10 @@ def train(config: Config):
     while True:
         loss_batch = 0
 
+        if not config.data.fake:
+            # we fetch data from the latest step folder
+            load_latest_dataset(train_dataset, training_progress.step, config.data.path, world_info)
+
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
             # no sync if we are accumulating gradients
@@ -131,9 +157,9 @@ def train(config: Config):
 
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             advantages: Float[torch.Tensor, "batch"] = batch["advantages"].to("cuda")
-            ref_logprobs: Float[torch.Tensor, "batch seq"] = batch["ref_logprobs"].to("cuda")
 
             policy_logprobs = model(input_ids=input_ids).logits.contiguous()
+            ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
             loss = grpo_loss(policy_logprobs, ref_logprobs, advantages) / gradient_accumulation_steps
 
