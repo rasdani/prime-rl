@@ -26,11 +26,12 @@ def grpo_loss(
     policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
     # KL penalty (unbiased estimator)
-    kl_div = ref_logprobs / policy_logprobs - torch.log(ref_logprobs / policy_logprobs) - 1
+    # kl_div = ref_logprobs / policy_logprobs - torch.log(ref_logprobs / policy_logprobs) - 1
 
     # Reduce across sequence length
     policy_loss = policy_loss.mean(dim=-1)
-    kl_penalty = kl_div.mean(dim=-1)
+    # kl_penalty = kl_div.mean(dim=-1)
+    kl_penalty = 0
 
     # Final loss (mean across batch)
     loss = (policy_loss + beta * kl_penalty).mean()
