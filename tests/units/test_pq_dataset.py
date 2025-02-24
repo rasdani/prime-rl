@@ -1,45 +1,15 @@
+import pytest
 from zeroband.training.data import ParquetDataset
 from torch.utils.data import DataLoader
-import os
 
 
-class FakeLogger:
-    """
-    A fake logger that stores the logs in a file
-    """
+def test_pq_dataset(fake_rollout_files_dir):
+    path = fake_rollout_files_dir(steps=[0, 1, 2, 3], num_files=4, batch_size=8)
 
-    def __init__(self, tmp_file, original_logger):
-        self.tmp_file = tmp_file
-        self.original_logger = original_logger
+    dataset = ParquetDataset(path, 8 * 4, timeout=2)
 
-    def info(self, msg):
-        self.original_logger.info(msg)
-        with open(self.tmp_file, "a") as f:
-            f.write(f"INFO: {msg}\n")
-
-    def warning(self, msg):
-        self.original_logger.warning(msg)
-        with open(self.tmp_file, "a") as f:
-            f.write(f"WARNING: {msg}\n")
-
-
-def test_pq_dataset(fake_rollout_files_dir, caplog, tmp_path):
-    path = fake_rollout_files_dir(step=0, num_files=10) / "step_0"
-
-    dataset = ParquetDataset()
-    tmp_file = tmp_path / "tmp_log.txt"
-    if os.path.exists(tmp_file):
-        os.remove(tmp_file)
-    dataset._logger = FakeLogger(tmp_file, dataset._logger)
     dataloader = DataLoader(dataset, batch_size=10, num_workers=2)
 
-    files = [path / f for f in os.listdir(path)]
-    assert len(files) == 10
-    dataset.update_files(files)
-
-    for _ in dataloader:
-        break
-
-    logs = open(tmp_file).read()
-    assert "Worker 0 has 5 files. shared files: 10" in logs
-    assert "Worker 1 has 5 files. shared files: 10" in logs
+    with pytest.raises(TimeoutError, match="Timeout waiting for step 4 to be created"):
+        for _ in dataloader:
+            ...
