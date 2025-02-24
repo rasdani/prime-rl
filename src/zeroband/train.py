@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
@@ -10,7 +9,7 @@ import wandb
 
 from zeroband.models import ModelName, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
-from zeroband.training.data import DataConfig, UpdateableDataset, get_dataloader
+from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
@@ -20,7 +19,7 @@ from zeroband.logger import get_logger
 from pydantic_config import BaseConfig, parse_argv
 from jaxtyping import Float, Int
 
-from zeroband.training.world_info import WorldInfo, get_world_info
+from zeroband.training.world_info import get_world_info
 
 
 class AdamConfig(BaseConfig):
@@ -86,33 +85,6 @@ def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
     fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
 
 
-def load_latest_dataset(dataset: UpdateableDataset, step: int, data_config: DataConfig, world_info: WorldInfo):
-    """Load the latest dataset from the given path"""
-    if data_config.fake:
-        return
-
-    step = 0  # for debugging
-
-    path = Path(data_config.path) / f"step_{step}"
-
-    ## todo might fail here if there is no data in the folder.
-    files = []
-    if world_info.rank == 0:
-        files = [path / f for f in os.listdir(path)]
-        assert len(files) >= data_config.num_workers * world_info.local_world_size, (
-            f"There are not enough files in the folder {path} for {data_config.num_workers=} * {world_info.local_world_size=} workers"
-        )
-
-    files = [files]  # Wrap in list for broadcast
-    dist.broadcast_object_list(files, src=0)
-    files = files[0]  # Unwrap after broadcast
-    print(f"Worker {world_info.local_rank} has {len(files)} files")
-
-    # here we split the list of files across the ranks
-    file_per_rank = files[world_info.local_rank :: world_info.local_world_size]
-    dataset.update_files(file_per_rank)
-
-
 def train(config: Config):
     # batch_size is the total batch size for all GPUs
 
@@ -120,7 +92,7 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 
-    train_dataloader, train_dataset = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
+    train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
 
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -149,10 +121,6 @@ def train(config: Config):
 
     while True:
         loss_batch = 0
-
-        if not config.data.fake:
-            # we fetch data from the latest step folder
-            load_latest_dataset(train_dataset, training_progress.step, config.data, world_info)
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1

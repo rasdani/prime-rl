@@ -1,7 +1,7 @@
 from multiprocessing import Manager
 from pathlib import Path
 import time
-from typing import Any, Generator, Protocol, TypedDict
+from typing import Any, Generator, TypedDict
 
 from pydantic_config import BaseConfig
 
@@ -23,11 +23,7 @@ class DataConfig(BaseConfig):
     num_workers: int = 2
 
 
-class UpdateableDataset(Protocol):
-    def update_files(self, files: list[Path]): ...
-
-
-class FakeTokenizedDataset(IterableDataset, UpdateableDataset):
+class FakeTokenizedDataset(IterableDataset):
     """This is a dummy dataset that generates random sequences of length seq_len and vocab_size"""
 
     def __init__(self, seq_len: int, vocab_size: int):
@@ -103,11 +99,11 @@ class BatchOutput(TypedDict):
     advantages: Float[torch.Tensor, "batch seq"]
 
 
-def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig) -> tuple[DataLoader[BatchOutput], UpdateableDataset]:
+def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig) -> DataLoader[BatchOutput]:
     """Get a dataloader for the training dataset"""
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
         train_dataset = ParquetDataset()
 
-    return DataLoader(train_dataset, batch_size=batch_size, num_workers=data_config.num_workers), train_dataset
+    return DataLoader(train_dataset, batch_size=batch_size, num_workers=data_config.num_workers)
