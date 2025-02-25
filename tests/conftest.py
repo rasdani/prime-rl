@@ -4,11 +4,13 @@ from zeroband.inference import pa_schema
 from pathlib import Path
 import os
 import pytest
+from functools import lru_cache
 
 from zeroband.training.data import STABLE_FILE
 
 
-def _create_one_pa_file(file_name: str, batch_size: int, seq_len: int):
+@lru_cache(maxsize=None)
+def _create_one_pa_table(batch_size: int, seq_len: int):
     # Initialize lists for each column
     input_tokens_list = [[1] * seq_len for _ in range(batch_size)]  # Wrap in list
     output_tokens_list = [[1] * seq_len for _ in range(batch_size)]  # Wrap in list
@@ -26,9 +28,7 @@ def _create_one_pa_file(file_name: str, batch_size: int, seq_len: int):
     ]
 
     # Create and return table
-    table = pa.Table.from_arrays(arrays, schema=pa_schema)
-
-    pq.write_table(table, file_name)
+    return pa.Table.from_arrays(arrays, schema=pa_schema)
 
 
 def _create_fake_rollout_parquet_file(path: Path, steps: list[int], num_files: int, batch_size: int, seq_len: int):
@@ -39,7 +39,8 @@ def _create_fake_rollout_parquet_file(path: Path, steps: list[int], num_files: i
 
         for i in range(num_files):
             os.makedirs(step_path, exist_ok=True)
-            _create_one_pa_file(step_path / f"{i}.parquet", batch_size, seq_len)
+            table = _create_one_pa_table(batch_size, seq_len)
+            pq.write_table(table, f"{step_path}/{i}.parquet")
 
         stable_file = step_path / STABLE_FILE
         with open(stable_file, "w"):
