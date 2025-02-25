@@ -64,25 +64,26 @@ class Config(BaseConfig):
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
-    
+
     @model_validator(mode="after")
     def check_batch_size(self):
-        assert self.optim.batch_size == self.data.batch_size, "The batch size in the config must be the same as the batch size in the data config."
-        
-    @model_validator(mode="before")
-    def assign_data_batch_size(cls,data):
-        if isinstance(data,dict):
-            data["data"]["batch_size"] = data["optim"]["batch_size"]
-        return data
+        if self.data.batch_size is None:
+            self.data.batch_size = self.optim.batch_size
+        assert self.optim.batch_size == self.data.batch_size, (
+            "The batch size in the config must be the same as the batch size in the data config."
+        )
+
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int) -> int:
     assert batch_size % world_info.local_world_size == 0
     batch_size = batch_size // world_info.local_world_size
 
     assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})."
-    
-    assert batch_size % (data_workers * world_info.local_world_size) == 0, f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers}) times the number of GPUs ({world_info.local_world_size})."
-    
+
+    assert batch_size % (data_workers * world_info.local_world_size) == 0, (
+        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers}) times the number of GPUs ({world_info.local_world_size})."
+    )
+
     return batch_size // micro_bs
 
 
@@ -101,7 +102,7 @@ def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
 def train(config: Config):
     # batch_size is the total batch size for all GPUs
 
-    gradient_accumulation_steps = get_gradient_accumulation_steps(config.optim.batch_size, config.train.micro_bs)
+    gradient_accumulation_steps = get_gradient_accumulation_steps(config.optim.batch_size, config.train.micro_bs, config.data.num_workers)
 
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 

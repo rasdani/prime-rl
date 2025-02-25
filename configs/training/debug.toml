@@ -11,4 +11,4 @@ total_steps = 4
 
 [data]
 fake = true
-
+timeout = 1

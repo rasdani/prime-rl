@@ -25,7 +25,8 @@ class DataConfig(BaseConfig):
     fake: bool = False
     num_workers: int = 2
 
-    batch_size: int  # will be set by the top config
+    batch_size: int | None = None  # will be set by the top config
+    timeout: float = 360
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -74,7 +75,13 @@ class ParquetDataset(IterableDataset):
     If the dataset is exhausted, it will wait for new files to be added.
     """
 
-    def __init__(self, path: Path, batch_size: int, pq_read_bs: int = 64, timeout: float = 360):
+    def __init__(
+        self,
+        path: Path,
+        batch_size: int,
+        timeout: float,
+        pq_read_bs: int = 64,
+    ):
         self._logger = get_logger()
         self._path = path
         self._batch_size = batch_size
@@ -115,8 +122,6 @@ class ParquetDataset(IterableDataset):
 
             scanner = dataset.scanner(columns=required_columns, batch_size=self._pq_read_bs)
 
-            self._logger.info(f"step {self._step_count} scanner: {scanner},sample_count: {sample_count}")
-
             for batch in scanner.to_batches():
                 # Check if both required columns exist in this batch
                 if all(col in batch.column_names for col in required_columns):
@@ -153,6 +158,6 @@ def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig) -> DataL
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = ParquetDataset(Path(data_config.path), data_config.batch_size)
+        train_dataset = ParquetDataset(Path(data_config.path), data_config.batch_size, data_config.timeout)
 
     return DataLoader(train_dataset, batch_size=batch_size, num_workers=data_config.num_workers)

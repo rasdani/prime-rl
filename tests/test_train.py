@@ -26,5 +26,10 @@ def test_train_with_rollout_file(fake_rollout_files_dir):
     """
     this test will create a fake rollout file and then train with it
     """
-    path = fake_rollout_files_dir(0, 10)
-    _test_torchrun(num_gpus=1, config="debug.toml", extra_args=["--data.path", str(path), "--no-data.fake"])
+    n_steps = 5
+    path = fake_rollout_files_dir(steps=list(range(n_steps + 1)), num_files=8, batch_size=8)  # there is more file than batch here
+    _test_torchrun(
+        num_gpus=1,
+        config="debug.toml",
+        extra_args=["--data.path", str(path), "--no-data.fake", "--optim.batch_size", "8", "--optim.total_steps", str(n_steps - 1)],
+    )
