@@ -72,6 +72,7 @@ class Config(BaseConfig):
         assert self.optim.batch_size == self.data.batch_size, (
             "The batch size in the config must be the same as the batch size in the data config."
         )
+        return self
 
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int) -> int:
