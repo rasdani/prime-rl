@@ -8,6 +8,7 @@ import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
+
 from zeroband.models import ModelName, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
 from zeroband.training.data import DataConfig, get_dataloader
@@ -20,7 +21,7 @@ from zeroband.logger import get_logger
 from pydantic_config import BaseConfig, parse_argv
 from jaxtyping import Float, Int
 
-from zeroband.training.world_info import get_world_info
+from zeroband.training.world_info import WorldInfo, get_world_info
 
 
 class AdamConfig(BaseConfig):
@@ -65,6 +66,8 @@ class Config(BaseConfig):
     optim: OptimConfig = OptimConfig()
     train: TrainConfig
 
+    gpus_ids: list[int] | None = None
+
     @model_validator(mode="after")
     def check_batch_size(self):
         if self.data.batch_size is None:
@@ -75,7 +78,7 @@ class Config(BaseConfig):
         return self
 
 
-def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int) -> int:
+def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
     assert batch_size % world_info.local_world_size == 0
     batch_size = batch_size // world_info.local_world_size
 
@@ -100,10 +103,38 @@ def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
     fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
 
 
+def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> int:
+    """handle using a subset of GPUs. Should work like the CUDA_VISIBLE_DEVICES env var.
+    The reason we use this is because in the rl launcher, torch is initialized before the env var is set, so we cannot use the CUDA_VISIBLE_DEVICES env var.
+    """
+    if gpus_ids is None:
+        return world_info.local_rank
+
+    if world_info.local_rank >= len(gpus_ids):
+        raise ValueError(f"Local rank {world_info.local_rank} is greater than the number of available GPUs ({len(gpus_ids)})")
+
+    return gpus_ids[world_info.local_rank]
+
+
 def train(config: Config):
+    logger = get_logger()
+    world_info = get_world_info()
+
+    logger.info(f"start training on {world_info.world_size}")
+
+    # Allow eager fallback during production so that that the training runs dont die
+    # However, in development, we want to know that we broke torch compile
+    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
+    torch.set_float32_matmul_precision("high")
+    torch.manual_seed(42)
+
+    torch.cuda.set_device(get_device_placement(config.gpus_ids, world_info))
+
     # batch_size is the total batch size for all GPUs
 
-    gradient_accumulation_steps = get_gradient_accumulation_steps(config.optim.batch_size, config.train.micro_bs, config.data.num_workers)
+    gradient_accumulation_steps = get_gradient_accumulation_steps(
+        config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
+    )
 
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 
@@ -200,16 +231,4 @@ def train(config: Config):
 
 
 if __name__ == "__main__":
-    # Allow eager fallback during production so that that the training runs dont die
-    # However, in development, we want to know that we broke torch compile
-    torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
-    torch.set_float32_matmul_precision("high")
-    torch.manual_seed(42)
-
-    config = Config(**parse_argv())  # type: ignore
-    world_info = get_world_info()
-    logger = get_logger()
-
-    torch.cuda.set_device(world_info.local_rank)
-
-    train(config)
+    train(Config(**parse_argv()))

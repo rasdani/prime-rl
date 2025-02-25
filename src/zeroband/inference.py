@@ -5,6 +5,7 @@ from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
 import vllm
 
+from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
 
 from datasets import load_dataset
@@ -103,6 +104,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
     prompts = ["Write me a novel" for _ in range(5)]
 
     llm = LLM(model=name_to_hf_model[config.name_model])
+    logger = get_logger("INFERENCE")
     # tokenizer = llm.get_tokenizer()
 
     sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
@@ -125,7 +127,9 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         # Get tokenized inputs
         prompts = fake_chat_template(messages)
 
-        generated_tokens = llm.generate(prompts, sampling_params)
+        generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
+
+        logger.info(f"Generated {len(prompts)} prompts")
 
         table = get_parquet_table(generated_tokens, step)
 
