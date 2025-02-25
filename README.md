@@ -58,8 +58,20 @@ inference
 uv run python src/zeroband/inference.py @ configs/inference/debug.toml
 ```
 
+## Larger run
 
-...
+For now you need to generate fake rollout data for testing. 
+
+```bash
+uv run python generate_fake_rollout.py @ configs/training/150M/A40.toml --data.path data/fake_rollout --optim.total_steps 1000
+```
+
+and then do the training on it
+
+```bash
+uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/150M/A40.toml --data.path data/fake_rollout 
+```
+
 
 ## Checkpoints management
 

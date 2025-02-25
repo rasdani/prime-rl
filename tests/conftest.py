@@ -35,6 +35,8 @@ def _create_fake_rollout_parquet_file(path: Path, steps: list[int], num_files: i
     for s in steps:
         step_path = path / f"step_{s}"
 
+        print(f"Creating files for step {s} with batch size {batch_size} and seq len {seq_len}")
+
         for i in range(num_files):
             os.makedirs(step_path, exist_ok=True)
             _create_one_pa_file(step_path / f"{i}.parquet", batch_size, seq_len)
