@@ -12,6 +12,19 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
+class SamplingParamConfig(BaseConfig):
+    temperature: float = 0.7
+    top_p: float = 0.95
+    top_k: int = -1
+    use_beam_search: bool = False
+    stop: str | list[str] | None = None
+    ignore_eos: bool = False
+    max_tokens: int = 512
+    presence_penalty: float = 0.1
+    frequency_penalty: float = 0.1
+    logprobs: int | None = None
+
+
 class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/test-vcu"
@@ -19,6 +32,7 @@ class Config(BaseConfig):
     sample_per_file: int = 1024
     max_samples: int | None = None
     output_path: str = "outputs"
+    sampling_params: SamplingParamConfig = SamplingParamConfig()
 
     @model_validator(mode="after")
     def validate_bs_and_sample_per_file(self):
