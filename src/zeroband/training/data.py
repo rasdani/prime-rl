@@ -66,6 +66,34 @@ def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list
     return files
 
 
+def _should_skip_index(index: int, step_count: int, world_size: int, rank: int, num_workers: int, workers_id: int) -> bool:
+    """
+    This function is used to skip the index if it is not the responsibility of the current worker.
+    It take into account the number of workers as well as rank.
+
+    Its equivalent to checking if index is in samples[rank::world_size][workers_id::num_workers]
+
+    Returns:
+        True if the index should be skipped
+        False if the index should be processed
+
+    PS: would love to remove this function and use samples[rank::world_size][workers_id::num_workers] but not sure how it would work across pq dataset
+    """
+    # First, check if the index belongs to this rank (distributed across world_size)
+    if (index % world_size) != rank:
+        return True
+
+    # Next, compute the position within the rank's subset
+    rank_position = index // world_size
+
+    # Check if this position belongs to this worker (distributed across num_workers)
+    if (rank_position % num_workers) != workers_id:
+        return True
+
+    # If we passed both checks, this index should be processed by this worker
+    return False
+
+
 class ParquetDataset(IterableDataset):
     """
     This call is a wrapper around parquet dataset.
@@ -94,6 +122,8 @@ class ParquetDataset(IterableDataset):
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        num_workers = worker_info.num_workers if worker_info is not None else 1
 
         assert self._batch_size % (self._world_info.world_size * worker_info.num_workers) == 0, (
             "Batch size must be divisible by the number of workers time the world size"
@@ -101,6 +131,8 @@ class ParquetDataset(IterableDataset):
         # this assert should never be triggered because we check for it in the top config level. Keep it here for sanity
 
         target_sample_count_per_batch = self._batch_size // (self._world_info.world_size * worker_info.num_workers)
+
+        self._logger.info(f"num_workers: {num_workers}, target_sample_count_per_batch: {target_sample_count_per_batch}")
 
         while True:
             self._step_count += 1
@@ -128,20 +160,21 @@ class ParquetDataset(IterableDataset):
                     output_tokens = batch["output_tokens"]
                     advantages = batch["advantages"]
                     for i, (token, advantage) in enumerate(zip(output_tokens, advantages)):
-                        try:
-                            ids = torch.tensor(token.as_py())
-                            adv = torch.tensor(data=[advantage.as_py()] * len(ids))
-                            data = {"input_ids": ids, "advantages": adv}
-                        except Exception as e:
-                            self._logger.warn(f"Error processing row {i} sample {sample_count}: {str(e)}")
-                            data = None
+                        if not _should_skip_index(i, self._step_count, self._world_info.world_size, worker_id, num_workers, worker_id):
+                            try:
+                                ids = torch.tensor(token.as_py())
+                                adv = torch.tensor(data=[advantage.as_py()] * len(ids))
+                                data = {"input_ids": ids, "advantages": adv}
+                            except Exception as e:
+                                self._logger.warn(f"Error processing row {i} sample {sample_count}: {str(e)}")
+                                data = None
 
-                        if data is not None:
-                            yield data
-                            sample_count += 1
+                            if data is not None:
+                                yield data
+                                sample_count += 1
 
-                        if sample_count >= target_sample_count_per_batch:
-                            break
+                            if sample_count >= target_sample_count_per_batch:
+                                break
 
                 if sample_count >= target_sample_count_per_batch:
                     # need to break out of a second time because of the nested for loop
