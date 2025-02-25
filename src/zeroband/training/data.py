@@ -139,7 +139,7 @@ class ParquetDataset(IterableDataset):
 
             sample_count = 0
 
-            self._logger.info(f"data: Processing step {self._step_count}")
+            self._logger.debug(f"data: Processing step {self._step_count}")
 
             files = _get_all_files_for_step(self._step_count, self._path, self._timeout)
 
