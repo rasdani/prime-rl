@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
@@ -10,7 +11,7 @@ import wandb
 
 
 from zeroband.models import ModelName, get_model_and_tokenizer
-from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state
+from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
@@ -52,6 +53,8 @@ class CkptConfig(BaseConfig):
     path: str | None = None
     interval: int | None = None
     resume: str | None = None
+
+    rollout_path: str | None = None  # if rollout path is set we saved at each step
 
 
 class Config(BaseConfig):
@@ -223,6 +226,10 @@ def train(config: Config):
 
         if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
+
+        if config.ckpt.rollout_path is not None:
+            path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
+            save_ckpt_for_rollout(model, path)
 
         if training_progress.step > config.optim.total_steps:
             break
