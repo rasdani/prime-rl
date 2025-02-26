@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import model_validator
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
 
