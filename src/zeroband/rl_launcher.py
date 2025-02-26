@@ -85,35 +85,6 @@ def train_inference(config: InferenceConfig, gpus_ids: list[int]) -> list[mp.Pro
     return [process]
 
 
-def main(config: Config):
-    gpus_ids = list(range(config.n_gpus))
-    cutoff = int(config.n_gpus * config.ratio)
-
-    train_gpus_ids = gpus_ids[cutoff:]
-    inference_gpus_ids = gpus_ids[:cutoff]
-
-    logger.info(f"start rl training with {len(train_gpus_ids)} GPUs, {len(inference_gpus_ids)}. Total: {len(gpus_ids)}")
-    logger.info(f"train_gpus_ids: {train_gpus_ids}")
-    logger.info(f"inference_gpus_ids: {inference_gpus_ids}")
-
-    mp.set_start_method("spawn", force=True)
-
-    train_processes = train_torchrun(
-        config.train, rdzv_address=config.torchrun_rdzv_address, rdzv_port=config.torchrun_rdzv_port, gpus_ids=train_gpus_ids
-    )
-    inference_process = train_inference(config.inference, gpus_ids=inference_gpus_ids)
-
-    processes.extend(train_processes)
-    processes.extend(inference_process)
-
-    try:
-        for p in processes:
-            p.join()
-    except Exception as e:
-        logger.info(f"Error in main process: {e}")
-        # The cleanup will happen via atexit
-
-
 def cleanup_subprocesses():
     """Kill all registered multiprocessing processes"""
     for process in processes:
@@ -141,6 +112,35 @@ def signal_handler(sig, frame):
     logger.info(f"Received signal {sig}, cleaning up...")
     cleanup_subprocesses()
     sys.exit(0)
+
+
+def main(config: Config):
+    gpus_ids = list(range(config.n_gpus))
+    cutoff = int(config.n_gpus * config.ratio)
+
+    train_gpus_ids = gpus_ids[cutoff:]
+    inference_gpus_ids = gpus_ids[:cutoff]
+
+    logger.info(f"start rl training with {len(train_gpus_ids)} GPUs, {len(inference_gpus_ids)}. Total: {len(gpus_ids)}")
+    logger.info(f"train_gpus_ids: {train_gpus_ids}")
+    logger.info(f"inference_gpus_ids: {inference_gpus_ids}")
+
+    mp.set_start_method("spawn", force=True)
+
+    train_processes = train_torchrun(
+        config.train, rdzv_address=config.torchrun_rdzv_address, rdzv_port=config.torchrun_rdzv_port, gpus_ids=train_gpus_ids
+    )
+    inference_process = train_inference(config.inference, gpus_ids=inference_gpus_ids)
+
+    processes.extend(train_processes)
+    processes.extend(inference_process)
+
+    try:
+        for p in processes:
+            p.join()
+    except Exception as e:
+        logger.info(f"Error in main process: {e}")
+        # The cleanup will happen via atexit
 
 
 if __name__ == "__main__":
