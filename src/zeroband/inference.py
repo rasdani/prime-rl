@@ -20,6 +20,7 @@ class Config(BaseConfig):
     sample_per_file: int = 1024
     max_samples: int | None = None
     output_path: str = "outputs"
+    tp: int = 1
 
     @model_validator(mode="after")
     def validate_bs_and_sample_per_file(self):
@@ -103,7 +104,7 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
 def main(config: Config):  # -> list[dict[str, Any]]:
     prompts = ["Write me a novel" for _ in range(5)]
 
-    llm = LLM(model=name_to_hf_model[config.name_model])
+    llm = LLM(model=name_to_hf_model[config.name_model], tensor_parallel_size=config.tp)
     logger = get_logger("INFERENCE")
     # tokenizer = llm.get_tokenizer()
 

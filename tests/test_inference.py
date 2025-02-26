@@ -17,8 +17,9 @@ def _test_torchrun(config, extra_args=[]):
         pytest.fail(f"Process {result} failed {result}")
 
 
-def test_inference(tmp_path):
-    _test_torchrun(config="inference/debug.toml", extra_args=["--output_path", str(tmp_path)])
+@pytest.mark.parametrize("tp", [1, 2])
+def test_inference(tmp_path, tp):
+    _test_torchrun(config="inference/debug.toml", extra_args=["--output_path", str(tmp_path), "--tp", str(tp)])
 
     assert tmp_path.joinpath("step_0").exists()
 
