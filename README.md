@@ -72,6 +72,19 @@ and then do the training on it
 uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/150M/A40.toml --data.path data/fake_rollout 
 ```
 
+## RL launcher
+
+rl launcher is a script that allow to start training and inference at the same time and assign GPUs to each process.
+
+Under the hood its just start script a bit like torchrun do.
+
+```bash
+uv run src/zeroband/rl_launcher.py --n_gpus 2  --train @ configs/training/debug.toml --train.optim.total_steps 10000  --inference @ configs/inference/debug.toml --inference.max_samples 10000
+```
+
+You can pass any config that you would pass for training via `--train.<config_name>` and for inference via `--inference.<config_name>`.
+
+In the future this launcher will make sure that both training and inference configs are compatible with each other. For now there is no specific config validation logic.
 
 ## Checkpoints management
 
