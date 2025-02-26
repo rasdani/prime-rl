@@ -14,7 +14,7 @@ def _test_torchrun(config, extra_args=[]):
     process = subprocess.Popen(cmd)
     result = process.wait()
     if result != 0:
-        pytest.fail(f"Process {result} failed {result}")
+        pytest.fail(f"Process  failed {result}")
 
 
 @pytest.mark.parametrize("tp", [1, 2])
