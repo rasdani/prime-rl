@@ -4,6 +4,7 @@ import signal
 import sys
 
 from pydantic_config import parse_argv, BaseConfig
+import torch
 from zeroband.train import Config as TrainConfig
 from zeroband.inference import Config as InferenceConfig
 from zeroband.inference import main as inference
@@ -19,7 +20,7 @@ class Config(BaseConfig):
     train: TrainConfig
     inference: InferenceConfig
 
-    n_gpus: int
+    n_gpus: int | None = None
     ratio: float = 0.5  # for now we have half train and half inference
 
     torchrun_rdzv_address: str = "localhost"
@@ -122,6 +123,9 @@ def signal_handler(sig, frame):
 
 
 def main(config: Config):
+    if config.n_gpus is None:
+        config.n_gpus = torch.cuda.device_count()
+
     gpus_ids = list(range(config.n_gpus))
     cutoff = int(config.n_gpus * config.ratio)
 
