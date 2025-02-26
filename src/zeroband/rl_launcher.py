@@ -77,8 +77,13 @@ def train_torchrun(config: TrainConfig, rdzv_address: str, rdzv_port: int, gpus_
     return processes
 
 
-def train_inference(config: InferenceConfig, gpus_ids: list[int]) -> list[mp.Process]:
+def inference_run(config: InferenceConfig, gpus_ids: list[int]) -> list[mp.Process]:
+    """
+    This function is used to run inference by creating a sub process.
+    """
     envs = {"CUDA_VISIBLE_DEVICES": _cuda_available_devices(gpus_ids)}
+
+    config.tp = len(gpus_ids)
 
     fn_env = EnvWrapper(inference, envs)
     process = mp.Process(target=fn_env, args=(config,))
@@ -132,7 +137,7 @@ def main(config: Config):
     train_processes = train_torchrun(
         config.train, rdzv_address=config.torchrun_rdzv_address, rdzv_port=config.torchrun_rdzv_port, gpus_ids=train_gpus_ids
     )
-    inference_process = train_inference(config.inference, gpus_ids=inference_gpus_ids)
+    inference_process = inference_run(config.inference, gpus_ids=inference_gpus_ids)
 
     processes.extend(train_processes)
     processes.extend(inference_process)
