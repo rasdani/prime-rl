@@ -66,6 +66,8 @@ def train_torchrun(config: TrainConfig, rdzv_address: str, rdzv_port: int, gpus_
         envs["MASTER_PORT"] = str(rdzv_port)
         envs["CUDA_VISIBLE_DEVICES"] = _cuda_available_devices(gpus_ids)
         envs["RANK"] = str(rank)
+        envs["LOCAL_RANK"] = str(rank)
+        envs["LOCAL_WORLD_SIZE"] = str(nproc_per_node)
         envs["WORLD_SIZE"] = str(nproc_per_node)
         fn_env = EnvWrapper(train, envs)
         p = mp.Process(target=fn_env, args=(config,))
