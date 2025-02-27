@@ -1,4 +1,5 @@
 total_steps = 1000
+batch_size = 64
 
 
 [train]
@@ -6,8 +7,8 @@ name_model = "debugmodel"
 wandb = false
 
 [train.data]
-fake = true
-timeout = 1
+fake = false
+timeout = 1000000000000000000000000
 
 [train.train]
 micro_bs = 8
@@ -23,4 +24,3 @@ max_samples = 100000
 batch_size = 8
 sample_per_file = 32
 dataset = "justus27/test-vcu"
-

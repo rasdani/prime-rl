@@ -27,6 +27,7 @@ class Config(BaseConfig):
     output_path: str = "outputs"
     tp: int = 1
     total_step: int | None = None
+    step_batch_size: int | None = None  # will be use to create stable file
 
     rollout_path: str | None = None
 
@@ -147,6 +148,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
     max_samples = config.max_samples or len(dataset)
 
     step = 0
+    total_samples = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         if config.rollout_path is not None:
@@ -181,10 +183,17 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
         table = get_parquet_table(generated_tokens, step)
 
-        step_path = f"{config.output_path}/step_{step}"
+        step_path = Path(config.output_path) / f"step_{step}"
         os.makedirs(step_path, exist_ok=True)
 
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
+        total_samples += len(prompts)
+
+        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+            logger.info(f"Reached step batch size {config.step_batch_size}. Writing stable file")
+            stable_file = step_path / "stable"
+            with open(stable_file, "w"):
+                pass
 
         if config.total_step is not None:
             if step >= config.total_step:

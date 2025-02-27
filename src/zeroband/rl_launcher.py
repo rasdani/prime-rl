@@ -34,6 +34,8 @@ class Config(BaseConfig):
 
     rollout_data: str  # going to be use by inference to save file and training to load
 
+    batch_size: int | None = None  # going to be use by inference to save file and training to load
+
     @model_validator(mode="after")
     def validate_ckpt_path(self):
         assert self.train.ckpt.rollout_path is None, "train.ckpt.rollout_path must be None when ckpt_path is set"
@@ -55,6 +57,14 @@ class Config(BaseConfig):
         if self.total_steps is not None:
             self.train.optim.total_steps = self.total_steps
             self.inference.total_step = self.total_steps
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_batch_size(self):
+        if self.batch_size is not None:
+            self.inference.step_batch_size = self.batch_size
+            self.train.optim.batch_size = self.batch_size
 
         return self
 
