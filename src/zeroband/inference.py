@@ -1,6 +1,6 @@
 import os
+from pathlib import Path
 import uuid
-from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
@@ -21,23 +21,12 @@ class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/test-vcu"
     batch_size: int = 32
-    sample_per_file: int = 1024
     max_samples: int | None = None
     output_path: str = "outputs"
     tp: int = 1
-
-    ckpt_path: str | None = None
-
-    @model_validator(mode="after")
-    def validate_bs_and_sample_per_file(self):
-        if self.sample_per_file % self.batch_size != 0:
-            raise ValueError("sample_per_file must be divisible by batch_size")
-        if self.max_samples is not None:
-            if self.max_samples % self.batch_size != 0:
-                raise ValueError("max_samples must be divisible by batch_size")
-            if self.max_samples < self.sample_per_file:
-                raise ValueError("max_samples must be greater than sample_per_file")
-        return self
+    total_step: int | None = None
+    step_batch_size: int | None = None  # will be use to create stable file
+    rollout_path: str | None = None
 
 
 def fake_chat_template(messages):
@@ -137,7 +126,6 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
     llm = LLM(model=name_to_hf_model[config.name_model], tensor_parallel_size=config.tp)
     logger = get_logger("INFERENCE")
-    # tokenizer = llm.get_tokenizer()
 
     if config.ckpt_path is not None:
         logger.info(f"Reloading model weights from {config.ckpt_path}")
@@ -145,15 +133,31 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
     sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
 
-    # Load dataset
     dataset = load_dataset(config.dataset, split="train")
 
     max_samples = config.max_samples or len(dataset)
 
-    step = 0  # step will change once we have the update model api
+    step = 0
+    total_samples = 0
 
-    # Process batches
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
+        if config.rollout_path is not None:
+            last_step = list(Path(config.rollout_path).glob("step_*"))
+            if len(last_step) > 0:
+                last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
+                maybe_new_step = int(last_step.stem.split("_")[-1])
+
+                if step < maybe_new_step:
+                    stable_file = last_step / "stable"
+
+                    if stable_file.exists():
+                        logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
+                        llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
+                        step = maybe_new_step
+                        logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
+                    else:
+                        logger.info(f"No stable file found at {config.rollout_path} step {maybe_new_step}")
+
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
 
@@ -165,14 +169,28 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
 
-        logger.info(f"Generated {len(prompts)} prompts")
+        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+            logger.info(f"Generated {total_samples} total samples")
 
         table = get_parquet_table(generated_tokens, step)
 
-        step_path = f"{config.output_path}/step_{step}"
+        step_path = Path(config.output_path) / f"step_{step}"
         os.makedirs(step_path, exist_ok=True)
 
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
+        total_samples += len(prompts)
+        logger.info(f"Generated {total_samples} total samples")
+
+        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+            # logger.info(f"Reached step batch size {config.step_batch_size}. Writing stable file")
+            stable_file = step_path / "stable"
+            with open(stable_file, "w"):
+                pass
+
+        if config.total_step is not None:
+            if step >= config.total_step:
+                logger.info(f"Reached total step {config.total_step}, stopping inference")
+                break
 
 
 if __name__ == "__main__":

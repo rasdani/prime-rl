@@ -2,7 +2,9 @@ import atexit
 import os
 import signal
 import sys
+import time
 
+from pydantic import model_validator
 from pydantic_config import parse_argv, BaseConfig
 import torch
 from zeroband.train import Config as TrainConfig
@@ -25,6 +27,47 @@ class Config(BaseConfig):
 
     torchrun_rdzv_address: str = "localhost"
     torchrun_rdzv_port: int = 29500
+
+    total_steps: int | None = None
+
+    rollout_path: str  # rollout_path is define at the top and is inherited by train and inference via the model_validator above
+
+    rollout_data: str  # going to be use by inference to save file and training to load
+
+    batch_size: int | None = None  # going to be use by inference to save file and training to load
+
+    @model_validator(mode="after")
+    def validate_ckpt_path(self):
+        assert self.train.ckpt.rollout_path is None, "train.ckpt.rollout_path must be None when ckpt_path is set"
+        assert self.inference.rollout_path is None, "inference.rollout_path must be None when ckpt_path is set"
+
+        self.train.ckpt.rollout_path = self.rollout_path
+        self.inference.rollout_path = self.rollout_path
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_rollout_data(self):
+        self.train.data.path = self.rollout_data
+        self.inference.output_path = self.rollout_data
+        return self
+
+    @model_validator(mode="after")
+    def total_steps_check(self):
+        if self.total_steps is not None:
+            self.train.optim.total_steps = self.total_steps
+            self.inference.total_step = self.total_steps
+
+        return self
+
+    @model_validator(mode="after")
+    def validate_batch_size(self):
+        if self.batch_size is not None:
+            self.inference.step_batch_size = self.batch_size
+            self.train.optim.batch_size = self.batch_size
+            self.train.data.batch_size = self.batch_size
+
+        return self
 
 
 class EnvWrapper:
@@ -129,8 +172,8 @@ def main(config: Config):
     gpus_ids = list(range(config.n_gpus))
     cutoff = int(config.n_gpus * config.ratio)
 
-    train_gpus_ids = gpus_ids[cutoff:]
-    inference_gpus_ids = gpus_ids[:cutoff]
+    train_gpus_ids = gpus_ids[:cutoff]
+    inference_gpus_ids = gpus_ids[cutoff:]
 
     logger.info(f"start rl training with {len(train_gpus_ids)} GPUs, {len(inference_gpus_ids)}. Total: {len(gpus_ids)}")
     logger.info(f"train_gpus_ids: {train_gpus_ids}")
@@ -147,11 +190,18 @@ def main(config: Config):
     processes.extend(inference_process)
 
     try:
-        for p in processes:
-            p.join()
+        while any(p.is_alive() for p in processes):
+            for p in processes:
+                if not p.is_alive() and p.exitcode != 0:
+                    logger.info(f"Process {p.pid} died with exit code {p.exitcode}, terminating all processes")
+                    cleanup_subprocesses()
+                    sys.exit(1)
+            # Sleep to avoid high CPU usage
+            time.sleep(1)
     except Exception as e:
         logger.info(f"Error in main process: {e}")
-        # The cleanup will happen via atexit
+        cleanup_subprocesses()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -105,3 +105,7 @@ def save_ckpt_for_rollout(model: torch.nn.Module, path: str | Path):
     # Only save on rank 0
     if torch.distributed.get_rank() == 0:
         torch.save(state, path_file)
+
+        stable_file = path / "stable"
+        with open(stable_file, "w"):
+            pass
