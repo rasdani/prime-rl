@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
-import time
 import uuid
-from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
@@ -23,25 +21,12 @@ class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/test-vcu"
     batch_size: int = 32
-    sample_per_file: int = 1024
     max_samples: int | None = None
     output_path: str = "outputs"
     tp: int = 1
     total_step: int | None = None
     step_batch_size: int | None = None  # will be use to create stable file
-
     rollout_path: str | None = None
-
-    @model_validator(mode="after")
-    def validate_bs_and_sample_per_file(self):
-        if self.sample_per_file % self.batch_size != 0:
-            raise ValueError("sample_per_file must be divisible by batch_size")
-        if self.max_samples is not None:
-            if self.max_samples % self.batch_size != 0:
-                raise ValueError("max_samples must be divisible by batch_size")
-            if self.max_samples < self.sample_per_file:
-                raise ValueError("max_samples must be greater than sample_per_file")
-        return self
 
 
 def fake_chat_template(messages):
@@ -193,7 +178,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         logger.info(f"Generated {total_samples} total samples")
 
         if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
-            logger.info(f"Reached step batch size {config.step_batch_size}. Writing stable file")
+            # logger.info(f"Reached step batch size {config.step_batch_size}. Writing stable file")
             stable_file = step_path / "stable"
             with open(stable_file, "w"):
                 pass
@@ -202,8 +187,6 @@ def main(config: Config):  # -> list[dict[str, Any]]:
             if step >= config.total_step:
                 logger.info(f"Reached total step {config.total_step}, stopping inference")
                 break
-
-        time.sleep(5)
 
 
 if __name__ == "__main__":

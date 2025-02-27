@@ -65,6 +65,7 @@ class Config(BaseConfig):
         if self.batch_size is not None:
             self.inference.step_batch_size = self.batch_size
             self.train.optim.batch_size = self.batch_size
+            self.train.data.batch_size = self.batch_size
 
         return self
 
