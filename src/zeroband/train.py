@@ -1,12 +1,17 @@
 import os
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import model_validator
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
+
+try:
+    from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
+except ImportError:
+    from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy # type: ignore
 
 
 from zeroband.models import ModelName, get_model_and_tokenizer
@@ -115,6 +120,41 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
     return gpus_ids[world_info.local_rank]
 
+
+def save_model(model: torch.nn.Module, tokenizer, path: str, world_info: WorldInfo, first_time: bool = False):
+    from torch.distributed.checkpoint.state_dict import  get_model_state_dict, StateDictOptions
+
+    # Check on rank 0 if the model is already ready. Wait until it isn't (it's been loaded by inference)
+    path_p = Path(path)
+    if world_info.rank == 0 and first_time:
+        ready_file = path_p / "ready"
+        while os.path.exists(ready_file):
+            get_logger().info(f"Waiting for model weights to be consumed by inference at {path}")
+            time.sleep(3)
+        get_logger().info("Previous weights loaded by inference, saving new weights.")
+
+    dist.barrier()
+    
+    # Save the model (all ranks gather onto rank 0)
+    state_dict = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
+    model.save_pretrained(path, is_main_process=(world_info.rank == 0), state_dict=state_dict)
+    tokenizer.save_pretrained(path)
+
+    # Replace FSDPLlamaForCausalLM in the config.json with LlamaForCausalLM. It loads the same.
+    if world_info.rank == 0:
+        config_path = path_p / "config.json"
+        bak = config_path.with_suffix(".json.bak")
+        os.rename(config_path, bak)
+        with open(bak, "r") as f:
+            config = f.read()
+            config = config.replace("FSDPLlamaForCausalLM", "LlamaForCausalLM")
+        with open(config_path, "w") as f:
+            f.write(config)
+
+    # Mark the folder as ready again by touching a file
+    if world_info.rank == 0:
+        (path_p / "ready").touch()
+        get_logger().info(f"Model saved to {path}")
 
 def train(config: Config):
     logger = get_logger()
@@ -225,6 +265,10 @@ def train(config: Config):
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
         if training_progress.step > config.optim.total_steps:
+            first_time = True
+            while True:
+                save_model(model, tokenizer, "model_dir", world_info, first_time=True)
+                first_time = False
             break
 
     logger.info("Training finished, exiting ...")

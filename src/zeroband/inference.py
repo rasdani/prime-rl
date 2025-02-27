@@ -1,16 +1,30 @@
 import os
+import time
+from pathlib import Path
+from typing import Iterable, Union
 import uuid
 from pydantic import model_validator
-from vllm import LLM, SamplingParams
+
+os.environ["VLLM_CONFIGURE_LOGGING"] = "0"
+
+from vllm import LLM, RequestOutput, SamplingParams
+from vllm.distributed.parallel_state import (
+    destroy_model_parallel,
+    destroy_distributed_environment,
+)
+
 from pydantic_config import BaseConfig, parse_argv
-import vllm
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
 
-from datasets import load_dataset
+from datasets import load_dataset, DatasetDict, Dataset, IterableDatasetDict, IterableDataset
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+import torch
+
+DatasetType = Union[DatasetDict, Dataset, IterableDatasetDict, IterableDataset]
 
 
 class Config(BaseConfig):
@@ -60,7 +74,7 @@ pa_schema = pa.schema(
 )
 
 
-def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> pa.Table:
+def get_parquet_table(generated_tokens: list[RequestOutput], step: int) -> pa.Table:
     # Initialize lists for each column
     input_tokens_list = []
     output_tokens_list = []
@@ -101,21 +115,12 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
     return pa.Table.from_arrays(arrays, schema=pa_schema)
 
 
-def main(config: Config):  # -> list[dict[str, Any]]:
-    prompts = ["Write me a novel" for _ in range(5)]
-
-    llm = LLM(model=name_to_hf_model[config.name_model], tensor_parallel_size=config.tp)
-    logger = get_logger("INFERENCE")
-    # tokenizer = llm.get_tokenizer()
-
-    sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
-
-    # Load dataset
-    dataset = load_dataset(config.dataset, split="train")
+def rollout(llm: LLM, prompts: list[str], sampling_params: SamplingParams, dataset: DatasetType, step: int) -> None:
+    assert isinstance(dataset, Dataset)
 
     max_samples = config.max_samples or len(dataset)
 
-    step = 0  # step will change once we have the update model api
+    logger = get_logger("INFERENCE")
 
     # Process batches
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
@@ -123,21 +128,85 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
 
         # Prepare messages
-        messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
+        messages = [
+            [
+                {"role": "user", "content": item["prompt"]},  # type: ignore
+                {"role": "assistant", "content": "<think>\n"},
+            ]
+            for item in batch
+        ]
 
         # Get tokenized inputs
         prompts = fake_chat_template(messages)
 
+        # Run the model on the inputs
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
-
         logger.info(f"Generated {len(prompts)} prompts")
+        # logger.info(f"Sample output for batch {i}: {generated_tokens[0].outputs[0].text}")
 
+        # Write the resulting tokens to disk
         table = get_parquet_table(generated_tokens, step)
-
         step_path = f"{config.output_path}/step_{step}"
         os.makedirs(step_path, exist_ok=True)
-
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
+
+
+def main(config: Config):
+    prompts = ["Write me a novel" for _ in range(5)]
+
+    sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
+
+    # Load dataset
+    dataset = load_dataset(config.dataset, split="train")
+
+    logger = get_logger("INFERENCE")
+
+    MODEL_DIR = "model_dir"
+    model_locator = name_to_hf_model[config.name_model]
+    if os.path.exists(MODEL_DIR):
+        model_locator = MODEL_DIR
+
+    for step in range(50):
+
+        # Wait for model weights to become ready.
+        if model_locator == MODEL_DIR:
+            ready_file = Path(model_locator) / "ready"
+            while not os.path.exists(ready_file):
+                logger.info(f"Waiting for model weights to become ready at {model_locator}")
+                time.sleep(3)
+            logger.info("Model weights ready!")
+
+        # Start vLLM (or in the future swap the weights)
+        llm = LLM(
+            model=model_locator,
+            disable_custom_all_reduce=True,
+            enforce_eager=True,
+            tensor_parallel_size=config.tp,
+            disable_log_stats=True,
+        )
+
+        # Signal that the it's loaded and the next weights can be written.
+        if model_locator == MODEL_DIR:
+            ready_file.unlink()
+
+        # Run the model to produce batches for training
+        rollout(llm, prompts, sampling_params, dataset, step)
+
+        # Kill vLLM
+        # NOTE: vLLM seems to have a bug. There is a zombie thread that never gets joined.
+        #       But it should be hard to notice, and fine for testing.
+        # NOTE: We should move to swapping the weights. Or doing whatever verl is doing.
+        destroy_model_parallel()
+        destroy_distributed_environment()
+        del llm.llm_engine.model_executor
+        del llm
+
+    # Once we need to free the vram for other things, do this.
+    # vLLM does this at startup to claim all the vram it can for kvcache.
+    # So just do it once at the end, or if swapping inference->training in the same process.
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
