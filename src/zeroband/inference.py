@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import time
 import uuid
 from pydantic import model_validator
 import torch
@@ -179,7 +180,8 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
 
-        logger.info(f"Generated {len(prompts)} prompts")
+        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+            logger.info(f"Generated {total_samples} total samples")
 
         table = get_parquet_table(generated_tokens, step)
 
@@ -188,6 +190,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
         total_samples += len(prompts)
+        logger.info(f"Generated {total_samples} total samples")
 
         if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
             logger.info(f"Reached step batch size {config.step_batch_size}. Writing stable file")
@@ -199,6 +202,8 @@ def main(config: Config):  # -> list[dict[str, Any]]:
             if step >= config.total_step:
                 logger.info(f"Reached total step {config.total_step}, stopping inference")
                 break
+
+        time.sleep(5)
 
 
 if __name__ == "__main__":

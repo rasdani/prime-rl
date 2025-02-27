@@ -142,6 +142,7 @@ class ParquetDataset(IterableDataset):
             self._logger.debug(f"data: Processing step {self._step_count}")
 
             files = _get_all_files_for_step(self._step_count, self._path, self._timeout)
+            self._logger.info(f"files: {len(files)}")
 
             # we are NOT splitting the files across datalaoder workers and rank like we did for intellect 1
             # This is because we cannot assume that the files would have the same number of samples each.
@@ -165,6 +166,7 @@ class ParquetDataset(IterableDataset):
 
                     for token, advantage in zip(output_tokens, advantages):
                         counter += 1
+                        self._logger.info(f"counter {counter}, j: {j}")
                         if not _should_skip_index(
                             index=counter,
                             world_size=self._world_info.world_size,

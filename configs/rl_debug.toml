@@ -9,6 +9,7 @@ wandb = false
 [train.data]
 fake = false
 timeout = 1000000000000000000000000
+num_workers = 1
 
 [train.train]
 micro_bs = 8

@@ -181,6 +181,10 @@ def train(config: Config):
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
 
+            logger.info(
+                f"HEREEEEEEEEEE grad_acc_step: {grad_acc_step}/{gradient_accumulation_steps}, step: {training_progress.step}, batch: {input_ids.shape}"
+            )
+
             policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
             ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
