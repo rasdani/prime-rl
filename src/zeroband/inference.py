@@ -184,8 +184,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
             # logger.info(f"Reached step batch size {config.step_batch_size}. Writing stable file")
             stable_file = step_path / "stable"
-            with open(stable_file, "w"):
-                pass
+            stable_file.touch()
 
         if config.total_step is not None:
             if step >= config.total_step:

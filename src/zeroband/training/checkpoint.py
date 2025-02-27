@@ -107,5 +107,4 @@ def save_ckpt_for_rollout(model: torch.nn.Module, path: str | Path):
         torch.save(state, path_file)
 
         stable_file = path / "stable"
-        with open(stable_file, "w"):
-            pass
+        stable_file.touch()
