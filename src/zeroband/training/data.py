@@ -40,7 +40,8 @@ class FakeTokenizedDataset(IterableDataset):
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
         while True:
-            len_ = self.seq_len
+            # Generate a random length between 1 and self.seq_len
+            len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
             self.step += 1
@@ -199,11 +200,44 @@ class BatchOutput(TypedDict):
     advantages: Float[torch.Tensor, "batch seq"]
 
 
-def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig) -> DataLoader[BatchOutput]:
+class PaddingColate:
+    def __init__(self, seq_len: int, pad_token_id: int) -> None:
+        self._seq_len = seq_len
+        self._pad_token_id = pad_token_id
+
+    def __call__(self, samples: list[dict[str, torch.LongTensor]]) -> BatchOutput:
+        assert samples[0].keys() == {"input_ids", "advantages"}
+
+        inputs_ids = []
+        advantages = []
+        print(len(samples))
+        print(f"len(samples)={len(samples)}")
+        for sample in samples:
+            ids = sample["input_ids"]
+            adv = sample["advantages"]
+
+            if len(ids) >= self._seq_len:
+                ids = ids[: self._seq_len]
+                adv = adv[: self._seq_len]
+            else:
+                ids = torch.cat([ids, torch.full((self._seq_len - len(ids),), fill_value=self._pad_token_id, dtype=ids.dtype)])
+                adv = torch.cat([adv, torch.zeros(self._seq_len - len(adv), dtype=adv.dtype)])
+
+            inputs_ids.append(ids)
+            advantages.append(adv)
+
+        return {
+            "input_ids": torch.stack(inputs_ids, dim=0),
+            "advantages": torch.stack(advantages, dim=0),
+        }
+
+
+def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig, pad_token_id: int) -> DataLoader[BatchOutput]:
     """Get a dataloader for the training dataset"""
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
         train_dataset = ParquetDataset(Path(data_config.path), data_config.batch_size, data_config.timeout)
 
-    return DataLoader(train_dataset, batch_size=batch_size, num_workers=data_config.num_workers)
+    collate_fn = PaddingColate(data_config.seq_length, pad_token_id)
+    return DataLoader(train_dataset, batch_size=batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn)
