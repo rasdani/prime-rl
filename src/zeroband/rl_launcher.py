@@ -153,8 +153,8 @@ def main(config: Config):
     gpus_ids = list(range(config.n_gpus))
     cutoff = int(config.n_gpus * config.ratio)
 
-    train_gpus_ids = gpus_ids[cutoff:]
-    inference_gpus_ids = gpus_ids[:cutoff]
+    train_gpus_ids = gpus_ids[:cutoff]
+    inference_gpus_ids = gpus_ids[cutoff:]
 
     logger.info(f"start rl training with {len(train_gpus_ids)} GPUs, {len(inference_gpus_ids)}. Total: {len(gpus_ids)}")
     logger.info(f"train_gpus_ids: {train_gpus_ids}")

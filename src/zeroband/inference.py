@@ -150,7 +150,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         if config.rollout_path is not None:
-            last_step = Path(config.rollout_path).glob("step_*")
+            last_step = list(Path(config.rollout_path).glob("step_*"))
             if len(last_step) > 0:
                 last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
                 maybe_new_step = int(last_step.stem.split("_")[-1])

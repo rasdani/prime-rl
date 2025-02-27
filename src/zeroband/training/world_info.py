@@ -19,7 +19,7 @@ class WorldInfo:
         self.nnodes = self.world_size // self.local_world_size
 
     def __repr__(self):
-        return f"WorldInfo(world_size={self.world_size}, rank={self.rank}, local_rank={self.local_rank}, local_world_size={self.local_world_size}, nnodes={self.nnodes}, device_placement={self.device_placement})"
+        return f"WorldInfo(world_size={self.world_size}, rank={self.rank}, local_rank={self.local_rank}, local_world_size={self.local_world_size}, nnodes={self.nnodes})"
 
     def json(self) -> dict[str, int | str]:
         return {
