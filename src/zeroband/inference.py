@@ -26,8 +26,9 @@ class Config(BaseConfig):
     max_samples: int | None = None
     output_path: str = "outputs"
     tp: int = 1
+    total_step: int | None = None
 
-    ckpt_path: str | None = None
+    rollout_path: str | None = None
 
     @model_validator(mode="after")
     def validate_bs_and_sample_per_file(self):
@@ -148,21 +149,22 @@ def main(config: Config):  # -> list[dict[str, Any]]:
     step = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
-        if config.ckpt_path is not None:
-            last_step = Path(config.ckpt_path).glob("step_*")
-            last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
-            maybe_new_step = int(last_step.stem.split("_")[-1])
+        if config.rollout_path is not None:
+            last_step = Path(config.rollout_path).glob("step_*")
+            if len(last_step) > 0:
+                last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
+                maybe_new_step = int(last_step.stem.split("_")[-1])
 
-            if step < maybe_new_step:
-                stable_file = last_step / "stable"
+                if step < maybe_new_step:
+                    stable_file = last_step / "stable"
 
-                if stable_file.exists():
-                    logger.info(f"Reloading model weights from {config.ckpt_path} step {maybe_new_step}")
-                    llm = reload_model_weights(llm, Path(config.ckpt_path) / f"step_{maybe_new_step}/model.pt")
-                    step = maybe_new_step
-                    logger.info(f"Reloaded model weights from {config.ckpt_path} step {maybe_new_step}")
-                else:
-                    logger.info(f"No stable file found at {config.ckpt_path} step {maybe_new_step}")
+                    if stable_file.exists():
+                        logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
+                        llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
+                        step = maybe_new_step
+                        logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
+                    else:
+                        logger.info(f"No stable file found at {config.rollout_path} step {maybe_new_step}")
 
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
@@ -183,6 +185,11 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         os.makedirs(step_path, exist_ok=True)
 
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
+
+        if config.total_step is not None:
+            if step >= config.total_step:
+                logger.info(f"Reached total step {config.total_step}, stopping inference")
+                break
 
 
 if __name__ == "__main__":

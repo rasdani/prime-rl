@@ -3,6 +3,7 @@ import os
 import signal
 import sys
 
+from pydantic import model_validator
 from pydantic_config import parse_argv, BaseConfig
 import torch
 from zeroband.train import Config as TrainConfig
@@ -25,6 +26,28 @@ class Config(BaseConfig):
 
     torchrun_rdzv_address: str = "localhost"
     torchrun_rdzv_port: int = 29500
+
+    total_steps: int | None = None
+
+    rollout_path: str  # rollout_path is define at the top and is inherited by train and inference via the model_validator above
+
+    @model_validator(mode="after")
+    def validate_ckpt_path(self):
+        assert self.train.ckpt.rollout_path is None, "train.ckpt.rollout_path must be None when ckpt_path is set"
+        assert self.inference.rollout_path is None, "inference.rollout_path must be None when ckpt_path is set"
+
+        self.train.ckpt.rollout_path = self.rollout_path
+        self.inference.rollout_path = self.rollout_path
+
+        return self
+
+    @model_validator(mode="after")
+    def total_steps_check(self):
+        if self.total_steps is not None:
+            self.train.optim.total_steps = self.total_steps
+            self.inference.total_step = self.total_steps
+
+        return self
 
 
 class EnvWrapper:
