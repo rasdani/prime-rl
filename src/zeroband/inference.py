@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import uuid
 from pydantic import model_validator
 import torch
@@ -137,23 +138,32 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
     llm = LLM(model=name_to_hf_model[config.name_model], tensor_parallel_size=config.tp)
     logger = get_logger("INFERENCE")
-    # tokenizer = llm.get_tokenizer()
-
-    if config.ckpt_path is not None:
-        logger.info(f"Reloading model weights from {config.ckpt_path}")
-        llm = reload_model_weights(llm, config.ckpt_path)
 
     sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
 
-    # Load dataset
     dataset = load_dataset(config.dataset, split="train")
 
     max_samples = config.max_samples or len(dataset)
 
-    step = 0  # step will change once we have the update model api
+    step = 0
 
-    # Process batches
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
+        if config.ckpt_path is not None:
+            last_step = Path(config.ckpt_path).glob("step_*")
+            last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
+            maybe_new_step = int(last_step.stem.split("_")[-1])
+
+            if step < maybe_new_step:
+                stable_file = last_step / "stable"
+
+                if stable_file.exists():
+                    logger.info(f"Reloading model weights from {config.ckpt_path} step {maybe_new_step}")
+                    llm = reload_model_weights(llm, Path(config.ckpt_path) / f"step_{maybe_new_step}/model.pt")
+                    step = maybe_new_step
+                    logger.info(f"Reloaded model weights from {config.ckpt_path} step {maybe_new_step}")
+                else:
+                    logger.info(f"No stable file found at {config.ckpt_path} step {maybe_new_step}")
+
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
 
