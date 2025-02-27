@@ -2,6 +2,7 @@ import atexit
 import os
 import signal
 import sys
+import time
 
 from pydantic import model_validator
 from pydantic_config import parse_argv, BaseConfig
@@ -170,11 +171,18 @@ def main(config: Config):
     processes.extend(inference_process)
 
     try:
-        for p in processes:
-            p.join()
+        while any(p.is_alive() for p in processes):
+            for p in processes:
+                if not p.is_alive() and p.exitcode != 0:
+                    logger.info(f"Process {p.pid} died with exit code {p.exitcode}, terminating all processes")
+                    cleanup_subprocesses()
+                    sys.exit(1)
+            # Sleep to avoid high CPU usage
+            time.sleep(1)
     except Exception as e:
         logger.info(f"Error in main process: {e}")
-        # The cleanup will happen via atexit
+        cleanup_subprocesses()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
