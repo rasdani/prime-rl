@@ -66,7 +66,7 @@ def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list
     return files
 
 
-def _should_skip_index(index: int, step_count: int, world_size: int, rank: int, num_workers: int, workers_id: int) -> bool:
+def _should_skip_index(index: int, world_size: int, rank: int, num_workers: int, workers_id: int) -> bool:
     """
     This function is used to skip the index if it is not the responsibility of the current worker.
     It take into account the number of workers as well as rank.
@@ -154,27 +154,40 @@ class ParquetDataset(IterableDataset):
 
             scanner = dataset.scanner(columns=required_columns, batch_size=self._pq_read_bs)
 
-            for batch in scanner.to_batches():
+            counter = 0
+
+            for j, batch in enumerate(scanner.to_batches()):
                 # Check if both required columns exist in this batch
+
                 if all(col in batch.column_names for col in required_columns):
                     output_tokens = batch["output_tokens"]
                     advantages = batch["advantages"]
-                    for i, (token, advantage) in enumerate(zip(output_tokens, advantages)):
-                        if not _should_skip_index(i, self._step_count, self._world_info.world_size, worker_id, num_workers, worker_id):
+
+                    for token, advantage in zip(output_tokens, advantages):
+                        counter += 1
+                        if not _should_skip_index(
+                            index=counter,
+                            world_size=self._world_info.world_size,
+                            rank=self._world_info.rank,
+                            num_workers=num_workers,
+                            workers_id=worker_id,
+                        ):
                             try:
                                 ids = torch.tensor(token.as_py())
                                 adv = torch.tensor(data=[advantage.as_py()] * len(ids))
                                 data = {"input_ids": ids, "advantages": adv}
                             except Exception as e:
-                                self._logger.warn(f"Error processing row {i} sample {sample_count}: {str(e)}")
+                                self._logger.warn(f"Error processing row {counter} sample {sample_count}: {str(e)}")
                                 data = None
 
                             if data is not None:
-                                yield data
                                 sample_count += 1
+                                yield data
 
                             if sample_count >= target_sample_count_per_batch:
                                 break
+                else:
+                    self._logger.warn(f"Batch {j} does not have the required columns")
 
                 if sample_count >= target_sample_count_per_batch:
                     # need to break out of a second time because of the nested for loop
