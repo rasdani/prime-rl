@@ -100,7 +100,7 @@ def save_ckpt_for_rollout(model: torch.nn.Module, path: str | Path):
 
     path_file = path / "model.pt"
 
-    state = {"model": get_model_state_dict(model, options=StateDictOptions(full_state_dict=True))}
+    state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True))
 
     # Only save on rank 0
     if torch.distributed.get_rank() == 0:

@@ -1,9 +1,13 @@
 import os
 import uuid
 from pydantic import model_validator
+import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
 import vllm
+
+# from vllm.model_executor.model_loader
+from vllm.model_executor.model_loader.loader import _process_weights_after_loading
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
@@ -21,6 +25,8 @@ class Config(BaseConfig):
     max_samples: int | None = None
     output_path: str = "outputs"
     tp: int = 1
+
+    ckpt_path: str | None = None
 
     @model_validator(mode="after")
     def validate_bs_and_sample_per_file(self):
@@ -101,12 +107,41 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
     return pa.Table.from_arrays(arrays, schema=pa_schema)
 
 
+def reload_model_weights(llm: LLM, ckpt_path: str):
+    # Access the internal model from vLLM
+    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    # Load state dict
+    state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+
+    # Create a better weight iterator that filters out empty keys and handles prefixes
+    def weights_iterator():
+        for name, tensor in state_dict.items():
+            # Skip empty keys
+            if not name:
+                continue
+            yield name, tensor
+
+    # Load weights
+    model.load_weights(weights_iterator())
+
+    # Process weights after loading (important for some models)
+    model_config = llm.llm_engine.model_config
+    device = next(model.parameters()).device
+    _process_weights_after_loading(model, model_config, device)
+
+    return llm
+
+
 def main(config: Config):  # -> list[dict[str, Any]]:
     prompts = ["Write me a novel" for _ in range(5)]
 
     llm = LLM(model=name_to_hf_model[config.name_model], tensor_parallel_size=config.tp)
     logger = get_logger("INFERENCE")
     # tokenizer = llm.get_tokenizer()
+
+    if config.ckpt_path is not None:
+        logger.info(f"Reloading model weights from {config.ckpt_path}")
+        llm = reload_model_weights(llm, config.ckpt_path)
 
     sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
 
