@@ -184,7 +184,7 @@ def train(config: Config):
             policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
             ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
-            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages) / gradient_accumulation_steps
+            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
             # loss = policy_logprobs.sum() / gradient_accumulation_steps
 
             loss.backward()
@@ -231,7 +231,7 @@ def train(config: Config):
             path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
             save_ckpt_for_rollout(model, path)
 
-        if training_progress.step > config.optim.total_steps:
+        if training_progress.step >= config.optim.total_steps:
             break
 
     logger.info("Training finished, exiting ...")

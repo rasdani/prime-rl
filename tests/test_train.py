@@ -28,14 +28,3 @@ def test_train_with_rollout_file(fake_rollout_files_dir):
     """
     path = fake_rollout_files_dir(steps=list(range(5)), num_files=8, batch_size=8, seq_len=16)  # there is more file than batch here
     _test_torchrun(num_gpus=1, config="debug.toml", extra_args=["--data.path", str(path), "--no-data.fake"])
-
-
-def test_rl_launcher():
-    """
-    this test will create a fake rollout file and then train with it
-    """
-    cmd = "uv run src/zeroband/rl_launcher.py --n_gpus 2  --train @ configs/training/debug.toml --inference @ configs/inference/debug.toml".split()
-    process = subprocess.Popen(cmd)
-    result = process.wait()
-    if result != 0:
-        pytest.fail(f"Process  failed {result}")

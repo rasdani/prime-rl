@@ -35,4 +35,5 @@ def get_model_and_tokenizer(model_name: ModelName) -> tuple[torch.nn.Module, Aut
     tokenizer = AutoTokenizer.from_pretrained(name_to_hf_tokenizer[model_name])
     config_model = config_class.from_pretrained(name_to_hf_model[model_name], attn_implementation="flex_attention")
     model = model_class.from_pretrained(pretrained_model_name_or_path=name_to_hf_model[model_name], config=config_model)
+    tokenizer.pad_token_id = tokenizer.eos_token_id
     return model, tokenizer # type: ignore

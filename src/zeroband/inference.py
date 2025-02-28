@@ -141,10 +141,6 @@ def main(config: Config):  # -> list[dict[str, Any]]:
     llm = LLM(model=name_to_hf_model[config.name_model], tensor_parallel_size=config.tp)
     logger = get_logger("INFERENCE")
 
-    if config.ckpt_path is not None:
-        logger.info(f"Reloading model weights from {config.ckpt_path}")
-        llm = reload_model_weights(llm, config.ckpt_path)
-
     sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
 
     dataset = load_dataset(config.dataset, split="train")
