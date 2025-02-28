@@ -13,20 +13,26 @@ name_to_hf_model = {
     "debugmodel": "PrimeIntellect/llama-2m-fresh",
     "150M": "PrimeIntellect/llama-150m-fresh",
     "1B": "PrimeIntellect/llama-1b-fresh",
-    "Qwen32B": "Qwen/Qwen2.5-32B",
+    "Qwen1.5B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "Qwen7B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+    "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
 }
 
 name_to_hf_tokenizer = {
     "debugmodel": "mistralai/Mistral-7B-v0.1",
     "150M": "mistralai/Mistral-7B-v0.1",
     "1B": "mistralai/Mistral-7B-v0.1",
-    "Qwen32B": "Qwen/Qwen2.5-32B",
+    "Qwen1.5B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "Qwen7B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+    "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
 }
 
 name_to_class = {
     "debugmodel": (LlamaConfig, LlamaForCausalLM),
     "150M": (LlamaConfig, LlamaForCausalLM),
     "1B": (LlamaConfig, LlamaForCausalLM),
+    "Qwen1.5B": (Qwen2Config, Qwen2ForCausalLM),
+    "Qwen7B": (Qwen2Config, Qwen2ForCausalLM),
     "Qwen32B": (Qwen2Config, Qwen2ForCausalLM),
 }
 
