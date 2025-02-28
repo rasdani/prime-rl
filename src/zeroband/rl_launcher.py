@@ -1,5 +1,6 @@
 import atexit
 import os
+import shutil
 import signal
 import sys
 import time
@@ -178,6 +179,13 @@ def main(config: Config):
     logger.info(f"start rl training with {len(train_gpus_ids)} GPUs, {len(inference_gpus_ids)}. Total: {len(gpus_ids)}")
     logger.info(f"train_gpus_ids: {train_gpus_ids}")
     logger.info(f"inference_gpus_ids: {inference_gpus_ids}")
+
+    if config.rollout_path is not None:
+        logger.info(f"Removing rollout path {config.rollout_path}")
+        shutil.rmtree(config.rollout_path, ignore_errors=True)
+    if config.rollout_data is not None:
+        logger.info(f"Removing rollout data {config.rollout_data}")
+        shutil.rmtree(config.rollout_data, ignore_errors=True)
 
     mp.set_start_method("spawn", force=True)
 

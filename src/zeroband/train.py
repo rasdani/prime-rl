@@ -231,7 +231,7 @@ def train(config: Config):
             path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
             save_ckpt_for_rollout(model, path)
 
-        if training_progress.step > config.optim.total_steps:
+        if training_progress.step >= config.optim.total_steps:
             break
 
     logger.info("Training finished, exiting ...")
