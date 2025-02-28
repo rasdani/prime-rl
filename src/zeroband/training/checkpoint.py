@@ -6,6 +6,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 
 
+from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
 
 
@@ -26,7 +27,7 @@ def _pathify(path: str | Path) -> Path:
 
 
 def save_checkpoint_fsdp_state(
-    model: torch.nn.Module,
+    model: ModelType,
     optimizers: list[torch.optim.Optimizer],
     training_progress: TrainingProgress,
     dataloader: StatefulDataLoader,
@@ -56,7 +57,7 @@ def save_checkpoint_fsdp_state(
 
 
 def load_checkpoint_fsdp_state(
-    model: torch.nn.Module,
+    model: ModelType,
     optimizers: list[torch.optim.Optimizer],
     training_progress: TrainingProgress,
     dataloader: StatefulDataLoader,
@@ -89,7 +90,7 @@ def load_checkpoint_fsdp_state(
     scheduler.load_state_dict(state["scheduler"])
 
 
-def save_ckpt_for_rollout(model: torch.nn.Module, path: str | Path):
+def save_ckpt_for_rollout(model: ModelType, path: str | Path):
     """
     Save the checkpoint for rollout as one unified checkpoint.
     """

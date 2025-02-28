@@ -10,7 +10,7 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 import wandb
 
 
-from zeroband.models import ModelName, get_model_and_tokenizer
+from zeroband.models import ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss
@@ -94,7 +94,7 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_fsdp(model: torch.nn.Module, reshard_after_forward: bool):
+def apply_fsdp(model: ModelType, reshard_after_forward: bool):
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
 
     for layer_id, transformer_block in enumerate(model.model.layers):
