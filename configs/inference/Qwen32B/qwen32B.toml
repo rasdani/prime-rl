@@ -3,10 +3,3 @@ max_samples = 32
 batch_size = 32
 tp = "all"
 dataset = "justus27/test-vcu"
-
-[sampling_params]
-temperature = 0.7
-top_p = 0.95
-max_tokens = 4096
-presence_penalty = 0.1
-frequency_penalty = 0.1
