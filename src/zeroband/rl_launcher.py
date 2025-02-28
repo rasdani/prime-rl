@@ -70,6 +70,11 @@ class Config(BaseConfig):
 
         return self
 
+    @model_validator(mode="after")
+    def validate_model_name(self):
+        self.inference.name_model = self.train.name_model
+        return self
+
 
 class EnvWrapper:
     """
