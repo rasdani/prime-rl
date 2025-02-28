@@ -8,8 +8,10 @@ from transformers import (
     LlamaForCausalLM,
 )
 
+from zeroband.models import ModelType
 
-def apply_ac_ckpt(model: torch.nn.Module, num: int):
+
+def apply_ac_ckpt(model: ModelType, num: int):
     """Apply activation checkpointing to the model.
     Apply to layers multiple of `num`.
 
@@ -67,7 +69,7 @@ def get_num_flop_per_token(num_params: int, model_config: LlamaConfig, seq_len: 
     return flop_per_token
 
 
-def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False) -> int:
+def get_num_params(model: ModelType, exclude_embedding: bool = False) -> int:
     num_params = sum(p.numel() for p in model.parameters())
     if exclude_embedding:
         num_params -= model.lm_head.weight.numel()
