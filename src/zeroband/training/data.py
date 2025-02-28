@@ -210,8 +210,6 @@ class PaddingColate:
 
         inputs_ids = []
         advantages = []
-        print(len(samples))
-        print(f"len(samples)={len(samples)}")
         for sample in samples:
             ids = sample["input_ids"]
             adv = sample["advantages"]
