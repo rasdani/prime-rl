@@ -11,7 +11,7 @@ warmup_steps = 1000
 total_steps = 8192
 
 [data]
-seq_len = 8096
+seq_length = 8192
 
 [optim.optim]
 lr = 7e-4
