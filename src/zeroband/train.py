@@ -10,7 +10,7 @@ from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 import wandb
 
 
-from zeroband.models import ModelName, get_model_and_tokenizer
+from zeroband.models import ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss
