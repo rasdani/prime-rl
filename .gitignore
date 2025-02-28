@@ -5,6 +5,7 @@ datasets/*
 output/*
 outputs/*
 data/*
+data_rollout/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

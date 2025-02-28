@@ -43,8 +43,7 @@ def _create_fake_rollout_parquet_file(path: Path, steps: list[int], num_files: i
             pq.write_table(table, f"{step_path}/{i}.parquet")
 
         stable_file = step_path / STABLE_FILE
-        with open(stable_file, "w"):
-            pass
+        stable_file.touch()
 
 
 @pytest.fixture

@@ -5,7 +5,7 @@ description = "ZeroBand is a production ready codebase for decentralized trainin
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch==2.6.0",
+    "torch",
     "numpy",
     "setuptools",
     "transformers>=4.44.2",
@@ -16,7 +16,7 @@ dependencies = [
     "zstandard",
     "pyarrow",
     "wandb",
-    "vllm",
+    "vllm>=0.7.3",
     "jaxtyping",
     "beartype"
 ]

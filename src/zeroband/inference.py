@@ -1,10 +1,15 @@
 import os
+from pathlib import Path
 import uuid
-from pydantic import model_validator
+import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
 import vllm
 
+# from vllm.model_executor.model_loader
+from vllm.model_executor.model_loader.loader import _process_weights_after_loading
+
+from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
 
 from datasets import load_dataset
@@ -29,21 +34,13 @@ class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/test-vcu"
     batch_size: int = 32
-    sample_per_file: int = 1024
     max_samples: int | None = None
     output_path: str = "outputs"
+    tp: int = 1
+    total_step: int | None = None
+    step_batch_size: int | None = None  # will be use to create stable file
+    rollout_path: str | None = None
     sampling_params: SamplingParamConfig = SamplingParamConfig()
-
-    @model_validator(mode="after")
-    def validate_bs_and_sample_per_file(self):
-        if self.sample_per_file % self.batch_size != 0:
-            raise ValueError("sample_per_file must be divisible by batch_size")
-        if self.max_samples is not None:
-            if self.max_samples % self.batch_size != 0:
-                raise ValueError("max_samples must be divisible by batch_size")
-            if self.max_samples < self.sample_per_file:
-                raise ValueError("max_samples must be greater than sample_per_file")
-        return self
 
 
 def fake_chat_template(messages):
@@ -113,23 +110,68 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
     return pa.Table.from_arrays(arrays, schema=pa_schema)
 
 
+def reload_model_weights(llm: LLM, ckpt_path: str):
+    # Access the internal model from vLLM
+    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    # Load state dict
+    state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+
+    # Create a better weight iterator that filters out empty keys and handles prefixes
+    def weights_iterator():
+        for name, tensor in state_dict.items():
+            # Skip empty keys
+            if not name:
+                continue
+            yield name, tensor
+
+    # Load weights
+    model.load_weights(weights_iterator())
+
+    # Process weights after loading (important for some models)
+    model_config = llm.llm_engine.model_config
+    device = next(model.parameters()).device
+    _process_weights_after_loading(model, model_config, device)
+
+    return llm
+
+
 def main(config: Config):  # -> list[dict[str, Any]]:
     prompts = ["Write me a novel" for _ in range(5)]
 
-    llm = LLM(model=name_to_hf_model[config.name_model])
-    # tokenizer = llm.get_tokenizer()
+    llm = LLM(model=name_to_hf_model[config.name_model], tensor_parallel_size=config.tp)
+    logger = get_logger("INFERENCE")
+
+    if config.ckpt_path is not None:
+        logger.info(f"Reloading model weights from {config.ckpt_path}")
+        llm = reload_model_weights(llm, config.ckpt_path)
 
     sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
 
-    # Load dataset
     dataset = load_dataset(config.dataset, split="train")
 
     max_samples = config.max_samples or len(dataset)
 
-    step = 0  # step will change once we have the update model api
+    step = 0
+    total_samples = 0
 
-    # Process batches
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
+        if config.rollout_path is not None:
+            last_step = list(Path(config.rollout_path).glob("step_*"))
+            if len(last_step) > 0:
+                last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
+                maybe_new_step = int(last_step.stem.split("_")[-1])
+
+                if step < maybe_new_step:
+                    stable_file = last_step / "stable"
+
+                    if stable_file.exists():
+                        logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
+                        llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
+                        step = maybe_new_step
+                        logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
+                    else:
+                        logger.info(f"No stable file found at {config.rollout_path} step {maybe_new_step}")
+
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
 
@@ -139,14 +181,29 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         # Get tokenized inputs
         prompts = fake_chat_template(messages)
 
-        generated_tokens = llm.generate(prompts, sampling_params)
+        generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
+
+        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+            logger.info(f"Generated {total_samples} total samples")
 
         table = get_parquet_table(generated_tokens, step)
 
-        step_path = f"{config.output_path}/step_{step}"
+        step_path = Path(config.output_path) / f"step_{step}"
         os.makedirs(step_path, exist_ok=True)
 
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
+        total_samples += len(prompts)
+        logger.info(f"Generated {total_samples} total samples")
+
+        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+            # logger.info(f"Reached step batch size {config.step_batch_size}. Writing stable file")
+            stable_file = step_path / "stable"
+            stable_file.touch()
+
+        if config.total_step is not None:
+            if step >= config.total_step:
+                logger.info(f"Reached total step {config.total_step}, stopping inference")
+                break
 
 
 if __name__ == "__main__":

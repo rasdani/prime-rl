@@ -11,19 +11,19 @@ class CustomFormatter(logging.Formatter):
         self.local_rank = local_rank
 
     def format(self, record):
-        log_format = "{asctime} [{levelname}] [Rank {local_rank}] {message}"
+        log_format = "{asctime} [{levelname}] [{name}] [Rank {local_rank}] {message}"
         formatter = logging.Formatter(log_format, style="{", datefmt="%H:%M:%S")
-        record.local_rank = self.local_rank  # Add this line to set the local rank in the record
+        record.local_rank = self.local_rank
         return formatter.format(record)
 
 
-def get_logger(config=None, name: str | None = None) -> logging.Logger:
-    global logger  # Add this line to modify the global logger variable
+def get_logger(name: str = "TRAIN") -> logging.Logger:
+    global logger
     if logger is not None:
         return logger
     world_info = get_world_info()
 
-    logger = logging.getLogger(name or __name__)
+    logger = logging.getLogger(name)
 
     if world_info.local_rank == 0:
         logger.setLevel(level=logging.INFO)

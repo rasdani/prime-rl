@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
+
 
 from zeroband.training.world_info import get_world_info
 
@@ -85,3 +87,24 @@ def load_checkpoint_fsdp_state(
 
     dataloader.load_state_dict(state["dataloader"])
     scheduler.load_state_dict(state["scheduler"])
+
+
+def save_ckpt_for_rollout(model: torch.nn.Module, path: str | Path):
+    """
+    Save the checkpoint for rollout as one unified checkpoint.
+    """
+    path = _pathify(path)
+
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=True)
+
+    path_file = path / "model.pt"
+
+    state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True))
+
+    # Only save on rank 0
+    if torch.distributed.get_rank() == 0:
+        torch.save(state, path_file)
+
+        stable_file = path / "stable"
+        stable_file.touch()

@@ -1,0 +1,26 @@
+total_steps = 1000
+batch_size = 64
+
+
+[train]
+name_model = "debugmodel"
+wandb = false
+
+[train.data]
+fake = false
+timeout = 1000000000000000000000000
+num_workers = 1
+
+[train.train]
+micro_bs = 8
+
+[train.optim]
+batch_size = 16
+warmup_steps = 10
+total_steps = 100000
+
+[inference]
+name_model = "debugmodel"
+max_samples = 100000
+batch_size = 8
+dataset = "justus27/test-vcu"

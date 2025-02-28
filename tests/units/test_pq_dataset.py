@@ -28,7 +28,7 @@ def test_should_skip_index(rank, workers_id):
     results = []
     for index in full_index:
         # If we should not skip this index, add it to results
-        if not _should_skip_index(index, 0, world_size, rank, num_workers, workers_id):
+        if not _should_skip_index(index, world_size, rank, num_workers, workers_id):
             results.append(index)
 
     assert results == expected_results
