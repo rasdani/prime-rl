@@ -1,5 +1,7 @@
 import os
+import psutil
 from pathlib import Path
+from typing import Literal
 import uuid
 import torch
 from vllm import LLM, SamplingParams
@@ -36,7 +38,10 @@ class Config(BaseConfig):
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
-    tp: int = 1
+    tp: int | Literal["all"] = 1
+    max_seq_len: int | None = None
+    cpu_offload_gb: float = 0.0
+    cpu_offload_percentage: float = 0.0
     total_step: int | None = None
     step_batch_size: int | None = None  # will be use to create stable file
     rollout_path: str | None = None
@@ -138,7 +143,24 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 def main(config: Config):  # -> list[dict[str, Any]]:
     prompts = ["Write me a novel" for _ in range(5)]
 
-    llm = LLM(model=name_to_hf_model[config.name_model], tensor_parallel_size=config.tp)
+    if config.tp == "all":
+        config.tp = torch.cuda.device_count()
+
+    if config.cpu_offload_gb != 0.0 and config.cpu_offload_percentage != 0.0:
+        raise ValueError("Cannot set both cpu_offload_gb and cpu_offload_percentage")
+    if config.cpu_offload_percentage != 0.0:
+        cpu_offload_gb = psutil.virtual_memory().available * config.cpu_offload_percentage
+    elif config.cpu_offload_gb != 0.0:
+        cpu_offload_gb = config.cpu_offload_gb
+    else:
+        cpu_offload_gb = 0.0
+
+    llm = LLM(
+        model=name_to_hf_model[config.name_model],
+        tensor_parallel_size=config.tp,
+        max_model_len=config.max_seq_len,
+        cpu_offload_gb=cpu_offload_gb,
+    )
     logger = get_logger("INFERENCE")
 
     sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
