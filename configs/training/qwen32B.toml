@@ -1,5 +1,5 @@
 name_model = "Qwen32B"
-project = "debug_1B_zero_band"
+project = "qwen_32_rl"
 
 [train]
 micro_bs = 32
