@@ -180,10 +180,10 @@ def train(config: Config):
             batch = next(train_dataloader_iterator)
 
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
-            advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
+            # advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
 
             policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-            ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
+            # ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
             # loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
             # loss = policy_logprobs.sum() / gradient_accumulation_steps
