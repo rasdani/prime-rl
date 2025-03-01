@@ -13,7 +13,6 @@ import wandb
 from zeroband.models import ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -23,6 +22,8 @@ from pydantic_config import BaseConfig, parse_argv
 from jaxtyping import Float, Int
 
 from zeroband.training.world_info import WorldInfo, get_world_info
+
+import torch.nn.functional as F
 
 
 class AdamConfig(BaseConfig):
@@ -184,8 +185,9 @@ def train(config: Config):
             policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
             ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
-            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
+            # loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
             # loss = policy_logprobs.sum() / gradient_accumulation_steps
+            loss = F.cross_entropy(policy_logprobs.view(-1, policy_logprobs.size(-1)), input_ids.view(-1)) / gradient_accumulation_steps
 
             loss.backward()
             loss_batch += loss.detach().clone()
