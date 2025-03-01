@@ -60,7 +60,7 @@ def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list
             logger.info("raising timeout")
             raise TimeoutError(f"Timeout waiting for step {step_count} to be created")
 
-        logger.info(f"Waiting for step {step_count} to be created")
+        logger.info(f"Waiting for {stable_file} to be created")
         time.sleep(5)
 
     files = list(step_path.glob("*.parquet"))

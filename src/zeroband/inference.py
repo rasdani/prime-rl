@@ -38,7 +38,7 @@ class Config(BaseConfig):
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
-    tp: int | Literal["all"] = 1
+    tp: int | Literal["all"] | None = None
     max_seq_len: int | None = None
     cpu_offload_gb: float = 0.0
     cpu_offload_percentage: float = 0.0
@@ -145,6 +145,8 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
     if config.tp == "all":
         config.tp = torch.cuda.device_count()
+    elif config.tp == None:
+        config.tp = 1
 
     if config.cpu_offload_gb != 0.0 and config.cpu_offload_percentage != 0.0:
         raise ValueError("Cannot set both cpu_offload_gb and cpu_offload_percentage")
@@ -163,7 +165,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
     )
     logger = get_logger("INFERENCE")
 
-    sampling_params = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=100, presence_penalty=0.1, frequency_penalty=0.1)
+    sampling_params = SamplingParams(**config.sampling_params.model_dump())
 
     dataset = load_dataset(config.dataset, split="train")
 

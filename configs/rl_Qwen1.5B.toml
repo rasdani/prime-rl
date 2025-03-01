@@ -1,9 +1,9 @@
-total_steps = 3
-batch_size = 32
+total_steps = 50
+batch_size = 1024
 
 
 [train]
-name_model = "debugmodel"
+name_model = "Qwen1.5B"
 wandb = false
 
 [train.data]
@@ -15,11 +15,9 @@ num_workers = 1
 micro_bs = 8
 
 [train.optim]
-batch_size = 16
 warmup_steps = 10
 
 [inference]
-name_model = "debugmodel"
+name_model = "Qwen1.5B"
 max_samples = 100000
-batch_size = 8
 dataset = "justus27/test-vcu"
