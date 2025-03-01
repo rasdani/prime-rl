@@ -177,10 +177,12 @@ def train(config: Config):
             # no sync if we are accumulating gradients
             model.set_requires_gradient_sync(not is_accumulating)
 
-            batch = next(train_dataloader_iterator)
+            # batch = next(train_dataloader_iterator)
 
-            input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
+            # input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             # advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
+            
+            input_ids = torch.randint(0, tokenizer.vocab_size, (config.train.micro_bs, config.data.seq_length)).to("cuda")
 
             policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
             # ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
