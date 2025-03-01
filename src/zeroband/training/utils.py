@@ -9,6 +9,7 @@ from transformers import (
 )
 
 from zeroband.models import ModelType
+from zeroband.training.world_info import get_world_info
 
 
 def apply_ac_ckpt(model: ModelType, num: int):
@@ -91,6 +92,8 @@ class PerfCounter:
         self.num_params = get_num_params(model, exclude_embedding=True)
         self.num_flop_per_token = get_num_flop_per_token(self.num_params, model.config, seq_len=seq_len)
 
+        self._world_info = get_world_info()
+
     def count_tokens(self, tokens: int):
         self.tokens.append(tokens)
         self.times.append(time.perf_counter())
@@ -107,7 +110,7 @@ class PerfCounter:
         tokens_per_second = self.get_tokens_per_second()
         if tokens_per_second is None:
             return None
-        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops
+        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops / self._world_info.world_size
 
 
 def get_random_available_port_list(num_port):
