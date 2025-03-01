@@ -20,16 +20,10 @@ import pyarrow.parquet as pq
 
 
 class SamplingParamConfig(BaseConfig):
-    temperature: float = 0.7
-    top_p: float = 0.95
-    top_k: int = -1
-    use_beam_search: bool = False
-    stop: str | list[str] | None = None
+    temperature: float = 0.6
+    max_tokens: int = 4096
     ignore_eos: bool = False
-    max_tokens: int = 512
-    presence_penalty: float = 0.1
-    frequency_penalty: float = 0.1
-    logprobs: int | None = None
+    top_p: float = 0.95
 
 
 class Config(BaseConfig):
@@ -45,7 +39,8 @@ class Config(BaseConfig):
     total_step: int | None = None
     step_batch_size: int | None = None  # will be use to create stable file
     rollout_path: str | None = None
-    sampling_params: SamplingParamConfig = SamplingParamConfig()
+
+    sampling: SamplingParamConfig = SamplingParamConfig()
 
 
 def fake_chat_template(messages):
@@ -141,8 +136,6 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 
 
 def main(config: Config):  # -> list[dict[str, Any]]:
-    prompts = ["Write me a novel" for _ in range(5)]
-
     if config.tp == "all":
         config.tp = torch.cuda.device_count()
     elif config.tp == None:
@@ -165,7 +158,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
     )
     logger = get_logger("INFERENCE")
 
-    sampling_params = SamplingParams(**config.sampling_params.model_dump())
+    sampling_params = SamplingParams(**config.sampling.model_dump())
 
     dataset = load_dataset(config.dataset, split="train")
 
