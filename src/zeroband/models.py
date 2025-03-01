@@ -7,7 +7,7 @@ from transformers import (
     Qwen2ForCausalLM,
 )
 
-ModelName: TypeAlias = Literal["debugmodel", "150M", "1B", "Qwen32B", "Qwen1.5B", "Qwen7B"]
+ModelName: TypeAlias = Literal["debugmodel", "150M", "1B", "Qwen32B", "Qwen1.5B", "Qwen7B", "Llama8B"]
 ModelType: TypeAlias = LlamaForCausalLM | Qwen2ForCausalLM
 
 name_to_hf_model = {
