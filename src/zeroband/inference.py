@@ -141,8 +141,6 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 
 
 def main(config: Config):  # -> list[dict[str, Any]]:
-    prompts = ["Write me a novel" for _ in range(5)]
-
     if config.tp == "all":
         config.tp = torch.cuda.device_count()
 
