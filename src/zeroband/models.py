@@ -17,7 +17,7 @@ name_to_hf_model = {
     "Qwen1.5B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     "Qwen7B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-    "Llama3.1-70B": "meta-llama/Llama-3.1-70B-Instruct",
+    "Llama8B": "meta-llama/Meta-Llama-3-8B",
 }
 
 name_to_hf_tokenizer = {
@@ -27,7 +27,7 @@ name_to_hf_tokenizer = {
     "Qwen1.5B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     "Qwen7B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
-    "Llama3.1-70B": "meta-llama/Llama-3.1-70B-Instruct",
+    "Llama8B": "meta-llama/Meta-Llama-3-8B",
 }
 
 name_to_class = {
@@ -37,7 +37,7 @@ name_to_class = {
     "Qwen1.5B": (Qwen2Config, Qwen2ForCausalLM),
     "Qwen7B": (Qwen2Config, Qwen2ForCausalLM),
     "Qwen32B": (Qwen2Config, Qwen2ForCausalLM),
-    "Llama3.1-70B": (LlamaConfig, LlamaForCausalLM),
+    "Llama8B": (LlamaConfig, LlamaForCausalLM),
 }
 
 
