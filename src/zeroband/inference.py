@@ -7,6 +7,7 @@ import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
 import vllm
+import time
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
@@ -164,6 +165,7 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
     step = 0
     total_samples = 0
+    total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         if config.rollout_path is not None:
@@ -192,7 +194,24 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         # Get tokenized inputs
         prompts = fake_chat_template(messages)
 
+        start_time = time.time()
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
+        end_time = time.time()
+
+        # Calculate tokens and throughput
+        batch_input_tokens = sum(len(req.prompt_token_ids) for req in generated_tokens)
+        batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in generated_tokens)
+        batch_total_tokens = batch_input_tokens + batch_output_tokens
+        total_tokens += batch_total_tokens
+
+        avg_seq_length = batch_total_tokens / len(generated_tokens) if generated_tokens else 0
+
+        elapsed_time = end_time - start_time
+        tokens_per_second = batch_total_tokens / elapsed_time if elapsed_time > 0 else 0
+
+        logger.info(
+            f"Batch throughput: {tokens_per_second:.2f} tok/sec ({batch_total_tokens} tokens in {elapsed_time:.2f}s, avg seq len: {avg_seq_length:.1f})"
+        )
 
         if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
             logger.info(f"Generated {total_samples} total samples")
