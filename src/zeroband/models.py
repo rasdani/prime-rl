@@ -1,14 +1,12 @@
 from typing import Literal, TypeAlias
-from transformers import (
-    AutoTokenizer,
-    LlamaConfig,
-    LlamaForCausalLM,
-    Qwen2Config,
-    Qwen2ForCausalLM,
-)
+from transformers import AutoTokenizer
 
-ModelName: TypeAlias = Literal["debugmodel", "150M", "1B", "Qwen32B", "Qwen1.5B", "Qwen7B"]
-ModelType: TypeAlias = LlamaForCausalLM | Qwen2ForCausalLM
+from torchtune.training import FullModelHFCheckpointer
+from torchtune.models.llama2 import llama2
+from torchtune.modules import TransformerDecoder
+
+ModelName: TypeAlias = Literal["debugmodel", "150M", "1B"]
+ModelType: TypeAlias = TransformerDecoder
 
 name_to_hf_model = {
     "debugmodel": "PrimeIntellect/llama-2m-fresh",
@@ -28,20 +26,25 @@ name_to_hf_tokenizer = {
     "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
 }
 
-name_to_class = {
-    "debugmodel": (LlamaConfig, LlamaForCausalLM),
-    "150M": (LlamaConfig, LlamaForCausalLM),
-    "1B": (LlamaConfig, LlamaForCausalLM),
-    "Qwen1.5B": (Qwen2Config, Qwen2ForCausalLM),
-    "Qwen7B": (Qwen2Config, Qwen2ForCausalLM),
-    "Qwen32B": (Qwen2Config, Qwen2ForCausalLM),
-}
 
 
 def get_model_and_tokenizer(model_name: ModelName) -> tuple[ModelType, AutoTokenizer]:
-    config_class, model_class = name_to_class[model_name]
+    
+    # 1. Define the checkpointer and load the checkpoint
+    checkpointer = FullModelHFCheckpointer(
+        checkpoint_dir="/workspace/hub/models--PrimeIntellect--llama-2m-fresh/snapshots/2b2d5f245f5a922578f0a0c17d3cc94484d0b10b/",
+        checkpoint_files=["helo"],
+        output_dir="/tmp/llama_2m_fresh", # not used
+        model_type="LLAMA2",        
+    )
+
+    checkpoint = checkpointer.load_checkpoint()
+    model_state_dict = checkpoint["model"]
+    
+    model = llama2()  # Configure with appropriate parameters as needed
+    model.load_state_dict(model_state_dict)
+    
+    
     tokenizer = AutoTokenizer.from_pretrained(name_to_hf_tokenizer[model_name])
-    config_model = config_class.from_pretrained(name_to_hf_model[model_name], attn_implementation="flex_attention")
-    model = model_class.from_pretrained(pretrained_model_name_or_path=name_to_hf_model[model_name], config=config_model)
     tokenizer.pad_token_id = tokenizer.eos_token_id
     return model, tokenizer  # type: ignore
