@@ -82,13 +82,13 @@ class Config(BaseConfig):
 
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
-    assert batch_size % world_info.local_world_size == 0
-    batch_size = batch_size // world_info.local_world_size
+    assert batch_size % world_info.world_size == 0
+    batch_size = batch_size // world_info.world_size
 
     assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})."
 
-    assert batch_size % (data_workers * world_info.local_world_size) == 0, (
-        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers}) times the number of GPUs ({world_info.local_world_size})."
+    assert batch_size % (data_workers * world_info.world_size) == 0, (
+        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers}) times the number of GPUs ({world_info.world_size})."
     )
 
     return batch_size // micro_bs
