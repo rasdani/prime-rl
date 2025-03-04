@@ -6,18 +6,11 @@ batch_size = 1024
 name_model = "Qwen1.5B"
 wandb = false
 
-[train.data]
-fake = false
-timeout = 1000000000000000000000000
-num_workers = 1
-
 [train.train]
 micro_bs = 8
 
 [train.optim]
-warmup_steps = 10
+warmup_steps = 1000
 
 [inference]
-name_model = "Qwen1.5B"
-max_samples = 100000
 dataset = "justus27/test-vcu"

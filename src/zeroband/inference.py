@@ -138,7 +138,7 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 def main(config: Config):  # -> list[dict[str, Any]]:
     if config.tp == "all":
         config.tp = torch.cuda.device_count()
-    elif config.tp == None:
+    elif config.tp is None:
         config.tp = 1
 
     if config.cpu_offload_gb != 0.0 and config.cpu_offload_percentage != 0.0:
