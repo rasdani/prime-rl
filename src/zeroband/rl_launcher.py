@@ -133,8 +133,7 @@ def inference_run(config: InferenceConfig, gpus_ids: list[int]) -> list[mp.Proce
     """
     envs = {"CUDA_VISIBLE_DEVICES": _cuda_available_devices(gpus_ids)}
 
-    if config.tp == "all" or config.tp is None:
-        config.tp = len(gpus_ids)
+    config.tp = len(gpus_ids)
 
     fn_env = EnvWrapper(inference, envs)
     process = mp.Process(target=fn_env, args=(config,))
