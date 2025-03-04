@@ -1,0 +1,10 @@
+name_model = "Qwen1.5B"
+max_samples = 16
+batch_size = 8
+tp = "all"
+dataset = "justus27/deepscaler-math-genesys-format"
+
+[sampling]
+max_tokens = 8000
+n = 4
+

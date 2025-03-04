@@ -1,5 +1,7 @@
 import os
 import psutil
+import asyncio
+import json
 from pathlib import Path
 from typing import Literal
 import uuid
@@ -7,23 +9,27 @@ import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
 import vllm
+import concurrent.futures
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
+from zeroband.rewards.math import compute_math_reward
 
 from datasets import load_dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=8)
 
 class SamplingParamConfig(BaseConfig):
     temperature: float = 0.6
     max_tokens: int = 4096
     ignore_eos: bool = False
     top_p: float = 0.95
+    n: int = 8
 
 
 class Config(BaseConfig):
@@ -37,7 +43,7 @@ class Config(BaseConfig):
     cpu_offload_gb: float = 0.0
     cpu_offload_percentage: float = 0.0
     total_step: int | None = None
-    step_batch_size: int | None = None  # will be use to create stable file
+    step_batch_size: int | None = None  # will be used to create stable file
     rollout_path: str | None = None
 
     sampling: SamplingParamConfig = SamplingParamConfig()
@@ -69,7 +75,9 @@ pa_schema = pa.schema(
 )
 
 
-def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> pa.Table:
+def get_parquet_table(generated_tokens: list[vllm.RequestOutput],
+                      grouped_advantages: dict[int, list[float]],
+                      step: int) -> pa.Table:
     # Initialize lists for each column
     input_tokens_list = []
     output_tokens_list = []
@@ -77,23 +85,16 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
     proofs_list = []
     steps_list = []
 
-    # Process each RequestOutput
-    for request in generated_tokens:
-        # For each output in the request (handling top-n outputs)
-        for output in request.outputs:
-            # Input tokens are the prompt tokens
+    # Process each RequestOutput, using the dictionary grouping.
+    for i, request in enumerate(generated_tokens):
+        advantages = grouped_advantages[i]
+        for adv, output in zip(advantages, request.outputs):
             input_tokens_list.append(request.prompt_token_ids)
-
             # Output tokens from the completion
             output_tokens_list.append(output.token_ids)
-
-            # Initialize with 0 advantage as it's not part of RequestOutput
-            # You might want to modify this based on your advantage calculation
-            advantages_list.append(0)
-
+            advantages_list.append(adv)
             # TODO: Add toploc proof
             proofs_list.append("I am toploc proof, handcrafted by jack".encode())
-
             # Add step
             steps_list.append(step)
 
@@ -105,8 +106,6 @@ def get_parquet_table(generated_tokens: list[vllm.RequestOutput], step: int) -> 
         pa.array(proofs_list, type=pa.binary()),
         pa.array(steps_list, type=pa.int32()),
     ]
-
-    # Create and return table
     return pa.Table.from_arrays(arrays, schema=pa_schema)
 
 
@@ -135,7 +134,50 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     return llm
 
 
-def main(config: Config):  # -> list[dict[str, Any]]:
+async def compute_reward_for_output(output, verification_info):
+    loop = asyncio.get_running_loop()
+    # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
+    return await loop.run_in_executor(
+        process_executor,
+        compute_math_reward,
+        output.text,
+        verification_info
+    )
+
+
+async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput],
+                                verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
+    parsed_infos = [json.loads(ver) for ver in verification_infos]
+    tasks = []
+    mapping = []
+
+    for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
+        for output in request.outputs:
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info)))
+            mapping.append(req_idx)
+
+    all_results = await asyncio.gather(*tasks)
+    grouped_results = {}
+    for req_idx in set(mapping):
+        grouped_results[req_idx] = []
+    for req_idx, result in zip(mapping, all_results):
+        grouped_results[req_idx].append(result)
+    for req_idx in grouped_results:
+        grouped_results[req_idx] = torch.FloatTensor(grouped_results[req_idx])
+    return grouped_results
+
+
+def compute_advantages_grpo(grouped_rewards: dict[int, torch.FloatTensor], epsilon: float = 1e-6) -> dict[int, list[float]]:
+    advantages = {}
+    for req_idx, rewards_tensor in grouped_rewards.items():
+        mean = torch.mean(rewards_tensor).item()
+        std_dev = torch.std(rewards_tensor).item()
+        normalized = ((rewards_tensor - mean) / (std_dev + epsilon)).tolist()
+        advantages[req_idx] = normalized
+    return advantages
+
+
+def main(config: Config):
     if config.tp == "all":
         config.tp = torch.cuda.device_count()
 
@@ -154,12 +196,10 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         max_model_len=config.max_seq_len,
         cpu_offload_gb=cpu_offload_gb,
     )
+    tokenizer = llm.get_tokenizer()
     logger = get_logger("INFERENCE")
-
     sampling_params = SamplingParams(**config.sampling.model_dump())
-
     dataset = load_dataset(config.dataset, split="train")
-
     max_samples = config.max_samples or len(dataset)
 
     step = 0
@@ -168,13 +208,11 @@ def main(config: Config):  # -> list[dict[str, Any]]:
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         if config.rollout_path is not None:
             last_step = list(Path(config.rollout_path).glob("step_*"))
-            if len(last_step) > 0:
+            if last_step:
                 last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
                 maybe_new_step = int(last_step.stem.split("_")[-1])
-
                 if step < maybe_new_step:
                     stable_file = last_step / "stable"
-
                     if stable_file.exists():
                         logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
                         llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
@@ -185,39 +223,50 @@ def main(config: Config):  # -> list[dict[str, Any]]:
 
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
+        messages = [
+            [
+                {"role": "user", "content": item["prompt"]},
+                {"role": "assistant", "content": "<think>\n"}
+            ]
+            for item in batch
+        ]
+        # Assume verification_info is stored as a JSON string in the dataset.
+        verification_infos = [item["verification_info"] for item in batch]
 
-        # Prepare messages
-        messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
-
-        # Get tokenized inputs
-        prompts = fake_chat_template(messages)
+        if tokenizer.chat_template:
+            prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
+        else:
+            prompts = fake_chat_template(messages)
 
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
 
         if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
             logger.info(f"Generated {total_samples} total samples")
 
-        table = get_parquet_table(generated_tokens, step)
+        # Compute rewards asynchronously, grouped as a dictionary.
+        grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
+        # Compute normalized advantages per prompt.
+        grouped_advantages = compute_advantages_grpo(grouped_rewards)
+
+        table = get_parquet_table(generated_tokens, grouped_advantages, step)
 
         step_path = Path(config.output_path) / f"step_{step}"
         os.makedirs(step_path, exist_ok=True)
-
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
+
         total_samples += len(prompts)
         logger.info(f"Generated {total_samples} total samples")
 
         if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
-            # logger.info(f"Reached step batch size {config.step_batch_size}. Writing stable file")
             stable_file = step_path / "stable"
             stable_file.touch()
 
-        if config.total_step is not None:
-            if step >= config.total_step:
-                logger.info(f"Reached total step {config.total_step}, stopping inference")
-                break
+        if config.total_step is not None and step >= config.total_step:
+            logger.info(f"Reached total step {config.total_step}, stopping inference")
+            break
 
 
 if __name__ == "__main__":
     config = Config(**parse_argv())  # type: ignore
-
     main(config)
+    process_executor.shutdown(wait=True)

@@ -19,7 +19,8 @@ dependencies = [
     "wandb",
     "vllm>=0.7.3",
     "jaxtyping",
-    "beartype"
+    "beartype",
+    "math-verify>=0.7.0",
 ]
 
 
