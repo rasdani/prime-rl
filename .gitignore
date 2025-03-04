@@ -6,6 +6,7 @@ output/*
 outputs/*
 data/*
 data_rollout/*
+memprof/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -3,6 +3,7 @@ from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
+
 from pydantic import model_validator
 import torch
 import torch.distributed as dist
@@ -118,12 +119,29 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
     return gpus_ids[world_info.local_rank]
 
+from torch.autograd.profiler import record_function
+from contextlib import nullcontext
+
+
+
+no_context = lambda *args, **kwargs: nullcontext()
+prof_context = torch.profiler.profiler.profile
+prof_context = no_context
 
 def train(config: Config):
     logger = get_logger()
     world_info = get_world_info()
 
     logger.info(f"start training on {world_info.world_size}")
+    def pretty_dict(d, indent=2):
+        for key, value in d.items():
+            if isinstance(value, dict):
+                logger.info(" " * indent + f"{key}:")
+                pretty_dict(value, indent + 2)
+            else:
+                logger.info(" " * indent + f"{key}: {value}")
+    logger.info("config:")
+    pretty_dict(config.model_dump())
 
     # Allow eager fallback during production so that that the training runs dont die
     # However, in development, we want to know that we broke torch compile
@@ -139,100 +157,142 @@ def train(config: Config):
         config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
     )
 
-    model, tokenizer = get_model_and_tokenizer(config.name_model)
+    Path("memprof/").mkdir(exist_ok=True)
+    
+    torch.cuda.memory._record_memory_history()
+    with prof_context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
 
-    train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
+        with record_function("GET MODEL"):
+            model, tokenizer = get_model_and_tokenizer(config.name_model)
 
-    train_dataloader_iterator = iter(train_dataloader)
+        train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
 
-    if config.train.ac_ckpt:
-        num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
-        apply_ac_ckpt(model, num)
+        train_dataloader_iterator = iter(train_dataloader)
 
-    apply_fsdp(model, config.train.reshard_after_forward)
+        if config.train.ac_ckpt:
+            num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
+            apply_ac_ckpt(model, num)
 
-    optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
+        with record_function("APPLY FSDP"):
+            apply_fsdp(model, config.train.reshard_after_forward)
 
-    scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
+        with record_function("INIT OPTIMIZER"):
+            optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
-    training_progress = TrainingProgress(total_tokens=0, step=0)
+        scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
 
-    if world_info.rank == 0 and config.wandb:
-        wandb.init(project=config.project, config=config.model_dump())
+        training_progress = TrainingProgress(total_tokens=0, step=0)
 
-    if config.train.torch_compile:
-        model = torch.compile(model) if not TYPE_CHECKING else model
+        if world_info.rank == 0 and config.wandb:
+            wandb.init(project=config.project, config=config.model_dump())
 
-    if config.ckpt.resume:
-        load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
+        if config.train.torch_compile:
+            model = torch.compile(model) if not TYPE_CHECKING else model
 
-    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
+        with record_function("LOAD CHECKPOINT"):
+            if config.ckpt.resume:
+                load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
+
+        perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
+    
+    dist.barrier()
+    #prof.export_chrome_trace(f"memprof/init_rank_{world_info.rank}.json")
+    #prof.export_memory_timeline(f"memprof/init_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
+    torch.cuda.memory._dump_snapshot(f"memprof/init_rank_{world_info.rank}_snapshot.pickle")
+    torch.cuda.memory._record_memory_history(enabled=None)
+    dist.barrier()
 
     while True:
         loss_batch = 0
 
         for grad_acc_step in range(gradient_accumulation_steps):
-            is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            # no sync if we are accumulating gradients
-            model.set_requires_gradient_sync(not is_accumulating)
+            torch.cuda.memory._record_memory_history()
+            with prof_context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
+                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
+                # no sync if we are accumulating gradients
+                model.set_requires_gradient_sync(not is_accumulating)
 
-            batch = next(train_dataloader_iterator)
+                batch = next(train_dataloader_iterator)
 
-            input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
-            advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
+                with record_function("FORWARD"):
+                    input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
+                    advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
 
-            policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-            ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
+                    policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                    ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
-            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
-            # loss = policy_logprobs.sum() / gradient_accumulation_steps
+                with record_function("GRPO"):
+                    loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
+                # loss = policy_logprobs.sum() / gradient_accumulation_steps
 
-            loss.backward()
-            loss_batch += loss.detach().clone()
+                with record_function("BACKWARD"):
+                    loss.backward()
+                    loss_batch += loss.detach().clone()
 
-            # Launch both allreduces at the same time to hide latency
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+                # Launch both allreduces at the same time to hide latency
+                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+            dist.barrier()
+            #prof.export_chrome_trace(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}.json")
+            #prof.export_memory_timeline(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
+            torch.cuda.memory._dump_snapshot(f"memprof/grad_acc_step_{world_info.rank}_snapshot.pickle")
+            torch.cuda.memory._record_memory_history(enabled=None)
+            dist.barrier()
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+        torch.cuda.memory._record_memory_history()
+        with torch.profiler.profiler.profile(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
 
-        optimizer.step()
-        scheduler.step()
+            with record_function("GRAD NORM"):
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
-        optimizer.zero_grad()
+            with record_function("STEP"):
+                optimizer.step()
+                scheduler.step()
 
-        # logging
-        training_progress.step += 1
-        inner_lr = [group["lr"] for group in optimizer.param_groups][0]
+                optimizer.zero_grad()
 
-        # syncing loss across all data parallel rank within a nodes
-        new_tokens = config.data.seq_length * config.optim.batch_size
-        perf_counter.count_tokens(new_tokens)
-        training_progress.total_tokens += new_tokens
+            # logging
+            training_progress.step += 1
+            inner_lr = [group["lr"] for group in optimizer.param_groups][0]
 
-        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item()}  # fmt: skip
+            # syncing loss across all data parallel rank within a nodes
+            new_tokens = config.data.seq_length * config.optim.batch_size
+            perf_counter.count_tokens(new_tokens)
+            training_progress.total_tokens += new_tokens
 
-        log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
+            metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item()}  # fmt: skip
 
-        tokens_per_second = perf_counter.get_tokens_per_second()
-        if tokens_per_second is not None:
-            metrics["tokens_per_second"] = tokens_per_second
-            metrics["mfu"] = perf_counter.get_mfu()
-            log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
+            log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
 
-        if world_info.rank == 0 and config.wandb:
-            wandb.log(metrics)
+            tokens_per_second = perf_counter.get_tokens_per_second()
+            if tokens_per_second is not None:
+                metrics["tokens_per_second"] = tokens_per_second
+                metrics["mfu"] = perf_counter.get_mfu()
+                log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
 
-        logger.info(log)
+            if world_info.rank == 0 and config.wandb:
+                wandb.log(metrics)
 
-        if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
-            save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
+            logger.info(log)
 
-        if config.ckpt.rollout_path is not None:
-            path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
-            save_ckpt_for_rollout(model, path)
+            if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
+                save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
-        if training_progress.step >= config.optim.total_steps:
-            break
+            if config.ckpt.rollout_path is not None:
+                path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
+                save_ckpt_for_rollout(model, path)
+
+            if training_progress.step >= config.optim.total_steps:
+                break
+
+        dist.barrier()
+        prof.export_chrome_trace(f"memprof/step_{training_progress.step}_rank_{world_info.rank}.json")
+        prof.export_memory_timeline(f"memprof/step_{training_progress.step}_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
+        torch.cuda.memory._dump_snapshot(f"memprof/step_{training_progress.step}_rank_{world_info.rank}_snapshot.pickle")
+        torch.cuda.memory._record_memory_history(enabled=None)
+        dist.barrier()
+        
+
+        exit(0)
 
     logger.info("Training finished, exiting ...")
 
