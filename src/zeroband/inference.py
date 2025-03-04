@@ -1,5 +1,4 @@
 import os
-import psutil
 from pathlib import Path
 from typing import Literal
 import uuid
@@ -35,11 +34,11 @@ class Config(BaseConfig):
     output_path: str = "outputs"
     tp: int | Literal["all"] = 1
     max_seq_len: int | None = None
-    cpu_offload_gb: float = 0.0
-    cpu_offload_percentage: float = 0.0
     total_step: int | None = None
     step_batch_size: int | None = None  # will be use to create stable file
     rollout_path: str | None = None
+
+    quant: Literal["fp8"] | None = None
 
     sampling: SamplingParamConfig = SamplingParamConfig()
 
@@ -140,20 +139,11 @@ def main(config: Config):  # -> list[dict[str, Any]]:
     if config.tp == "all":
         config.tp = torch.cuda.device_count()
 
-    if config.cpu_offload_gb != 0.0 and config.cpu_offload_percentage != 0.0:
-        raise ValueError("Cannot set both cpu_offload_gb and cpu_offload_percentage")
-    if config.cpu_offload_percentage != 0.0:
-        cpu_offload_gb = psutil.virtual_memory().available * config.cpu_offload_percentage
-    elif config.cpu_offload_gb != 0.0:
-        cpu_offload_gb = config.cpu_offload_gb
-    else:
-        cpu_offload_gb = 0.0
-
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
         max_model_len=config.max_seq_len,
-        cpu_offload_gb=cpu_offload_gb,
+        quantization=config.quant,
     )
     logger = get_logger("INFERENCE")
 
