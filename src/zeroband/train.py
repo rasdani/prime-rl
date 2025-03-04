@@ -122,11 +122,19 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 from torch.autograd.profiler import record_function
 from contextlib import nullcontext
 
+class Dummy:
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+    def export_memory_timeline(self, *args, **kwargs):
+        pass
+    def export_chrome_trace(self, *args, **kwargs):
+        pass
 
-
-no_context = lambda *args, **kwargs: nullcontext()
-prof_context = torch.profiler.profiler.profile
-prof_context = no_context
+no_context = lambda *args, **kwargs: Dummy()
+torch_context = torch.profiler.profiler.profile
+prof_context = torch_context
 
 def train(config: Config):
     logger = get_logger()
@@ -160,7 +168,7 @@ def train(config: Config):
     Path("memprof/").mkdir(exist_ok=True)
     
     torch.cuda.memory._record_memory_history()
-    with prof_context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
+    with no_context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
 
         with record_function("GET MODEL"):
             model, tokenizer = get_model_and_tokenizer(config.name_model)
@@ -207,7 +215,8 @@ def train(config: Config):
 
         for grad_acc_step in range(gradient_accumulation_steps):
             torch.cuda.memory._record_memory_history()
-            with prof_context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
+            context = torch_context if grad_acc_step == 1 else no_context
+            with context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
                 model.set_requires_gradient_sync(not is_accumulating)
@@ -233,13 +242,13 @@ def train(config: Config):
                 dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.barrier()
             #prof.export_chrome_trace(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}.json")
-            #prof.export_memory_timeline(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
+            prof.export_memory_timeline(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
             torch.cuda.memory._dump_snapshot(f"memprof/grad_acc_step_{world_info.rank}_snapshot.pickle")
             torch.cuda.memory._record_memory_history(enabled=None)
             dist.barrier()
 
         torch.cuda.memory._record_memory_history()
-        with torch.profiler.profiler.profile(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
+        with no_context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
 
             with record_function("GRAD NORM"):
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
@@ -285,8 +294,8 @@ def train(config: Config):
                 break
 
         dist.barrier()
-        prof.export_chrome_trace(f"memprof/step_{training_progress.step}_rank_{world_info.rank}.json")
-        prof.export_memory_timeline(f"memprof/step_{training_progress.step}_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
+        #prof.export_chrome_trace(f"memprof/step_{training_progress.step}_rank_{world_info.rank}.json")
+        #prof.export_memory_timeline(f"memprof/step_{training_progress.step}_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
         torch.cuda.memory._dump_snapshot(f"memprof/step_{training_progress.step}_rank_{world_info.rank}_snapshot.pickle")
         torch.cuda.memory._record_memory_history(enabled=None)
         dist.barrier()
