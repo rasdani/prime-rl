@@ -7,7 +7,7 @@ from transformers import (
     Qwen2ForCausalLM,
 )
 
-ModelName: TypeAlias = Literal["debugmodel", "150M", "1B", "Qwen32B", "Qwen1.5B", "Qwen7B"]
+ModelName: TypeAlias = Literal["debugmodel", "150M", "1B", "Qwen32B", "Qwen1.5B", "Qwen7B", "Llama8B"]
 ModelType: TypeAlias = LlamaForCausalLM | Qwen2ForCausalLM
 
 name_to_hf_model = {
@@ -17,6 +17,7 @@ name_to_hf_model = {
     "Qwen1.5B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     "Qwen7B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    "Llama8B": "meta-llama/Meta-Llama-3-8B",
 }
 
 name_to_hf_tokenizer = {
@@ -26,6 +27,7 @@ name_to_hf_tokenizer = {
     "Qwen1.5B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     "Qwen7B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+    "Llama8B": "meta-llama/Meta-Llama-3-8B",
 }
 
 name_to_class = {
@@ -35,6 +37,7 @@ name_to_class = {
     "Qwen1.5B": (Qwen2Config, Qwen2ForCausalLM),
     "Qwen7B": (Qwen2Config, Qwen2ForCausalLM),
     "Qwen32B": (Qwen2Config, Qwen2ForCausalLM),
+    "Llama8B": (LlamaConfig, LlamaForCausalLM),
 }
 
 
