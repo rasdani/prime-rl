@@ -21,8 +21,8 @@ dependencies = [
     "jaxtyping",
     "beartype",
     "math-verify>=0.7.0",
-]
-
+    "llmcompressor"
+] 
 
 [build-system]
 requires = ["hatchling"]

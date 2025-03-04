@@ -1,0 +1,17 @@
+name_model = "Qwen7B"
+project = "qwen_7B_rl"
+
+[train]
+micro_bs = 1
+ac_ckpt = true
+
+[optim]
+batch_size = 128
+warmup_steps = 1000
+total_steps = 8192
+
+[data]
+seq_length = 8192
+
+[optim.optim]
+lr = 7e-4

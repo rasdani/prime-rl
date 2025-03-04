@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 import psutil
 import asyncio
@@ -10,6 +11,7 @@ from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
 import vllm
 import concurrent.futures
+import time
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
@@ -32,6 +34,9 @@ class SamplingParamConfig(BaseConfig):
     n: int = 8
 
 
+dataset_key = defaultdict(lambda: "prompt", {"justus27/difficulty-calibrated-deepscaler": "problem"})
+
+
 class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/test-vcu"
@@ -40,11 +45,11 @@ class Config(BaseConfig):
     output_path: str = "outputs"
     tp: int | Literal["all"] = 1
     max_seq_len: int | None = None
-    cpu_offload_gb: float = 0.0
-    cpu_offload_percentage: float = 0.0
     total_step: int | None = None
     step_batch_size: int | None = None  # will be used to create stable file
     rollout_path: str | None = None
+
+    quant: Literal["fp8"] | None = None
 
     sampling: SamplingParamConfig = SamplingParamConfig()
 
@@ -181,20 +186,11 @@ def main(config: Config):
     if config.tp == "all":
         config.tp = torch.cuda.device_count()
 
-    if config.cpu_offload_gb != 0.0 and config.cpu_offload_percentage != 0.0:
-        raise ValueError("Cannot set both cpu_offload_gb and cpu_offload_percentage")
-    if config.cpu_offload_percentage != 0.0:
-        cpu_offload_gb = psutil.virtual_memory().available * config.cpu_offload_percentage
-    elif config.cpu_offload_gb != 0.0:
-        cpu_offload_gb = config.cpu_offload_gb
-    else:
-        cpu_offload_gb = 0.0
-
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
         max_model_len=config.max_seq_len,
-        cpu_offload_gb=cpu_offload_gb,
+        quantization=config.quant,
     )
     tokenizer = llm.get_tokenizer()
     logger = get_logger("INFERENCE")
@@ -204,6 +200,7 @@ def main(config: Config):
 
     step = 0
     total_samples = 0
+    total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         if config.rollout_path is not None:
@@ -238,7 +235,24 @@ def main(config: Config):
         else:
             prompts = fake_chat_template(messages)
 
+        start_time = time.time()
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
+        end_time = time.time()
+
+        # Calculate tokens and throughput
+        batch_input_tokens = sum(len(req.prompt_token_ids) for req in generated_tokens)
+        batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in generated_tokens)
+        batch_total_tokens = batch_input_tokens + batch_output_tokens
+        total_tokens += batch_total_tokens
+
+        avg_seq_length = batch_total_tokens / len(generated_tokens) if generated_tokens else 0
+
+        elapsed_time = end_time - start_time
+        tokens_per_second = batch_total_tokens / elapsed_time if elapsed_time > 0 else 0
+
+        logger.info(
+            f"Batch throughput: {tokens_per_second:.2f} tok/sec ({batch_total_tokens} tokens in {elapsed_time:.2f}s, avg seq len: {avg_seq_length:.1f})"
+        )
 
         if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
             logger.info(f"Generated {total_samples} total samples")
