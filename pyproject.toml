@@ -19,8 +19,9 @@ dependencies = [
     "wandb",
     "vllm>=0.7.3",
     "jaxtyping",
-    "beartype"
-]
+    "beartype",
+    "llmcompressor"
+] 
 
 
 [build-system]
