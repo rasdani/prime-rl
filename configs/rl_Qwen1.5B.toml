@@ -14,3 +14,4 @@ warmup_steps = 1000
 
 [inference]
 dataset = "justus27/test-vcu"
+tp = 4
