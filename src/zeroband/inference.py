@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 from pathlib import Path
 from typing import Literal
@@ -24,6 +25,9 @@ class SamplingParamConfig(BaseConfig):
     max_tokens: int = 4096
     ignore_eos: bool = False
     top_p: float = 0.95
+
+
+dataset_key = defaultdict(lambda: "prompt", {"justus27/difficulty-calibrated-deepscaler": "problem"})
 
 
 class Config(BaseConfig):
@@ -179,7 +183,10 @@ def main(config: Config):  # -> list[dict[str, Any]]:
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
 
         # Prepare messages
-        messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
+        messages = [
+            [{"role": "user", "content": item[dataset_key[config.dataset]]}, {"role": "assistant", "content": "<think>\n"}]
+            for item in batch
+        ]
 
         # Get tokenized inputs
         prompts = fake_chat_template(messages)
