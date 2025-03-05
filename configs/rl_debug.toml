@@ -22,4 +22,4 @@ warmup_steps = 10
 name_model = "debugmodel"
 max_samples = 100000
 batch_size = 8
-dataset = "justus27/test-vcu"
+dataset = "justus27/deepscaler-math-genesys-format"
