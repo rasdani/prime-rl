@@ -213,42 +213,52 @@ def train(config: Config):
     while True:
         loss_batch = 0
 
+        torch.cuda.memory._record_memory_history()
         for grad_acc_step in range(gradient_accumulation_steps):
-            torch.cuda.memory._record_memory_history()
-            context = torch_context if grad_acc_step == 1 else no_context
+            context = torch_context if grad_acc_step == 2 else no_context
             with context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
                 model.set_requires_gradient_sync(not is_accumulating)
 
-                batch = next(train_dataloader_iterator)
+                with record_function("GET BATCH"):
+                    batch = next(train_dataloader_iterator)
+                    input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
+                    advantages_cpu = batch["advantages"]
+                    del batch
 
                 with record_function("FORWARD"):
-                    input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
-                    advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
-
                     policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-                    ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
+                    del input_ids
 
                 with record_function("GRPO"):
+                    advantages: Float[torch.Tensor, "batch seq"] = advantages_cpu.to("cuda")
+                    ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
+
                     loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
-                # loss = policy_logprobs.sum() / gradient_accumulation_steps
+
+                    del advantages_cpu, advantages, policy_logprobs, ref_logprobs
 
                 with record_function("BACKWARD"):
                     loss.backward()
                     loss_batch += loss.detach().clone()
+                    del loss
 
-                # Launch both allreduces at the same time to hide latency
-                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
-            dist.barrier()
-            #prof.export_chrome_trace(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}.json")
-            prof.export_memory_timeline(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
-            torch.cuda.memory._dump_snapshot(f"memprof/grad_acc_step_{world_info.rank}_snapshot.pickle")
-            torch.cuda.memory._record_memory_history(enabled=None)
-            dist.barrier()
+        
+            if grad_acc_step == 2:
+                dist.barrier()
+                #prof.export_chrome_trace(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}.json")
+                prof.export_memory_timeline(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}_timeline.html", device=f"cuda:{world_info.local_rank}")
+                torch.cuda.memory._dump_snapshot(f"memprof/grad_acc_step_{grad_acc_step}_rank_{world_info.rank}_snapshot.pickle")
+                torch.cuda.memory._record_memory_history(enabled=None)
+                dist.barrier()
+            
 
         torch.cuda.memory._record_memory_history()
         with no_context(profile_memory=True, with_stack=True, record_shapes=True, activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as prof:
+
+            # Launch both allreduces at the same time to hide latency
+            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
 
             with record_function("GRAD NORM"):
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
