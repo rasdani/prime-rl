@@ -1,5 +1,8 @@
 from math_verify import parse, verify
 from typing import Dict
+from zeroband.logger import get_logger
+
+logger = get_logger("INFERENCE")
 
 def compute_math_reward(completion: str, verification_info: Dict):
     split_response = completion.split("</think>")    
@@ -19,6 +22,6 @@ def compute_math_reward(completion: str, verification_info: Dict):
             return -1
     
     except Exception as e:
-        print(f"error verifying math: {e}")
+        logger.warning(f"error verifying math response: {e}. Returning negative reward")
         return -1
             
