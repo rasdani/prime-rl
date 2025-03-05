@@ -1,6 +1,5 @@
 from collections import defaultdict
 import os
-import psutil
 import asyncio
 import json
 from pathlib import Path
