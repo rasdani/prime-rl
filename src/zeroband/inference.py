@@ -25,6 +25,7 @@ import pyarrow.parquet as pq
 
 process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=8)
 
+
 class SamplingParamConfig(BaseConfig):
     temperature: float = 0.6
     max_tokens: int = 4096
@@ -38,7 +39,7 @@ dataset_key = defaultdict(lambda: "prompt", {"justus27/difficulty-calibrated-dee
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
-    dataset: str = "justus27/test-vcu"
+    dataset: str = "justus27/deepscaler-math-genesys-format"
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
@@ -79,9 +80,7 @@ pa_schema = pa.schema(
 )
 
 
-def get_parquet_table(generated_tokens: list[vllm.RequestOutput],
-                      grouped_advantages: dict[int, list[float]],
-                      step: int) -> pa.Table:
+def get_parquet_table(generated_tokens: list[vllm.RequestOutput], grouped_advantages: dict[int, list[float]], step: int) -> pa.Table:
     # Initialize lists for each column
     input_tokens_list = []
     output_tokens_list = []
@@ -141,16 +140,10 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 async def compute_reward_for_output(output, verification_info):
     loop = asyncio.get_running_loop()
     # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
-    return await loop.run_in_executor(
-        process_executor,
-        compute_math_reward,
-        output.text,
-        verification_info
-    )
+    return await loop.run_in_executor(process_executor, compute_math_reward, output.text, verification_info)
 
 
-async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput],
-                                verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
+async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput], verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
     parsed_infos = [json.loads(ver) for ver in verification_infos]
     tasks = []
     mapping = []
@@ -219,13 +212,7 @@ def main(config: Config):
 
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
-        messages = [
-            [
-                {"role": "user", "content": item["prompt"]},
-                {"role": "assistant", "content": "<think>\n"}
-            ]
-            for item in batch
-        ]
+        messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
 
