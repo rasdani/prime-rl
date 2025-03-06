@@ -1,4 +1,3 @@
-from collections import defaultdict
 import os
 import asyncio
 import json
@@ -34,12 +33,9 @@ class SamplingParamConfig(BaseConfig):
     n: int = 8
 
 
-dataset_key = defaultdict(lambda: "prompt", {"justus27/difficulty-calibrated-deepscaler": "problem"})
-
-
 class Config(BaseConfig):
     name_model: ModelName = "150M"
-    dataset: str = "justus27/deepscaler-math-genesys-format"
+    dataset: Literal["justus27/deepscaler-math-genesys-format"] = "justus27/deepscaler-math-genesys-format"
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
