@@ -48,6 +48,7 @@ class Config(BaseConfig):
     quant: Literal["fp8"] | None = None
 
     sampling: SamplingParamConfig = SamplingParamConfig()
+    enforce_eager: bool = False
 
 
 def fake_chat_template(messages):
@@ -183,6 +184,7 @@ def main(config: Config):
         tensor_parallel_size=config.tp,
         max_model_len=config.max_seq_len,
         quantization=config.quant,
+        enforce_eager=config.enforce_eager,
     )
     tokenizer = llm.get_tokenizer()
     logger = get_logger("INFERENCE")

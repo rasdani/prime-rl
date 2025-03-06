@@ -111,10 +111,12 @@ class ParquetDataset(IterableDataset):
         batch_size: int,
         timeout: float,
         pq_read_bs: int = 64,
+        step_per_rollout: int = 1,
     ):
         self._logger = get_logger()
         self._path = path
         self._batch_size = batch_size
+        self._step_per_rollout = step_per_rollout
         self._pq_read_bs = pq_read_bs
 
         self._world_info = get_world_info()
@@ -132,7 +134,7 @@ class ParquetDataset(IterableDataset):
         )
         # this assert should never be triggered because we check for it in the top config level. Keep it here for sanity
 
-        target_sample_count_per_batch = self._batch_size // (self._world_info.world_size * worker_info.num_workers)
+        target_sample_count_per_batch = self._step_per_rollout * self._batch_size // (self._world_info.world_size * worker_info.num_workers)
 
         self._logger.info(f"num_workers: {num_workers}, target_sample_count_per_batch: {target_sample_count_per_batch}")
 
