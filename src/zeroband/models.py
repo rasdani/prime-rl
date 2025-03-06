@@ -18,6 +18,7 @@ name_to_hf_model = {
     "Qwen7B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
     "Llama8B": "meta-llama/Meta-Llama-3-8B",
+    "QwQ32B": "Qwen/QwQ-32B",
 }
 
 name_to_hf_tokenizer = {
