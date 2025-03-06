@@ -4,13 +4,13 @@ batch_size = 1024
 
 [train]
 name_model = "Qwen1.5B"
-wandb = false
+project = "rl-Qwen1.5B"
 
 [train.train]
 micro_bs = 32
 reshard_after_forward = true
 
-[train.train.optim]
+[train.optim]
 warmup_steps = 1
 batch_size = 128
 lr = 1e-6
