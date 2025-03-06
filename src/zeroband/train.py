@@ -81,6 +81,12 @@ class Config(BaseConfig):
             "The batch size in the config must be the same as the batch size in the data config."
         )
         return self
+    
+    @model_validator(mode="after")
+    def check_liger(self):
+        if self.train.liger_qwen:
+            assert "Qwen" in self.name_model, "train.liger_qwen can only be applied to Qwen2 models."
+        return self
 
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
