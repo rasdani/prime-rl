@@ -1,0 +1,11 @@
+name_model = "Qwen1.5B"
+max_samples = 32
+batch_size = 8
+dataset = "justus27/test-vcu"
+
+step_batch_size = 1024
+
+[sampling]
+temperature = 0.7
+top_p = 0.95
+max_tokens = 32000

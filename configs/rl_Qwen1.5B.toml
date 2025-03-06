@@ -1,0 +1,17 @@
+total_steps = 50
+batch_size = 1024
+
+
+[train]
+name_model = "Qwen1.5B"
+wandb = false
+
+[train.train]
+micro_bs = 8
+
+[train.optim]
+warmup_steps = 1000
+
+[inference]
+dataset = "justus27/test-vcu"
+tp = 4

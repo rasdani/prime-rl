@@ -173,25 +173,30 @@ def train(config: Config):
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            # no sync if we are accumulating gradients
-            model.set_requires_gradient_sync(not is_accumulating)
+            model.set_requires_gradient_sync(not is_accumulating) # no sync if we are accumulating gradients
 
+            # Load args
             batch = next(train_dataloader_iterator)
-
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
-            advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"].to("cuda")
+            cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
+            del batch
 
+            # Gather args for grpo loss
+            advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
             policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+            del input_ids
             ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
+            # loss
             loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
-            # loss = policy_logprobs.sum() / gradient_accumulation_steps
+            del cpu_advantages, advantages, policy_logprobs, ref_logprobs
 
+            # backward
             loss.backward()
             loss_batch += loss.detach().clone()
+            del loss
 
-            # Launch both allreduces at the same time to hide latency
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+        dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
