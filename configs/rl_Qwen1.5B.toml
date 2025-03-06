@@ -24,3 +24,6 @@ lr = 1e-6
 
 [inference]
 name_model = "Qwen1.5B"
+
+[inference.sampling]
+max_tokens = 16_000
