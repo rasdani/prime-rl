@@ -7,10 +7,17 @@ name_model = "Qwen1.5B"
 wandb = false
 
 [train.train]
-micro_bs = 8
+micro_bs = 32
+reshard_after_forward = true
 
-[train.optim]
-warmup_steps = 1000
+[train.train.optim]
+warmup_steps = 1
+batch_size = 128
+lr = 1e-6
+step_per_rollout = 8
 
 [inference]
-tp = 4
+batch_size = 128
+
+[inference.sampling]
+n = 8
