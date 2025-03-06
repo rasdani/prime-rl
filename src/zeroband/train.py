@@ -41,6 +41,8 @@ class OptimConfig(BaseConfig):
     total_steps: int = 88_000
     batch_size: int = 512
 
+    step_per_rollout: int = 1
+
 
 class TrainConfig(BaseConfig):
     micro_bs: int = 1
@@ -174,7 +176,7 @@ def train(config: Config):
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            model.set_requires_gradient_sync(not is_accumulating) # no sync if we are accumulating gradients
+            model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
             # Load args
             batch = next(train_dataloader_iterator)
@@ -237,8 +239,9 @@ def train(config: Config):
         if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
-        if config.ckpt.rollout_path is not None:
-            path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
+        if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
+            step_per_rollout = training_progress.step // config.optim.step_per_rollout
+            path = Path(config.ckpt.rollout_path) / f"step_{step_per_rollout}"
             save_ckpt_for_rollout(model, path)
 
         if training_progress.step >= config.optim.total_steps:
