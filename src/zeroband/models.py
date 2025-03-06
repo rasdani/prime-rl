@@ -48,6 +48,7 @@ def get_model_and_tokenizer(model_name: ModelName) -> tuple[ModelType, AutoToken
     config_class, model_class = name_to_class[model_name]
     tokenizer = AutoTokenizer.from_pretrained(name_to_hf_tokenizer[model_name])
     config_model = config_class.from_pretrained(name_to_hf_model[model_name], attn_implementation="flex_attention")
+    config_model.use_cache = False
     model = model_class.from_pretrained(pretrained_model_name_or_path=name_to_hf_model[model_name], config=config_model)
     tokenizer.pad_token_id = tokenizer.eos_token_id
     return model, tokenizer  # type: ignore
