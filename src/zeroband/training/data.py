@@ -44,8 +44,9 @@ class FakeTokenizedDataset(IterableDataset):
             len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
+            rewards = torch.randn(len_)
             self.step += 1
-            yield {"input_ids": input_ids, "advantages": advantages}
+            yield {"input_ids": input_ids, "advantages": advantages, "rewards": rewards}
 
 
 def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list[Path]:
@@ -151,7 +152,7 @@ class ParquetDataset(IterableDataset):
 
             dataset = ds.dataset(files, format="parquet")
             # Set up a scanner with just the required columns
-            required_columns = ["output_tokens", "advantages"]
+            required_columns = ["output_tokens", "advantages", "rewards"]
 
             scanner = dataset.scanner(columns=required_columns, batch_size=self._pq_read_bs)
 
@@ -163,8 +164,9 @@ class ParquetDataset(IterableDataset):
                 if all(col in batch.column_names for col in required_columns):
                     output_tokens = batch["output_tokens"]
                     advantages = batch["advantages"]
+                    rewards = batch["rewards"]
 
-                    for token, advantage in zip(output_tokens, advantages):
+                    for token, advantage, reward in zip(output_tokens, advantages, rewards):
                         counter += 1
                         if not _should_skip_index(
                             index=counter,
@@ -176,7 +178,8 @@ class ParquetDataset(IterableDataset):
                             try:
                                 ids = torch.tensor(token.as_py())
                                 adv = torch.tensor(data=[advantage.as_py()] * len(ids))
-                                data = {"input_ids": ids, "advantages": adv}
+                                rew = torch.tensor(data=[reward.as_py()] * len(ids))
+                                data = {"input_ids": ids, "advantages": adv, "rewards": rew}
                             except Exception as e:
                                 self._logger.warn(f"Error processing row {counter} sample {sample_count}: {str(e)}")
                                 data = None
@@ -198,6 +201,7 @@ class ParquetDataset(IterableDataset):
 class BatchOutput(TypedDict):
     input_ids: Int[torch.Tensor, "batch seq"]
     advantages: Float[torch.Tensor, "batch seq"]
+    rewards: Float[torch.Tensor, "batch seq"]
 
 
 class PaddingColate:
@@ -206,27 +210,33 @@ class PaddingColate:
         self._pad_token_id = pad_token_id
 
     def __call__(self, samples: list[dict[str, torch.LongTensor]]) -> BatchOutput:
-        assert samples[0].keys() == {"input_ids", "advantages"}
+        assert samples[0].keys() == {"input_ids", "advantages", "rewards"}, f"samples[0].keys() == {samples[0].keys()}"
 
         inputs_ids = []
         advantages = []
+        rewards = []
         for sample in samples:
             ids = sample["input_ids"]
             adv = sample["advantages"]
+            rew = sample["rewards"]
 
             if len(ids) >= self._seq_len:
                 ids = ids[: self._seq_len]
                 adv = adv[: self._seq_len]
+                rew = rew[: self._seq_len]
             else:
                 ids = torch.cat([ids, torch.full((self._seq_len - len(ids),), fill_value=self._pad_token_id, dtype=ids.dtype)])
                 adv = torch.cat([adv, torch.zeros(self._seq_len - len(adv), dtype=adv.dtype)])
+                rew = torch.cat([rew, torch.zeros(self._seq_len - len(rew), dtype=rew.dtype)])
 
             inputs_ids.append(ids)
             advantages.append(adv)
+            rewards.append(rew)
 
         return {
             "input_ids": torch.stack(inputs_ids, dim=0),
             "advantages": torch.stack(advantages, dim=0),
+            "rewards": torch.stack(rewards, dim=0),
         }
 
 

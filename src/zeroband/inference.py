@@ -74,38 +74,42 @@ pa_schema = pa.schema(
         ("input_tokens", pa.list_(pa.int32())),
         ("output_tokens", pa.list_(pa.int32())),
         ("advantages", pa.float32()),
+        ("rewards", pa.float32()),
         ("proofs", pa.binary()),
         ("step", pa.int32()),
     ]
 )
 
 
-def get_parquet_table(generated_tokens: list[vllm.RequestOutput], grouped_advantages: dict[int, list[float]], step: int) -> pa.Table:
-    # Initialize lists for each column
+def get_parquet_table(
+    generated_tokens: list[vllm.RequestOutput],
+    grouped_advantages: dict[int, list[float]],
+    grouped_rewards: dict[int, torch.FloatTensor],
+    step: int,
+) -> pa.Table:
     input_tokens_list = []
     output_tokens_list = []
     advantages_list = []
+    rewards_list = []
     proofs_list = []
     steps_list = []
 
-    # Process each RequestOutput, using the dictionary grouping.
     for i, request in enumerate(generated_tokens):
         advantages = grouped_advantages[i]
-        for adv, output in zip(advantages, request.outputs):
+        rewards = grouped_rewards[i].tolist()
+        for adv, reward, output in zip(advantages, rewards, request.outputs):
             input_tokens_list.append(request.prompt_token_ids)
-            # Output tokens from the completion
             output_tokens_list.append(output.token_ids)
             advantages_list.append(adv)
-            # TODO: Add toploc proof
+            rewards_list.append(reward)
             proofs_list.append("I am toploc proof, handcrafted by jack".encode())
-            # Add step
             steps_list.append(step)
 
-    # Create PyArrow arrays
     arrays = [
         pa.array(input_tokens_list, type=pa.list_(pa.int32())),
         pa.array(output_tokens_list, type=pa.list_(pa.int32())),
         pa.array(advantages_list, type=pa.float32()),
+        pa.array(rewards_list, type=pa.float32()),
         pa.array(proofs_list, type=pa.binary()),
         pa.array(steps_list, type=pa.int32()),
     ]
@@ -248,7 +252,7 @@ def main(config: Config):
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
 
-        table = get_parquet_table(generated_tokens, grouped_advantages, step)
+        table = get_parquet_table(generated_tokens, grouped_advantages, grouped_rewards, step)
 
         step_path = Path(config.output_path) / f"step_{step}"
         os.makedirs(step_path, exist_ok=True)

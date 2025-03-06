@@ -170,6 +170,7 @@ def train(config: Config):
 
     while True:
         loss_batch = 0
+        average_rewards = 0
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
@@ -179,6 +180,8 @@ def train(config: Config):
             batch = next(train_dataloader_iterator)
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
+            average_rewards += batch["rewards"].mean() / gradient_accumulation_steps
+
             del batch
 
             # Gather args for grpo loss
@@ -197,6 +200,8 @@ def train(config: Config):
             del loss
 
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+        average_rewards = average_rewards / world_info.world_size
+        dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
@@ -214,9 +219,9 @@ def train(config: Config):
         perf_counter.count_tokens(new_tokens)
         training_progress.total_tokens += new_tokens
 
-        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item()}  # fmt: skip
+        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item()}  # fmt: skip
 
-        log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
+        log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
         tokens_per_second = perf_counter.get_tokens_per_second()
         if tokens_per_second is not None:
