@@ -144,7 +144,9 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 
-    train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
+    train_dataloader = get_dataloader(
+        tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data, step_per_rollout=config.optim.step_per_rollout
+    )
 
     train_dataloader_iterator = iter(train_dataloader)
 

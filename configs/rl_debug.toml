@@ -10,10 +10,11 @@ wandb = false
 fake = false
 timeout = 1000000000000000000000000
 num_workers = 1
-seq_length = 1024
+seq_length = 128
 
 [train.train]
 micro_bs = 8
+torch_compile = false
 
 [train.optim]
 warmup_steps = 10
@@ -24,3 +25,6 @@ name_model = "debugmodel"
 max_samples = 100000
 max_seq_len = 1024
 enforce_eager = true
+
+[inference.sampling]
+max_tokens = 128

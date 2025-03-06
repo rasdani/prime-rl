@@ -208,6 +208,7 @@ def main(config: Config):
                         logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
                         llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
                         step = maybe_new_step
+                        total_samples = 0
                         logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
                     else:
                         logger.info(f"No stable file found at {config.rollout_path} step {maybe_new_step}")
@@ -243,7 +244,7 @@ def main(config: Config):
         )
 
         if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
-            logger.info(f"Generated {total_samples} total samples")
+            logger.info(f"Generated {total_samples} total samples for step {step}")
 
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
