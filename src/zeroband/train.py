@@ -9,7 +9,6 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
-
 from zeroband.models import ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
@@ -23,6 +22,8 @@ from pydantic_config import BaseConfig, parse_argv
 from jaxtyping import Float, Int
 
 from zeroband.training.world_info import WorldInfo, get_world_info
+
+from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 
 
 class AdamConfig(BaseConfig):
@@ -47,6 +48,7 @@ class TrainConfig(BaseConfig):
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
     torch_compile: bool = True
+    liger_qwen: bool = False
 
 
 class CkptConfig(BaseConfig):
@@ -160,6 +162,14 @@ def train(config: Config):
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
+    if config.train.liger_qwen:
+        apply_liger_kernel_to_qwen2(
+            rope=True,
+            rms_norm=True,
+            swiglu=True,
+            model=model,
+        )
+
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
 
@@ -240,6 +250,7 @@ def train(config: Config):
             break
 
     logger.info("Training finished, exiting ...")
+    logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
 
 
 if __name__ == "__main__":
