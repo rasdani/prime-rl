@@ -181,7 +181,7 @@ def main(config: Config):
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
-        max_seq_len_to_capture=1.5 * config.sampling.max_tokens,  # 1.5 makes sure we capture the entire output even with prefill
+        max_seq_len_to_capture=int(1.5 * config.sampling.max_tokens),  # 1.5 makes sure we capture the entire output even with prefill
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
     )
