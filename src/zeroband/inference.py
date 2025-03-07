@@ -13,6 +13,7 @@ import time
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
+from vllm.sequence import SampleLogprobs
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
@@ -31,6 +32,8 @@ class SamplingParamConfig(BaseConfig):
     ignore_eos: bool = False
     top_p: float = 0.95
     n: int = 8
+    logprobs: int = 0  # 0 mean 1 logprob here
+    prompt_logprobs: int = 0  # 0 mean 1 logprob here
 
 
 class Config(BaseConfig):
@@ -69,12 +72,27 @@ pa_schema = pa.schema(
     [
         ("input_tokens", pa.list_(pa.int32())),
         ("output_tokens", pa.list_(pa.int32())),
+        ("input_logprobs", pa.list_(pa.float32())),
+        ("output_logprobs", pa.list_(pa.float32())),
         ("advantages", pa.float32()),
         ("rewards", pa.float32()),
         ("proofs", pa.binary()),
         ("step", pa.int32()),
     ]
 )
+
+
+def get_own_logprobs(sample_logprobs: SampleLogprobs) -> float:
+    logprobs = []
+
+    for logprob in sample_logprobs:
+        assert isinstance(logprob, dict), "Logprobs should be a dict"
+        assert len(logprob) == 1, "Logprobs should be a dict with 1 key"
+
+        _token_id, logprob_p = list(logprob.items())[0]
+        logprobs.append(logprob_p.logprob)
+
+    return logprobs
 
 
 def get_parquet_table(
@@ -85,6 +103,8 @@ def get_parquet_table(
 ) -> pa.Table:
     input_tokens_list = []
     output_tokens_list = []
+    input_logprobs_list = []
+    output_logprobs_list = []
     advantages_list = []
     rewards_list = []
     proofs_list = []
@@ -96,6 +116,8 @@ def get_parquet_table(
         for adv, reward, output in zip(advantages, rewards, request.outputs):
             input_tokens_list.append(request.prompt_token_ids)
             output_tokens_list.append(output.token_ids)
+            input_logprobs_list.append([0] * len(request.prompt_token_ids))  # putting 0 for now as not needed in the grpo loss
+            output_logprobs_list.append(get_own_logprobs(output.logprobs))
             advantages_list.append(adv)
             rewards_list.append(reward)
             proofs_list.append("I am toploc proof, handcrafted by jack".encode())
@@ -104,6 +126,8 @@ def get_parquet_table(
     arrays = [
         pa.array(input_tokens_list, type=pa.list_(pa.int32())),
         pa.array(output_tokens_list, type=pa.list_(pa.int32())),
+        # pa.array(input_logprobs_list, type=pa.list_(pa.float32())),
+        # pa.array(output_logprobs_list, type=pa.list_(pa.float32())),
         pa.array(advantages_list, type=pa.float32()),
         pa.array(rewards_list, type=pa.float32()),
         pa.array(proofs_list, type=pa.binary()),
