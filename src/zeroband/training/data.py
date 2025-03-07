@@ -24,8 +24,6 @@ class DataConfig(BaseConfig):
     seq_length: int = 1024
     fake: bool = False
     num_workers: int = 2
-
-    batch_size: int | None = None  # will be set by the top config
     timeout: float = 360
 
 
@@ -119,13 +117,11 @@ class ParquetDataset(IterableDataset):
         path: Path,
         batch_size: int,
         timeout: float,
-        step_per_rollout: int,
         pq_read_bs: int = 64,
     ):
         self._logger = get_logger()
         self._path = path
         self._batch_size = batch_size
-        self._step_per_rollout = step_per_rollout
         self._pq_read_bs = pq_read_bs
 
         self._world_info = get_world_info()
@@ -143,7 +139,7 @@ class ParquetDataset(IterableDataset):
         )
         # this assert should never be triggered because we check for it in the top config level. Keep it here for sanity
 
-        target_sample_count_per_batch = self._step_per_rollout * self._batch_size // (self._world_info.world_size * worker_info.num_workers)
+        target_sample_count_per_batch = self._batch_size // (self._world_info.world_size * worker_info.num_workers)
 
         self._logger.info(f"num_workers: {num_workers}, target_sample_count_per_batch: {target_sample_count_per_batch}")
 
@@ -251,12 +247,12 @@ class PaddingColate:
         }
 
 
-def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig, step_per_rollout: int) -> DataLoader[BatchOutput]:
+def get_dataloader(tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig) -> DataLoader[BatchOutput]:
     """Get a dataloader for the training dataset"""
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = ParquetDataset(Path(data_config.path), data_config.batch_size, data_config.timeout, step_per_rollout)
+        train_dataset = ParquetDataset(Path(data_config.path), batch_size, data_config.timeout)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
-    return DataLoader(train_dataset, batch_size=batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn)
+    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn)

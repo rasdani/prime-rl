@@ -3,7 +3,6 @@ from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import model_validator
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
@@ -73,15 +72,6 @@ class Config(BaseConfig):
 
     gpus_ids: list[int] | None = None
 
-    @model_validator(mode="after")
-    def check_batch_size(self):
-        if self.data.batch_size is None:
-            self.data.batch_size = self.optim.batch_size
-        assert self.optim.batch_size == self.data.batch_size, (
-            "The batch size in the config must be the same as the batch size in the data config."
-        )
-        return self
-
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
     assert batch_size % world_info.world_size == 0
@@ -145,7 +135,10 @@ def train(config: Config):
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 
     train_dataloader = get_dataloader(
-        tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data, step_per_rollout=config.optim.step_per_rollout
+        tokenizer=tokenizer,
+        micro_batch_size=config.train.micro_bs,
+        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
+        data_config=config.data,
     )
 
     train_dataloader_iterator = iter(train_dataloader)

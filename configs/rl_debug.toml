@@ -23,7 +23,6 @@ step_per_rollout = 2
 [inference]
 name_model = "debugmodel"
 max_samples = 100000
-max_seq_len = 1024
 enforce_eager = true
 
 [inference.sampling]

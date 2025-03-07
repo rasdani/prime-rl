@@ -68,7 +68,6 @@ class Config(BaseConfig):
 
             self.inference.step_batch_size = self.batch_size // self.inference.sampling.n
             self.train.optim.batch_size = self.batch_size // self.train.optim.step_per_rollout
-            self.train.data.batch_size = self.batch_size // self.train.optim.step_per_rollout
 
         return self
 
