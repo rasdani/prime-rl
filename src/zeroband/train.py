@@ -9,6 +9,7 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
+
 from zeroband.models import ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
@@ -24,6 +25,7 @@ from jaxtyping import Float, Int
 from zeroband.training.world_info import WorldInfo, get_world_info
 
 from liger_kernel.transformers import apply_liger_kernel_to_qwen2
+from zeroband.liger_qwen import apply_fused_linear_grpo
 
 
 class AdamConfig(BaseConfig):
@@ -49,6 +51,7 @@ class TrainConfig(BaseConfig):
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
     torch_compile: bool = True
     liger_qwen: bool = False
+    liger_grpo: bool = False
 
 
 class CkptConfig(BaseConfig):
@@ -175,6 +178,8 @@ def train(config: Config):
             swiglu=True,
             model=model,
         )
+    if config.train.liger_grpo:
+        apply_fused_linear_grpo(model)
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
