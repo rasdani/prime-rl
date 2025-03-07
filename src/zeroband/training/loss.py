@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from jaxtyping import Float, jaxtyped
+from jaxtyping import Float, Int, jaxtyped
 from beartype import beartype as typechecker
 
 
@@ -10,9 +10,9 @@ def grpo_loss(
     policy_logprobs: Float[Tensor, "batch seq vocab"],
     ref_logprobs: Float[Tensor, "batch seq vocab"],
     advantages: Float[Tensor, "batch seq"],
+    loss_mask: Int[Tensor, "batch seq"],
     beta: float = 0.04,
     epsilon: float = 0.2,
-    ignore_index: int = -100,
 ):
     """
     DeepSeek Math Loss: https://arxiv.org/abs/2402.03300
@@ -25,7 +25,7 @@ def grpo_loss(
         epsilon: Clipping parameter for PPO
         ignore_index: Specifies a target value that is ignored and does not contribute to the loss
     """
-    return _compile_grpo_loss(policy_logprobs, ref_logprobs, advantages, beta, epsilon, ignore_index)
+    return _compile_grpo_loss(policy_logprobs, ref_logprobs, advantages, loss_mask, beta, epsilon)
 
 
 @torch.compile
@@ -33,13 +33,13 @@ def _compile_grpo_loss(
     policy_logprobs: torch.Tensor,
     ref_logprobs: torch.Tensor,
     advantages: torch.Tensor,
+    loss_mask: torch.Tensor,
     beta: float,
     epsilon: float,
-    ignore_index: int,
 ):
     # Create mask for tokens that should be ignored
     # Shape: [batch, seq]
-    mask = (advantages != ignore_index).float()
+    mask = loss_mask.float()  # probably not needed to cast to float
 
     # Expand advantages to match sequence dimension
     advantages = advantages.unsqueeze(-1)  # [batch, seq, 1]

@@ -179,6 +179,7 @@ def train(config: Config):
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
             average_rewards += batch["rewards"].mean() / gradient_accumulation_steps
+            loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].to("cuda")
 
             del batch
 
@@ -189,8 +190,8 @@ def train(config: Config):
             ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
             # loss
-            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
-            del cpu_advantages, advantages, policy_logprobs, ref_logprobs
+            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, loss_mask) / gradient_accumulation_steps
+            del cpu_advantages, advantages, policy_logprobs, ref_logprobs, loss_mask
 
             # backward
             loss.backward()
