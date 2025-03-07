@@ -56,13 +56,19 @@ def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list
     stable_file = step_path / STABLE_FILE
 
     start_time = time.time()
+
+    wait_count = 0
     while not stable_file.exists():
         if time.time() - start_time > timeout:
             logger.info("raising timeout")
             raise TimeoutError(f"Timeout waiting for step {step_count} to be created")
 
-        logger.info(f"Waiting for {stable_file} to be created")
-        time.sleep(5)
+        if wait_count % 50 == 0:
+            logger.info(f"Waiting for {stable_file} to be created")
+
+        wait_count += 1
+
+        time.sleep(0.5)
 
     files = list(step_path.glob("*.parquet"))
     return files
