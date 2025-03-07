@@ -24,8 +24,6 @@ class DataConfig(BaseConfig):
     seq_length: int = 1024
     fake: bool = False
     num_workers: int = 2
-
-    batch_size: int | None = None  # will be set by the top config
     timeout: float = 360
 
 
@@ -46,7 +44,7 @@ class FakeTokenizedDataset(IterableDataset):
             advantages = torch.randn(len_)
             rewards = torch.randn(len_)
             self.step += 1
-            yield {"input_ids": input_ids, "advantages": advantages, "rewards": rewards}
+            yield {"input_ids": input_ids, "advantages": advantages, "rewards": rewards, "loss_mask": torch.ones(len_).int()}
 
 
 def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list[Path]:
@@ -56,13 +54,22 @@ def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list
     stable_file = step_path / STABLE_FILE
 
     start_time = time.time()
+
+    worker_info = torch.utils.data.get_worker_info()
+    worker_id = worker_info.id if worker_info is not None else 0
+
+    wait_count = 0
     while not stable_file.exists():
         if time.time() - start_time > timeout:
             logger.info("raising timeout")
             raise TimeoutError(f"Timeout waiting for step {step_count} to be created")
 
-        logger.info(f"Waiting for {stable_file} to be created")
-        time.sleep(5)
+        if wait_count % 50 == 0:
+            logger.info(f"[data_worker:{worker_id}] Waiting for {stable_file} to be created")
+
+        wait_count += 1
+
+        time.sleep(0.5)
 
     files = list(step_path.glob("*.parquet"))
     return files
@@ -152,7 +159,7 @@ class ParquetDataset(IterableDataset):
 
             dataset = ds.dataset(files, format="parquet")
             # Set up a scanner with just the required columns
-            required_columns = ["output_tokens", "advantages", "rewards"]
+            required_columns = ["input_tokens", "output_tokens", "advantages", "rewards"]
 
             scanner = dataset.scanner(columns=required_columns, batch_size=self._pq_read_bs)
 
@@ -163,10 +170,11 @@ class ParquetDataset(IterableDataset):
 
                 if all(col in batch.column_names for col in required_columns):
                     output_tokens = batch["output_tokens"]
+                    input_tokens = batch["input_tokens"]
                     advantages = batch["advantages"]
                     rewards = batch["rewards"]
 
-                    for token, advantage, reward in zip(output_tokens, advantages, rewards):
+                    for in_token, out_token, advantage, reward in zip(input_tokens, output_tokens, advantages, rewards):
                         counter += 1
                         if not _should_skip_index(
                             index=counter,
@@ -176,10 +184,14 @@ class ParquetDataset(IterableDataset):
                             workers_id=worker_id,
                         ):
                             try:
-                                ids = torch.tensor(token.as_py())
+                                input_ids = torch.tensor(in_token.as_py())
+                                output_ids = torch.tensor(out_token.as_py())
+                                ids = torch.cat([input_ids, output_ids], dim=0)
+
+                                loss_mask = torch.cat([torch.zeros(len(input_ids)), torch.ones(len(output_ids))], dim=0).int()
                                 adv = torch.tensor(data=[advantage.as_py()] * len(ids))
                                 rew = torch.tensor(data=[reward.as_py()] * len(ids))
-                                data = {"input_ids": ids, "advantages": adv, "rewards": rew}
+                                data = {"input_ids": ids, "advantages": adv, "rewards": rew, "loss_mask": loss_mask}
                             except Exception as e:
                                 self._logger.warn(f"Error processing row {counter} sample {sample_count}: {str(e)}")
                                 data = None
@@ -202,6 +214,7 @@ class BatchOutput(TypedDict):
     input_ids: Int[torch.Tensor, "batch seq"]
     advantages: Float[torch.Tensor, "batch seq"]
     rewards: Float[torch.Tensor, "batch seq"]
+    loss_mask: Int[torch.Tensor, "batch seq"]
 
 
 class PaddingColate:
@@ -210,42 +223,48 @@ class PaddingColate:
         self._pad_token_id = pad_token_id
 
     def __call__(self, samples: list[dict[str, torch.LongTensor]]) -> BatchOutput:
-        assert samples[0].keys() == {"input_ids", "advantages", "rewards"}, f"samples[0].keys() == {samples[0].keys()}"
+        assert samples[0].keys() == {"input_ids", "advantages", "rewards", "loss_mask"}, f"samples[0].keys() == {samples[0].keys()}"
 
         inputs_ids = []
         advantages = []
         rewards = []
+        loss_masks = []
         for sample in samples:
             ids = sample["input_ids"]
             adv = sample["advantages"]
             rew = sample["rewards"]
+            loss_mask = sample["loss_mask"]
 
             if len(ids) >= self._seq_len:
                 ids = ids[: self._seq_len]
                 adv = adv[: self._seq_len]
                 rew = rew[: self._seq_len]
+                loss_mask = loss_mask[: self._seq_len]
             else:
                 ids = torch.cat([ids, torch.full((self._seq_len - len(ids),), fill_value=self._pad_token_id, dtype=ids.dtype)])
                 adv = torch.cat([adv, torch.zeros(self._seq_len - len(adv), dtype=adv.dtype)])
                 rew = torch.cat([rew, torch.zeros(self._seq_len - len(rew), dtype=rew.dtype)])
+                loss_mask = torch.cat([loss_mask, torch.zeros(self._seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
 
             inputs_ids.append(ids)
             advantages.append(adv)
             rewards.append(rew)
+            loss_masks.append(loss_mask)
 
         return {
             "input_ids": torch.stack(inputs_ids, dim=0),
             "advantages": torch.stack(advantages, dim=0),
             "rewards": torch.stack(rewards, dim=0),
+            "loss_mask": torch.stack(loss_masks, dim=0).int(),
         }
 
 
-def get_dataloader(tokenizer, batch_size: int, data_config: DataConfig) -> DataLoader[BatchOutput]:
+def get_dataloader(tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig) -> DataLoader[BatchOutput]:
     """Get a dataloader for the training dataset"""
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = ParquetDataset(Path(data_config.path), data_config.batch_size, data_config.timeout)
+        train_dataset = ParquetDataset(Path(data_config.path), batch_size, data_config.timeout)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
-    return DataLoader(train_dataset, batch_size=batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn)
+    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn)

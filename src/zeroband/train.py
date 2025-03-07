@@ -3,7 +3,6 @@ from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import model_validator
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
@@ -43,6 +42,8 @@ class OptimConfig(BaseConfig):
     stable_steps: int = 80_000
     total_steps: int = 88_000
     batch_size: int = 512
+
+    step_per_rollout: int = 1
 
 
 class TrainConfig(BaseConfig):
@@ -96,10 +97,11 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     assert batch_size % world_info.world_size == 0
     batch_size = batch_size // world_info.world_size
 
-    assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})."
+    print(f"batch_size: {batch_size}, micro_bs: {micro_bs}, data_workers: {data_workers}")
+    assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
 
-    assert batch_size % (data_workers * world_info.world_size) == 0, (
-        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers}) times the number of GPUs ({world_info.world_size})."
+    assert batch_size % data_workers == 0, (
+        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers})."
     )
 
     return batch_size // micro_bs
@@ -152,7 +154,12 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model)
 
-    train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
+    train_dataloader = get_dataloader(
+        tokenizer=tokenizer,
+        micro_batch_size=config.train.micro_bs,
+        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
+        data_config=config.data,
+    )
 
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -195,25 +202,25 @@ def train(config: Config):
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            model.set_requires_gradient_sync(not is_accumulating) # no sync if we are accumulating gradients
+            model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
             # Load args
             batch = next(train_dataloader_iterator)
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
             average_rewards += batch["rewards"].mean() / gradient_accumulation_steps
-
+            loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].to("cuda")
             del batch
 
             # Gather args for grpo loss
-            advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
             policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
             del input_ids
             ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
 
             # loss
-            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
-            del cpu_advantages, advantages, policy_logprobs, ref_logprobs
+            advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
+            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, loss_mask) / gradient_accumulation_steps
+            del cpu_advantages, advantages, policy_logprobs, ref_logprobs, loss_mask
 
             # backward
             loss.backward()
@@ -258,8 +265,9 @@ def train(config: Config):
         if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
-        if config.ckpt.rollout_path is not None:
-            path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
+        if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
+            step_per_rollout = training_progress.step // config.optim.step_per_rollout
+            path = Path(config.ckpt.rollout_path) / f"step_{step_per_rollout}"
             save_ckpt_for_rollout(model, path)
 
         if training_progress.step >= config.optim.total_steps:

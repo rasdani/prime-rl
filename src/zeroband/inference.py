@@ -1,4 +1,3 @@
-from collections import defaultdict
 import os
 import asyncio
 import json
@@ -28,13 +27,10 @@ process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=8)
 
 class SamplingParamConfig(BaseConfig):
     temperature: float = 0.6
-    max_tokens: int = 4096
+    max_tokens: int = 16_000
     ignore_eos: bool = False
     top_p: float = 0.95
     n: int = 8
-
-
-dataset_key = defaultdict(lambda: "prompt", {"justus27/difficulty-calibrated-deepscaler": "problem"})
 
 
 class Config(BaseConfig):
@@ -44,7 +40,6 @@ class Config(BaseConfig):
     max_samples: int | None = None
     output_path: str = "outputs"
     tp: int | Literal["all"] = 1
-    max_seq_len: int | None = None
     total_step: int | None = None
     step_batch_size: int | None = None  # will be used to create stable file
     rollout_path: str | None = None
@@ -52,6 +47,7 @@ class Config(BaseConfig):
     quant: Literal["fp8"] | None = None
 
     sampling: SamplingParamConfig = SamplingParamConfig()
+    enforce_eager: bool = False
 
 
 def fake_chat_template(messages):
@@ -185,8 +181,9 @@ def main(config: Config):
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
-        max_model_len=config.max_seq_len,
+        max_seq_len_to_capture=int(1.5 * config.sampling.max_tokens),  # 1.5 makes sure we capture the entire output even with prefill
         quantization=config.quant,
+        enforce_eager=config.enforce_eager,
     )
     tokenizer = llm.get_tokenizer()
     logger = get_logger("INFERENCE")
@@ -195,7 +192,7 @@ def main(config: Config):
     max_samples = config.max_samples or len(dataset)
 
     step = 0
-    total_samples = 0
+    total_problems = 0
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
@@ -210,6 +207,8 @@ def main(config: Config):
                         logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
                         llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
                         step = maybe_new_step
+                        total_problems = 0
+                        total_tokens = 0
                         logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
                     else:
                         logger.info(f"No stable file found at {config.rollout_path} step {maybe_new_step}")
@@ -235,7 +234,7 @@ def main(config: Config):
         batch_total_tokens = batch_input_tokens + batch_output_tokens
         total_tokens += batch_total_tokens
 
-        avg_seq_length = batch_total_tokens / len(generated_tokens) if generated_tokens else 0
+        avg_seq_length = batch_total_tokens / (len(generated_tokens) * config.sampling.n) if generated_tokens else 0
 
         elapsed_time = end_time - start_time
         tokens_per_second = batch_total_tokens / elapsed_time if elapsed_time > 0 else 0
@@ -244,8 +243,8 @@ def main(config: Config):
             f"Batch throughput: {tokens_per_second:.2f} tok/sec ({batch_total_tokens} tokens in {elapsed_time:.2f}s, avg seq len: {avg_seq_length:.1f})"
         )
 
-        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
-            logger.info(f"Generated {total_samples} total samples")
+        if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
+            logger.info(f"Generated {total_problems} problems for step {step}")
 
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
@@ -258,10 +257,10 @@ def main(config: Config):
         os.makedirs(step_path, exist_ok=True)
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
 
-        total_samples += len(prompts)
-        logger.info(f"Generated {total_samples} total samples")
+        total_problems += len(prompts)
+        logger.info(f"Generated {total_problems} total samples")
 
-        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+        if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
             stable_file = step_path / "stable"
             stable_file.touch()
 

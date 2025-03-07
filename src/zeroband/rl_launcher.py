@@ -56,7 +56,7 @@ class Config(BaseConfig):
     @model_validator(mode="after")
     def total_steps_check(self):
         if self.total_steps is not None:
-            self.train.optim.total_steps = self.total_steps
+            self.train.optim.total_steps = self.total_steps * self.train.optim.step_per_rollout
             self.inference.total_step = self.total_steps
 
         return self
@@ -64,9 +64,10 @@ class Config(BaseConfig):
     @model_validator(mode="after")
     def validate_batch_size(self):
         if self.batch_size is not None:
-            self.inference.step_batch_size = self.batch_size
-            self.train.optim.batch_size = self.batch_size
-            self.train.data.batch_size = self.batch_size
+            assert self.batch_size % self.train.optim.step_per_rollout == 0, "batch_size must be divisible by step_per_rollout"
+
+            self.inference.step_batch_size = self.batch_size // self.inference.sampling.n
+            self.train.optim.batch_size = self.batch_size // self.train.optim.step_per_rollout
 
         return self
 

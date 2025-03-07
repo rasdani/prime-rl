@@ -1,14 +1,15 @@
 name_model = "Qwen1.5B"
-project = "debug_1B_zero_band"
+project = "rl-Qwen1.5B"
 
 [train]
 micro_bs = 32
 reshard_after_forward = true
 
 [optim]
-batch_size = 1024
-warmup_steps = 1000
-total_steps = 8192
+batch_size = 128
+warmup_steps = 1
+total_steps = 100000000000000
+step_per_rollout = 8
 
 [optim.optim]
-lr = 7e-4
+lr = 1e-6
