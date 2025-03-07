@@ -57,6 +57,9 @@ def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list
 
     start_time = time.time()
 
+    worker_info = torch.utils.data.get_worker_info()
+    worker_id = worker_info.id if worker_info is not None else 0
+
     wait_count = 0
     while not stable_file.exists():
         if time.time() - start_time > timeout:
@@ -64,7 +67,7 @@ def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list
             raise TimeoutError(f"Timeout waiting for step {step_count} to be created")
 
         if wait_count % 50 == 0:
-            logger.info(f"Waiting for {stable_file} to be created")
+            logger.info(f"[data_worker:{worker_id}] Waiting for {stable_file} to be created")
 
         wait_count += 1
 
