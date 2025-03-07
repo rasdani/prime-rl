@@ -233,7 +233,7 @@ def main(config: Config):
         batch_total_tokens = batch_input_tokens + batch_output_tokens
         total_tokens += batch_total_tokens
 
-        avg_seq_length = batch_total_tokens / len(generated_tokens) if generated_tokens else 0
+        avg_seq_length = batch_total_tokens / (len(generated_tokens) * config.sampling.n) if generated_tokens else 0
 
         elapsed_time = end_time - start_time
         tokens_per_second = batch_total_tokens / elapsed_time if elapsed_time > 0 else 0
