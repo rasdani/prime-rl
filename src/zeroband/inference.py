@@ -27,7 +27,7 @@ process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=8)
 
 class SamplingParamConfig(BaseConfig):
     temperature: float = 0.6
-    max_tokens: int = 4096
+    max_tokens: int = 16_000
     ignore_eos: bool = False
     top_p: float = 0.95
     n: int = 8
@@ -40,7 +40,6 @@ class Config(BaseConfig):
     max_samples: int | None = None
     output_path: str = "outputs"
     tp: int | Literal["all"] = 1
-    max_seq_len: int | None = None
     total_step: int | None = None
     step_batch_size: int | None = None  # will be used to create stable file
     rollout_path: str | None = None
@@ -182,7 +181,7 @@ def main(config: Config):
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
-        max_model_len=config.max_seq_len,
+        max_seq_len_to_capture=1.5 * config.sampling.max_tokens,  # 1.5 makes sure we capture the entire output even with prefill
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
     )
