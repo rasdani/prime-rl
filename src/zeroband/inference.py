@@ -192,7 +192,7 @@ def main(config: Config):
     max_samples = config.max_samples or len(dataset)
 
     step = 0
-    total_samples = 0
+    total_problems = 0
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
@@ -207,7 +207,8 @@ def main(config: Config):
                         logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
                         llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
                         step = maybe_new_step
-                        total_samples = 0
+                        total_problems = 0
+                        total_tokens = 0
                         logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
                     else:
                         logger.info(f"No stable file found at {config.rollout_path} step {maybe_new_step}")
@@ -242,8 +243,8 @@ def main(config: Config):
             f"Batch throughput: {tokens_per_second:.2f} tok/sec ({batch_total_tokens} tokens in {elapsed_time:.2f}s, avg seq len: {avg_seq_length:.1f})"
         )
 
-        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
-            logger.info(f"Generated {total_samples} total samples for step {step}")
+        if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
+            logger.info(f"Generated {total_problems} problems for step {step}")
 
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
@@ -256,10 +257,10 @@ def main(config: Config):
         os.makedirs(step_path, exist_ok=True)
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
 
-        total_samples += len(prompts)
-        logger.info(f"Generated {total_samples} total samples")
+        total_problems += len(prompts)
+        logger.info(f"Generated {total_problems} total samples")
 
-        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+        if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
             stable_file = step_path / "stable"
             stable_file.touch()
 
