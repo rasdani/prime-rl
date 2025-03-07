@@ -35,7 +35,7 @@ class SamplingParamConfig(BaseConfig):
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
-    dataset: Literal["justus27/deepscaler-math-genesys-format"] = "justus27/deepscaler-math-genesys-format"
+    dataset: str = "justus27/deepscaler-math-genesys-format"
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
