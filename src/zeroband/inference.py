@@ -33,7 +33,6 @@ class SamplingParamConfig(BaseConfig):
     top_p: float = 0.95
     n: int = 8
     logprobs: int = 0  # 0 mean 1 logprob here
-    prompt_logprobs: int = 0  # 0 mean 1 logprob here
 
 
 class Config(BaseConfig):
