@@ -2,7 +2,6 @@ import torch
 from torch import Tensor
 from jaxtyping import Float, Int, jaxtyped
 from beartype import beartype as typechecker
-from torch.nn import functional as F
 
 
 # beartype here just make sure we have the correct shape
@@ -42,12 +41,17 @@ def _compile_grpo_loss(
     Computes the GRPO loss.
     """
     # Get log probs from current policy
-    log_probs = F.log_softmax(logits, dim=-1)
 
     # Extract per-token log probs for the tokens that were generated
-    per_token_logps = torch.gather(log_probs, dim=2, index=input_ids.unsqueeze(-1), sparse_grad=True).squeeze(-1)
 
-    # We only have original log probs for tokens that were generated, not for the first prompt token
+    # stolen from here https://github.com/huggingface/trl/blob/e3244d2d096ff1e2e248c931d06d39e165e20623/trl/trainer/utils.py#L1665
+    # but we did not saw instability issue so decided to use it
+    selected_logits = torch.gather(logits, dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1)
+    # loop to reduce peak mem consumption
+    logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
+    per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
+
+    # We only have original log probs for tokens that were generated, not for the first prompt token which is the BOS anyway
     # So we need to drop the first token from all tensors
     per_token_logps = per_token_logps[:, 1:]
     advantages = advantages[:, 1:]
