@@ -126,8 +126,8 @@ def get_parquet_table(
     arrays = [
         pa.array(input_tokens_list, type=pa.list_(pa.int32())),
         pa.array(output_tokens_list, type=pa.list_(pa.int32())),
-        # pa.array(input_logprobs_list, type=pa.list_(pa.float32())),
-        # pa.array(output_logprobs_list, type=pa.list_(pa.float32())),
+        pa.array(input_logprobs_list, type=pa.list_(pa.float32())),
+        pa.array(output_logprobs_list, type=pa.list_(pa.float32())),
         pa.array(advantages_list, type=pa.float32()),
         pa.array(rewards_list, type=pa.float32()),
         pa.array(proofs_list, type=pa.binary()),
