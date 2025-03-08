@@ -44,6 +44,8 @@ def test_padding_collate():
         assert batch["input_ids"].shape == (10, 10)
         assert batch["advantages"].shape == (10, 10)
         assert batch["rewards"].shape == (10, 10)
+        assert batch["loss_mask"].shape == (10, 10)
+        assert batch["logprobs"].shape == (10, 10)
 
         if i > 10:
             break
