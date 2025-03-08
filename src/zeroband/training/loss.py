@@ -45,7 +45,7 @@ def _compile_grpo_loss(
     log_probs = F.log_softmax(logits, dim=-1)
 
     # Extract per-token log probs for the tokens that were generated
-    per_token_logps = torch.gather(log_probs, dim=2, index=input_ids.unsqueeze(-1)).squeeze(-1)
+    per_token_logps = torch.gather(log_probs, dim=2, index=input_ids.unsqueeze(-1), sparse_grad=True).squeeze(-1)
 
     # We only have original log probs for tokens that were generated, not for the first prompt token
     # So we need to drop the first token from all tensors
