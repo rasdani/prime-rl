@@ -66,7 +66,7 @@ def _compile_grpo_loss(
     per_token_loss = torch.min(unclipped_loss, clipped_loss)
 
     # Apply mask and average
-    masked_loss = (per_token_loss * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1e-5)
+    masked_loss = -(per_token_loss * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1e-5)
 
     # Return mean loss
-    return -masked_loss.mean()  # Negative because we want to maximize reward
+    return masked_loss.mean()  # Negative because we want to maximize reward
