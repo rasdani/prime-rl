@@ -51,6 +51,8 @@ class Config(BaseConfig):
     sampling: SamplingParamConfig = SamplingParamConfig()
     enforce_eager: bool = False
 
+    max_async_level: int = 2  # the amount of step for which we can be in advance
+
 
 def fake_chat_template(messages):
     formatted_prompts = []
@@ -214,27 +216,34 @@ def main(config: Config):
     dataset = load_dataset(config.dataset, split="train")
     max_samples = config.max_samples or len(dataset)
 
-    step = 0
+    ckpt_step = 0
+    real_step = 0
+
     total_problems = 0
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
-        if config.rollout_path is not None:
-            last_step = list(Path(config.rollout_path).glob("step_*"))
-            if last_step:
-                last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
-                maybe_new_step = int(last_step.stem.split("_")[-1])
-                if step < maybe_new_step:
-                    stable_file = last_step / "stable"
-                    if stable_file.exists():
-                        logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
-                        llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
-                        step = maybe_new_step
-                        total_problems = 0
-                        total_tokens = 0
-                        logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
-                    else:
-                        logger.info(f"No stable file found at {config.rollout_path} step {maybe_new_step}")
+        logger.info(
+            f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.max_async_level: {config.max_async_level}"
+        )
+        if config.rollout_path is not None and real_step - ckpt_step > config.max_async_level:
+            while True:
+                last_step = list(Path(config.rollout_path).glob("step_*"))
+                if last_step:
+                    last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
+                    maybe_new_step = int(last_step.stem.split("_")[-1])
+                    if ckpt_step < maybe_new_step:
+                        stable_file = last_step / "stable"
+                        if stable_file.exists():
+                            logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
+                            llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
+                            ckpt_step = maybe_new_step
+                            total_problems = 0
+                            total_tokens = 0
+                            logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
+                            break
+                logger.info(f"No checkpoint found at {config.rollout_path}, waiting for new checkpoint")
+                time.sleep(1)
 
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
@@ -267,16 +276,16 @@ def main(config: Config):
         )
 
         if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
-            logger.info(f"Generated {total_problems} problems for step {step}")
+            logger.info(f"Generated {total_problems} problems for step {real_step}")
 
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
 
-        table = get_parquet_table(generated_tokens, grouped_advantages, grouped_rewards, step)
+        table = get_parquet_table(generated_tokens, grouped_advantages, grouped_rewards, ckpt_step)
 
-        step_path = Path(config.output_path) / f"step_{step}"
+        step_path = Path(config.output_path) / f"step_{real_step}"
         os.makedirs(step_path, exist_ok=True)
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
 
@@ -286,8 +295,9 @@ def main(config: Config):
         if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
             stable_file = step_path / "stable"
             stable_file.touch()
+            real_step += 1
 
-        if config.total_step is not None and step >= config.total_step:
+        if config.total_step is not None and real_step >= config.total_step:
             logger.info(f"Reached total step {config.total_step}, stopping inference")
             break
 
