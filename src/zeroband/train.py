@@ -180,18 +180,15 @@ def train(config: Config):
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
             average_rewards += batch["rewards"].mean() / gradient_accumulation_steps
             loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].to("cuda")
+            original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"].to("cuda")
 
             del batch
 
             # Gather args for grpo loss
             advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
-            policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-            del input_ids
-            ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
-
-            # loss
-            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, loss_mask) / gradient_accumulation_steps
-            del cpu_advantages, advantages, policy_logprobs, ref_logprobs, loss_mask
+            logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
+            del cpu_advantages, advantages, logits, loss_mask, input_ids, original_logprobs
 
             # backward
             loss.backward()
