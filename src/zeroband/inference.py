@@ -56,7 +56,7 @@ class Config(BaseConfig):
     max_async_level: int = 2  # the amount of step for which we can be in advance
 
     # mutli gpu
-    tp: int | Literal["all"] = 1
+    tp: int = 1
     dp: int = 1
     gpus_ids: list[int] | None = None
 
@@ -219,9 +219,6 @@ def compute_advantages_grpo(grouped_rewards: dict[int, torch.FloatTensor], epsil
 
 
 def inference(config: Config):
-    if config.tp == "all":
-        config.tp = torch.cuda.device_count()
-
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
