@@ -338,7 +338,7 @@ def inference_run(config: Config) -> list[mp.Process]:
         processes = []
 
         if config.step_batch_size is None:
-            config.step_batch_size = config.batch_size // config.dp
+            config.step_batch_size = config.step_batch_size // config.dp
 
         gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
 
