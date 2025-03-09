@@ -17,13 +17,13 @@ from vllm.sequence import SampleLogprobs
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
-from zeroband.rewards.math import compute_math_reward
+from zeroband.rewards.registry import REWARD_FUNCTIONS
 
 from datasets import load_dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=8)
+process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=48)
 
 
 class SamplingParamConfig(BaseConfig):
@@ -31,13 +31,13 @@ class SamplingParamConfig(BaseConfig):
     max_tokens: int = 16_000
     ignore_eos: bool = False
     top_p: float = 0.95
-    n: int = 8
+    n: int = 64
     logprobs: int = 0  # 0 mean 1 logprob here
 
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
-    dataset: str = "justus27/deepscaler-math-genesys-format"
+    dataset: str = "justus27/kod-code-genesys-schema"
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
@@ -160,20 +160,22 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     return llm
 
 
-async def compute_reward_for_output(output, verification_info):
+async def compute_reward_for_output(output, verification_info, task_type):
     loop = asyncio.get_running_loop()
+    reward_fn = REWARD_FUNCTIONS[task_type]
+    
     # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
-    return await loop.run_in_executor(process_executor, compute_math_reward, output.text, verification_info)
+    return await loop.run_in_executor(process_executor, reward_fn, output.text, verification_info)
 
 
-async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput], verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
+async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput], verification_infos: list[str], task_types: list[str]) -> dict[int, torch.FloatTensor]:
     parsed_infos = [json.loads(ver) for ver in verification_infos]
     tasks = []
     mapping = []
 
-    for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
+    for req_idx, (request, verification_info, task_type) in enumerate(zip(generated_tokens, parsed_infos, task_types)):
         for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info)))
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, task_type)))
             mapping.append(req_idx)
 
     all_results = await asyncio.gather(*tasks)
@@ -241,6 +243,7 @@ def main(config: Config):
         messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
+        task_types = [item["task_type"] for item in batch]
 
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
@@ -270,9 +273,14 @@ def main(config: Config):
             logger.info(f"Generated {total_problems} problems for step {step}")
 
         # Compute rewards asynchronously, grouped as a dictionary.
-        grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
+        start_reward_advantages = time.time()
+        grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos, task_types))
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
+        end_reward_advantages = time.time()
+        
+        elapsed_time = end_reward_advantages-start_reward_advantages
+        logger.info(f"Computed rewards and advantages in in {elapsed_time:.2f}s")
 
         table = get_parquet_table(generated_tokens, grouped_advantages, grouped_rewards, step)
 
