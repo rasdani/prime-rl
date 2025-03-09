@@ -204,25 +204,26 @@ def train(config: Config):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
             model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
-            # Load args
+            # Unpack batch
             batch = next(train_dataloader_iterator)
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
             average_rewards += batch["rewards"].mean() / gradient_accumulation_steps
-            loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].to("cuda")
+            cpu_loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"]
+            cpu_original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"]
             del batch
 
-            # Gather args for grpo loss
-            policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-            del input_ids
-            ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
+            # Forward
+            logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-            # loss
+            # Loss
             advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
-            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, loss_mask) / gradient_accumulation_steps
-            del cpu_advantages, advantages, policy_logprobs, ref_logprobs, loss_mask
+            loss_mask = cpu_loss_mask.to("cuda")
+            cpu_original_logprobs = cpu_original_logprobs.to("cuda")
+            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
+            del cpu_advantages, advantages, logits, loss_mask, input_ids, original_logprobs
 
-            # backward
+            # Backward
             loss.backward()
             loss_batch += loss.detach().clone()
             del loss

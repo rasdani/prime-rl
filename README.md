@@ -36,7 +36,7 @@ uv sync
 4. Precommit install
 
 ```bash
-uv pre-commit install
+uv run pre-commit install
 ```
 
 5. Test

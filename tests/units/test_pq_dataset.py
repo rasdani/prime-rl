@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 def test_pq_dataset(fake_rollout_files_dir):
     path = fake_rollout_files_dir(steps=[0, 1, 2, 3], num_files=4, batch_size=8)
 
-    dataset = ParquetDataset(path, 8 * 4, timeout=2, step_per_rollout=1)
+    dataset = ParquetDataset(path, 8 * 4, timeout=2)
 
     dataloader = DataLoader(dataset, batch_size=10, num_workers=2)
 
@@ -44,6 +44,8 @@ def test_padding_collate():
         assert batch["input_ids"].shape == (10, 10)
         assert batch["advantages"].shape == (10, 10)
         assert batch["rewards"].shape == (10, 10)
+        assert batch["loss_mask"].shape == (10, 10)
+        assert batch["logprobs"].shape == (10, 10)
 
         if i > 10:
             break

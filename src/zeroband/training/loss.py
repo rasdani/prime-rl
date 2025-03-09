@@ -7,11 +7,11 @@ from beartype import beartype as typechecker
 # beartype here just make sure we have the correct shape
 @jaxtyped(typechecker=typechecker)
 def grpo_loss(
-    policy_logprobs: Float[Tensor, "batch seq vocab"],
-    ref_logprobs: Float[Tensor, "batch seq vocab"],
+    logits: Float[Tensor, "batch seq vocab"],
+    input_ids: Int[Tensor, "batch seq"],
     advantages: Float[Tensor, "batch seq"],
+    original_logprobs: Float[Tensor, "batch seq"],
     loss_mask: Int[Tensor, "batch seq"],
-    beta: float = 0.04,
     epsilon: float = 0.2,
 ):
     """
@@ -25,52 +25,52 @@ def grpo_loss(
         epsilon: Clipping parameter for PPO
         ignore_index: Specifies a target value that is ignored and does not contribute to the loss
     """
-    return _compile_grpo_loss(policy_logprobs, ref_logprobs, advantages, loss_mask, beta, epsilon)
+    return _compile_grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, epsilon)
 
 
 @torch.compile
 def _compile_grpo_loss(
-    policy_logprobs: torch.Tensor,
-    ref_logprobs: torch.Tensor,
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
     advantages: torch.Tensor,
+    original_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
-    beta: float,
     epsilon: float,
 ):
-    # Create mask for tokens that should be ignored
-    # Shape: [batch, seq]
-    mask = loss_mask.float()  # probably not needed to cast to float
+    """
+    Computes the GRPO loss.
+    """
+    # Get log probs from current policy
 
-    # Expand advantages to match sequence dimension
-    advantages = advantages.unsqueeze(-1)  # [batch, seq, 1]
+    # Extract per-token log probs for the tokens that were generated
 
-    # Policy ratio
-    ratio = torch.exp(policy_logprobs - ref_logprobs)
+    # stolen from here https://github.com/huggingface/trl/blob/e3244d2d096ff1e2e248c931d06d39e165e20623/trl/trainer/utils.py#L1665
+    # but we did not saw instability issue so decided to use it
+    selected_logits = torch.gather(logits, dim=-1, index=input_ids.unsqueeze(-1)).squeeze(-1)
+    # loop to reduce peak mem consumption
+    logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
+    per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
+
+    # We only have original log probs for tokens that were generated, not for the first prompt token which is the BOS anyway
+    # So we need to drop the first token from all tensors
+    per_token_logps = per_token_logps[:, 1:]
+    advantages = advantages[:, 1:]
+    original_logprobs = original_logprobs[:, 1:]
+    loss_mask = loss_mask[:, 1:]
+
+    # Compute ratio for PPO clipping
+    ratio = torch.exp(per_token_logps - original_logprobs)
+
+    # Compute clipped ratio
     clipped_ratio = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
 
-    # Policy loss
-    policy_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+    # Compute PPO loss
+    unclipped_loss = ratio * advantages
+    clipped_loss = clipped_ratio * advantages
+    per_token_loss = torch.min(unclipped_loss, clipped_loss)
 
-    # Apply mask to ignore specified indices
-    # Expand mask to match policy_loss dimensions
-    mask_expanded = mask.unsqueeze(-1)  # [batch, seq, 1]
-    policy_loss = policy_loss * mask_expanded
+    # Apply mask and average
+    masked_loss = -(per_token_loss * loss_mask).sum(dim=1) / loss_mask.sum(dim=1).clamp(min=1e-5)
 
-    # KL penalty (commented out in original code)
-    # kl_div = ref_logprobs / policy_logprobs - torch.log(ref_logprobs / policy_logprobs) - 1
-    # if implemented, would need: kl_div = kl_div * mask_expanded
-
-    # Reduce across sequence length with proper normalization
-    # Sum and divide by number of non-ignored tokens in each batch
-    # Using a small constant epsilon (1e-8) to prevent division by zero
-    EPSILON = 1e-8
-    seq_lengths = mask.sum(dim=-1, keepdim=True)  # [batch, 1]
-    policy_loss = policy_loss.sum(dim=-1) / (seq_lengths + EPSILON)
-
-    # kl_penalty = (kl_div.sum(dim=-1) / (seq_lengths + 1e-8)) if implemented
-    kl_penalty = 0
-
-    # Final loss (mean across batch)
-    loss = (policy_loss + beta * kl_penalty).mean()
-
-    return loss
+    # Return mean loss
+    return masked_loss.mean()  # Negative because we want to maximize reward
