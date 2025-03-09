@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Literal
 import uuid
+from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
@@ -23,6 +24,9 @@ from zeroband.rewards.math import compute_math_reward
 from datasets import load_dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
+import multiprocessing as mp
+
+from zeroband.training.mp import EnvWrapper, cuda_available_devices
 
 
 class SamplingParamConfig(BaseConfig):
@@ -40,7 +44,6 @@ class Config(BaseConfig):
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
-    tp: int | Literal["all"] = 1
     total_step: int | None = None
     step_batch_size: int | None = None  # will be used to create stable file
     rollout_path: str | None = None
@@ -51,6 +54,18 @@ class Config(BaseConfig):
     enforce_eager: bool = False
 
     max_async_level: int = 2  # the amount of step for which we can be in advance
+
+    # mutli gpu
+    tp: int | Literal["all"] = 1
+    dp: int = 1
+    gpus_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def validate_step_batch_size(self):
+        if self.step_batch_size is not None:
+            assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
+            assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
+        return self
 
 
 def fake_chat_template(messages):
@@ -203,7 +218,7 @@ def compute_advantages_grpo(grouped_rewards: dict[int, torch.FloatTensor], epsil
     return advantages
 
 
-def main(config: Config):
+def inference(config: Config):
     if config.tp == "all":
         config.tp = torch.cuda.device_count()
 
@@ -215,9 +230,9 @@ def main(config: Config):
         enforce_eager=config.enforce_eager,
     )
     tokenizer = llm.get_tokenizer()
-    logger = get_logger("INFERENCE")
+    logger = get_logger(f"INFERENCE {os.environ.get('RANK', '')}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
-    dataset = load_dataset(config.dataset, split="train")
+    dataset = load_dataset(config.dataset, split="train").shuffle()  # todo never set seed otherwise this will be fucked
     max_samples = config.max_samples or len(dataset)
 
     ckpt_step = 0
@@ -306,6 +321,49 @@ def main(config: Config):
             break
 
     get_process_executor().shutdown(wait=True)
+
+
+def inference_sub_process(config: Config, gpus_ids: list[int], rank: int) -> list[mp.Process]:
+    """
+    This function is used to run inference by creating a sub process.
+    """
+    envs = {"CUDA_VISIBLE_DEVICES": cuda_available_devices(gpus_ids), "RANK": str(rank)}
+    print(f"start inference on {gpus_ids} with rank {rank}")
+    fn_env = EnvWrapper(inference, envs)
+    process = mp.Process(target=fn_env, args=(config,))
+    process.start()
+
+    return process
+
+
+def inference_run(config: Config) -> list[mp.Process]:
+    if config.dp > 1:
+        processes = []
+
+        if config.step_batch_size is None:
+            config.step_batch_size = config.batch_size // config.dp
+
+        gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
+
+        assert len(gpus_ids) % (config.dp * config.tp) == 0, "Number of GPUs must be divisible by dp * tp"
+
+        num_process = len(gpus_ids) // config.tp
+        sub_process_ids = [gpus_ids[i * config.tp : (i + 1) * config.tp] for i in range(num_process)]
+
+        for rank, sub_process_id in enumerate(sub_process_ids):
+            processes.append(inference_sub_process(config, sub_process_id, rank))
+
+        return processes
+
+    else:
+        inference(config)
+        return []
+
+
+def main(config: Config) -> list[mp.Process]:
+    processes = inference_run(config)
+    for process in processes:
+        process.join()
 
 
 if __name__ == "__main__":
