@@ -45,7 +45,7 @@ class Config(BaseConfig):
     max_samples: int | None = None
     output_path: str = "outputs"
     total_step: int | None = None
-    step_batch_size: int | None = None  # will be used to create stable file
+    step_batch_size: int = 64  # will be used to create stable file
     rollout_path: str | None = None
 
     quant: Literal["fp8"] | None = None
@@ -62,9 +62,8 @@ class Config(BaseConfig):
 
     @model_validator(mode="after")
     def validate_step_batch_size(self):
-        if self.step_batch_size is not None:
-            assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
-            assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
+        assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
+        assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
         return self
 
 
@@ -291,9 +290,6 @@ def inference(config: Config):
             f"Batch throughput: {tokens_per_second:.2f} tok/sec ({batch_total_tokens} tokens in {elapsed_time:.2f}s, avg seq len: {avg_seq_length:.1f})"
         )
 
-        if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
-            logger.info(f"Generated {total_problems} problems for step {real_step}")
-
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
         # Compute normalized advantages per prompt.
@@ -308,7 +304,8 @@ def inference(config: Config):
         total_problems += len(prompts)
         logger.info(f"Generated {total_problems} total samples")
 
-        if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
+        if total_problems % config.step_batch_size == 0:
+            logger.info(f"Generated {total_problems} problems for step {real_step}")
             stable_file = step_path / "stable"
             stable_file.touch()
             real_step += 1
@@ -337,7 +334,7 @@ def inference_run(config: Config) -> list[mp.Process]:
     if config.dp > 1:
         processes = []
 
-        if config.step_batch_size is None:
+        if config.step_batch_size is not None:
             config.step_batch_size = config.step_batch_size // config.dp
 
         gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
