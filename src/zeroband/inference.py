@@ -1,3 +1,4 @@
+from functools import lru_cache
 import os
 import asyncio
 import json
@@ -22,8 +23,6 @@ from zeroband.rewards.math import compute_math_reward
 from datasets import load_dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
-
-process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=8)
 
 
 class SamplingParamConfig(BaseConfig):
@@ -81,6 +80,11 @@ pa_schema = pa.schema(
         ("step", pa.int32()),
     ]
 )
+
+
+@lru_cache(maxsize=1)
+def get_process_executor():
+    return concurrent.futures.ProcessPoolExecutor(max_workers=8)
 
 
 def get_own_logprobs(sample_logprobs: SampleLogprobs) -> float:
@@ -165,7 +169,7 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 async def compute_reward_for_output(output, verification_info):
     loop = asyncio.get_running_loop()
     # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
-    return await loop.run_in_executor(process_executor, compute_math_reward, output.text, verification_info)
+    return await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
 
 
 async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput], verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
@@ -301,8 +305,9 @@ def main(config: Config):
             logger.info(f"Reached total step {config.total_step}, stopping inference")
             break
 
+    get_process_executor().shutdown(wait=True)
+
 
 if __name__ == "__main__":
     config = Config(**parse_argv())  # type: ignore
     main(config)
-    process_executor.shutdown(wait=True)
