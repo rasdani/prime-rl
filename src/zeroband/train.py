@@ -23,6 +23,9 @@ from jaxtyping import Float, Int
 
 from zeroband.training.world_info import WorldInfo, get_world_info
 
+from torch._guards import log
+import logging
+
 
 class AdamConfig(BaseConfig):
     type: Literal["adam"] = "adam"
@@ -50,6 +53,8 @@ class TrainConfig(BaseConfig):
     torch_compile: bool = True
 
     attn_impl: AttnImpl = "flex_attention"
+
+    verbose_compile: bool = False
 
 
 class CkptConfig(BaseConfig):
@@ -115,6 +120,10 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
 
 def train(config: Config):
+    if not config.train.verbose_compile:
+        torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
+        log.setLevel(logging.CRITICAL)  #
+
     logger = get_logger()
     world_info = get_world_info()
 
