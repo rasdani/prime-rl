@@ -10,7 +10,7 @@ def compute_math_reward(completion: str, verification_info: Dict):
 
     # format error
     if len(split_response) == 1:
-        return -1
+        return 0
 
     try:
         response = parse(split_response[1])
@@ -20,8 +20,8 @@ def compute_math_reward(completion: str, verification_info: Dict):
         if correct:
             return 1
         else:
-            return -1
+            return 0
 
     except Exception as e:
         logger.warning(f"error verifying math response: {e}. Returning negative reward")
-        return -1
+        return 0
