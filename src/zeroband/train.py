@@ -12,7 +12,6 @@ import wandb
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -196,7 +195,8 @@ def train(config: Config):
             # Gather args for grpo loss
             advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
             logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
+            # loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
+            loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), input_ids.view(-1)) / gradient_accumulation_steps
             del cpu_advantages, advantages, logits, loss_mask, input_ids, original_logprobs
 
             # backward
