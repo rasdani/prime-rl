@@ -97,10 +97,10 @@ def apply_fsdp(model: ModelType, reshard_after_forward: bool):
 
     for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
-            reshard_after_forward = layer_id < len(model.model.layers) - 1
+            layer_reshard_after_forward = layer_id < len(model.model.layers) - 1
         else:
-            reshard_after_forward = False
-        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
+            layer_reshard_after_forward = False
+        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward)
     fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
 
 
