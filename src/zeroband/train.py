@@ -261,7 +261,7 @@ def train(config: Config):
 
         del loss_batch, average_rewards, grad_norm
 
-        if world_info.rank == 0 and grad_acc_step == 2:
+        if world_info.rank == 0:
             logger.info("Dumping snapshot")
             torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
             torch.cuda.memory._record_memory_history(enabled=False)
