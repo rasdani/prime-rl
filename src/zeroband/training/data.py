@@ -53,11 +53,10 @@ class FakeTokenizedDataset(IterableDataset):
             }
 
 
-def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list[Path]:
+def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, batch_size: int) -> ds.Dataset:
     """Get all the files for a given step. Waits until the step is created which is indicated by the stable file."""
     logger = get_logger()
     step_path = path / f"step_{step_count}"
-    stable_file = step_path / STABLE_FILE
 
     start_time = time.time()
 
@@ -65,20 +64,34 @@ def _get_all_files_for_step(step_count: int, path: Path, timeout: float) -> list
     worker_id = worker_info.id if worker_info is not None else 0
 
     wait_count = 0
-    while not stable_file.exists():
+
+    while True:
+        files = list(step_path.glob("*.parquet"))
+
+        rows = 0
+        if len(files) > 0:
+            try:
+                dataset = ds.dataset(files, format="parquet")
+                rows = dataset.count_rows()
+            except Exception as e:
+                logger.warn(f"Error loading dataset for step {step_count}: {e}, files: {files}")
+                rows = 0
+
+            if rows >= batch_size:
+                logger.info(f"Dataset for step {step_count} has enough samples. rows: {rows} and {len(files)} files")
+                return dataset
+
         if time.time() - start_time > timeout:
             logger.info("raising timeout")
             raise TimeoutError(f"Timeout waiting for step {step_count} to be created")
 
         if wait_count % 50 == 0:
-            logger.info(f"[data_worker:{worker_id}] Waiting for {stable_file} to be created")
+            logger.info(
+                f"[data_worker:{worker_id}] Waiting for {step_path} to have enough samples. len(files): {len(files)}, Current rows: {rows}, target: {batch_size}"
+            )
 
         wait_count += 1
-
         time.sleep(0.5)
-
-    files = list(step_path.glob("*.parquet"))
-    return files
 
 
 def _should_skip_index(index: int, world_size: int, rank: int, num_workers: int, workers_id: int) -> bool:
@@ -156,14 +169,13 @@ class ParquetDataset(IterableDataset):
 
             self._logger.debug(msg=f"data: Processing step {self._step_count}")
 
-            files = _get_all_files_for_step(self._step_count, self._path, self._timeout)
+            dataset = _get_dataset_from_files_step(self._step_count, self._path, self._timeout, self._batch_size)
 
             # we are NOT splitting the files across datalaoder workers and rank like we did for intellect 1
             # This is because we cannot assume that the files would have the same number of samples each.
             # What we rather do here is that all the workers go over all the files and only yield some of them
             # this is unoptimal because they all load more data that they should, but since the data is already tokenized it should not be a big deal
 
-            dataset = ds.dataset(files, format="parquet")
             # Set up a scanner with just the required columns
             required_columns = ["input_tokens", "output_tokens", "advantages", "rewards", "input_logprobs", "output_logprobs"]
 
