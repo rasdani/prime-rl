@@ -288,4 +288,4 @@ def get_dataloader(tokenizer, micro_batch_size: int, batch_size: int, data_confi
         train_dataset = ParquetDataset(Path(data_config.path), batch_size, data_config.timeout)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
-    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn)
+    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=0, collate_fn=collate_fn)
