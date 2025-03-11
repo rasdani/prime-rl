@@ -243,7 +243,7 @@ def train(config: Config):
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
         if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
-            step_per_rollout = training_progress.step // config.optim.step_per_rollout
+            step_per_rollout = training_progress.step
             path = Path(config.ckpt.rollout_path) / f"step_{step_per_rollout}"
             save_ckpt_for_rollout(model, path)
 
