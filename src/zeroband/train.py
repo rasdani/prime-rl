@@ -179,6 +179,11 @@ def train(config: Config):
         loss_batch = 0
         average_rewards = 0
 
+        logger.info("Starting acc steps.")
+
+        if world_info.rank == 0:
+            torch.cuda.memory._record_memory_history()
+
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
             model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
@@ -193,16 +198,29 @@ def train(config: Config):
 
             del batch
 
+
             # Gather args for grpo loss
             advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
+
+            logger.info("Running forward()")
             logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+
+
+            logger.info("Running grpo_loss()")
             loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
             del cpu_advantages, advantages, logits, loss_mask, input_ids, original_logprobs
 
             # backward
+            logger.info("Running backward()")
             loss.backward()
             loss_batch += loss.detach().clone()
             del loss
+
+            if world_info.rank == 0 and grad_acc_step == 2:
+                logger.info("Dumping snapshot")
+                torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
+                torch.cuda.memory._record_memory_history(enabled=False)
+
 
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
         average_rewards = average_rewards / world_info.world_size
