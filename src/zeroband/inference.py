@@ -321,6 +321,9 @@ def inference_sub_process(config: Config, gpus_ids: list[int], rank: int) -> lis
     """
     This function is used to run inference by creating a sub process.
     """
+    os.environ["CUDA_VISIBLE_DEVICES"] = cuda_available_devices(gpus_ids)
+    # this is a hack that work with spawn, basically allow the env var to be overridden when spawn read the env var a second time
+
     envs = {"CUDA_VISIBLE_DEVICES": cuda_available_devices(gpus_ids), "RANK": str(rank)}
     print(f"start inference on {gpus_ids} with rank {rank}")
     fn_env = EnvWrapper(inference, envs)
@@ -360,5 +363,7 @@ def main(config: Config) -> list[mp.Process]:
 
 
 if __name__ == "__main__":
+    # Set spawn method before any other multiprocessing code
+    mp.set_start_method("spawn")
     config = Config(**parse_argv())  # type: ignore
     main(config)
