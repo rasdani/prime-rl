@@ -216,11 +216,6 @@ def train(config: Config):
             loss_batch += loss.detach().clone()
             del loss
 
-            if world_info.rank == 0 and grad_acc_step == 2:
-                logger.info("Dumping snapshot")
-                torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
-                torch.cuda.memory._record_memory_history(enabled=False)
-
 
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
         average_rewards = average_rewards / world_info.world_size
@@ -245,6 +240,13 @@ def train(config: Config):
         metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item()}  # fmt: skip
 
         log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
+
+        del loss_batch, average_rewards, grad_norm
+
+        if world_info.rank == 0 and grad_acc_step == 2:
+            logger.info("Dumping snapshot")
+            torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
+            torch.cuda.memory._record_memory_history(enabled=False)
 
         tokens_per_second = perf_counter.get_tokens_per_second()
         if tokens_per_second is not None:
