@@ -45,7 +45,7 @@ class Config(BaseConfig):
     max_samples: int | None = None
     output_path: str = "outputs"
     total_step: int | None = None
-    step_batch_size: int | None = None  # will be used to create stable file
+    step_batch_size: int = 64  # will be used to create stable file
     rollout_path: str | None = None
 
     quant: Literal["fp8"] | None = None
@@ -56,15 +56,14 @@ class Config(BaseConfig):
     max_async_level: int = 2  # the amount of step for which we can be in advance
 
     # mutli gpu
-    tp: int | Literal["all"] = 1
+    tp: int = 1
     dp: int = 1
     gpus_ids: list[int] | None = None
 
     @model_validator(mode="after")
     def validate_step_batch_size(self):
-        if self.step_batch_size is not None:
-            assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
-            assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
+        assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
+        assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
         return self
 
 
@@ -219,9 +218,6 @@ def compute_advantages_grpo(grouped_rewards: dict[int, torch.FloatTensor], epsil
 
 
 def inference(config: Config):
-    if config.tp == "all":
-        config.tp = torch.cuda.device_count()
-
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
@@ -294,9 +290,6 @@ def inference(config: Config):
             f"Batch throughput: {tokens_per_second:.2f} tok/sec ({batch_total_tokens} tokens in {elapsed_time:.2f}s, avg seq len: {avg_seq_length:.1f})"
         )
 
-        if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
-            logger.info(f"Generated {total_problems} problems for step {real_step}")
-
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
         # Compute normalized advantages per prompt.
@@ -311,7 +304,8 @@ def inference(config: Config):
         total_problems += len(prompts)
         logger.info(f"Generated {total_problems} total samples")
 
-        if config.step_batch_size is not None and total_problems % config.step_batch_size == 0:
+        if total_problems % config.step_batch_size == 0:
+            logger.info(f"Generated {total_problems} problems for step {real_step}")
             stable_file = step_path / "stable"
             stable_file.touch()
             real_step += 1
@@ -327,6 +321,9 @@ def inference_sub_process(config: Config, gpus_ids: list[int], rank: int) -> lis
     """
     This function is used to run inference by creating a sub process.
     """
+    os.environ["CUDA_VISIBLE_DEVICES"] = cuda_available_devices(gpus_ids)
+    # this is a hack that work with spawn, basically allow the env var to be overridden when spawn read the env var a second time
+
     envs = {"CUDA_VISIBLE_DEVICES": cuda_available_devices(gpus_ids), "RANK": str(rank)}
     print(f"start inference on {gpus_ids} with rank {rank}")
     fn_env = EnvWrapper(inference, envs)
@@ -340,8 +337,7 @@ def inference_run(config: Config) -> list[mp.Process]:
     if config.dp > 1:
         processes = []
 
-        if config.step_batch_size is None:
-            config.step_batch_size = config.batch_size // config.dp
+        config.step_batch_size = config.step_batch_size // config.dp
 
         gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
 
@@ -367,5 +363,7 @@ def main(config: Config) -> list[mp.Process]:
 
 
 if __name__ == "__main__":
+    # Set spawn method before any other multiprocessing code
+    mp.set_start_method("spawn")
     config = Config(**parse_argv())  # type: ignore
     main(config)
