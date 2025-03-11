@@ -3,6 +3,7 @@ from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Literal
 
+from pydantic import model_validator
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
@@ -25,6 +26,8 @@ from zeroband.training.world_info import WorldInfo, get_world_info
 
 from torch._guards import log as torch_log
 import logging
+
+from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 
 
 class AdamConfig(BaseConfig):
@@ -51,6 +54,7 @@ class TrainConfig(BaseConfig):
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
     torch_compile: bool = True
+    liger_qwen: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
 
@@ -76,6 +80,12 @@ class Config(BaseConfig):
     train: TrainConfig
 
     gpus_ids: list[int] | None = None
+    
+    @model_validator(mode="after")
+    def check_liger(self):
+        if self.train.liger_qwen:
+            assert "Qwen" in self.name_model, "train.liger_qwen can only be applied to Qwen2 models."
+        return self
 
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
@@ -166,6 +176,14 @@ def train(config: Config):
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
+
+    if config.train.liger_qwen:
+        apply_liger_kernel_to_qwen2(
+            rope=True,
+            rms_norm=True,
+            swiglu=True,
+            model=model,
+        )
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
@@ -271,6 +289,7 @@ def train(config: Config):
             break
 
     logger.info("Training finished, exiting ...")
+    logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
 
 
 if __name__ == "__main__":
