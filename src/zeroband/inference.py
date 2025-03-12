@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Literal
 import uuid
+import numpy as np
 from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
@@ -228,7 +229,7 @@ def inference(config: Config):
     tokenizer = llm.get_tokenizer()
     logger = get_logger(f"INFERENCE {os.environ.get('RANK', '')}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
-    dataset = load_dataset(config.dataset, split="train").shuffle()  # todo never set seed otherwise this will be fucked
+    dataset = load_dataset(config.dataset, split="train").shuffle(generator=np.random.default_rng())
     max_samples = config.max_samples or len(dataset)
 
     ckpt_step = 0
