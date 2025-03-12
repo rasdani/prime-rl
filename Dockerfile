@@ -1,25 +1,60 @@
-# Use Python 3.11 slim image as base
-FROM python:3.11-slim
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+LABEL maintainer="prime intellect"
+LABEL repository="prime-rl"
 
-# Set working directory
-WORKDIR /app
+# Set en_US.UTF-8 locale by default
+RUN echo "LC_ALL=en_US.UTF-8" >> /etc/environment
 
-# Install uv
-RUN pip install --no-cache-dir uv
-RUN apt update && apt install git -y
+# Set CUDA_HOME and update PATH
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=$PATH:/usr/local/cuda/bin
 
-# Copy the package and dependency files
-COPY pyproject.toml uv.lock ./
-COPY src/ ./src/
-COPY README.md ./
+# Install packages
+RUN apt-get update && apt-get install -y --no-install-recommends --force-yes \
+  build-essential \
+  curl \
+  wget \
+  git \
+  vim \
+  htop \
+  nvtop \
+  iperf \
+  tmux \
+  openssh-server \
+  git-lfs \
+  sudo \
+  gpg \
+  && apt-get clean autoclean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Install dependencies using uv sync
+# install gsutil
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && apt-get update -y && apt-get install google-cloud-cli -y
+
+# # Install Rust
+# RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+# ENV PATH="/root/.cargo/bin:${PATH}"
+# RUN echo "export PATH=\"/opt/conda/bin:/root/.cargo/bin:\$PATH\"" >> /root/.bashrc
+
+# Download the latest installer
+ADD https://astral.sh/uv/install.sh /uv-installer.sh
+
+# Run the installer then remove it
+RUN sh /uv-installer.sh && rm /uv-installer.sh
+
+# Ensure the installed binary is on the `PATH`
+ENV PATH="/root/.local/bin/:$PATH"
+
+# Install Python dependencies (The gradual copies help with caching)
+WORKDIR /root/prime-rl
+
+COPY ./pyproject.toml ./pyproject.toml
+COPY ./uv.lock ./uv.lock
+COPY ./README.md ./README.md
+COPY ./src/ ./src/
+
 RUN uv sync
-RUN uv pip install flash-attn --no-build-isolation
 
-# Command to run the server
-# Using --host 0.0.0.0 to make it accessible outside container
-# Default validation time of 5 seconds, can be overridden with docker run command
+COPY ./configs/ ./configs/
+
 # uv run python src/zeroband/inference.py
 ENTRYPOINT ["uv", "run", "python", "src/zeroband/inference.py"]
-CMD ["@", "configs/inference/debug.yml"] 
+CMD ["@", "configs/inference/debug.toml"] 
