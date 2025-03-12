@@ -1,10 +1,12 @@
-from collections import defaultdict
+from functools import lru_cache
 import os
 import asyncio
 import json
 from pathlib import Path
 from typing import Literal
 import uuid
+import numpy as np
+from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
@@ -14,6 +16,8 @@ import time
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
+from vllm.sequence import SampleLogprobs
+from vllm.model_executor import SamplingMetadata
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
@@ -22,19 +26,19 @@ from zeroband.rewards.math import compute_math_reward
 from datasets import load_dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
+import multiprocessing as mp
 
-process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=8)
+from zeroband.inferencing.toploc import TopLocCache
+from zeroband.training.mp import EnvWrapper, cuda_available_devices
 
 
 class SamplingParamConfig(BaseConfig):
     temperature: float = 0.6
-    max_tokens: int = 4096
+    max_tokens: int = 16_000
     ignore_eos: bool = False
     top_p: float = 0.95
     n: int = 8
-
-
-dataset_key = defaultdict(lambda: "prompt", {"justus27/difficulty-calibrated-deepscaler": "problem"})
+    logprobs: int = 0  # 0 mean 1 logprob here
 
 
 class Config(BaseConfig):
@@ -43,15 +47,27 @@ class Config(BaseConfig):
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
-    tp: int | Literal["all"] = 1
-    max_seq_len: int | None = None
     total_step: int | None = None
-    step_batch_size: int | None = None  # will be used to create stable file
+    step_batch_size: int = 64  # will be used to create stable file
     rollout_path: str | None = None
 
     quant: Literal["fp8"] | None = None
 
     sampling: SamplingParamConfig = SamplingParamConfig()
+    enforce_eager: bool = False
+
+    max_async_level: int = 2  # the amount of step for which we can be in advance
+
+    # mutli gpu
+    tp: int = 1
+    dp: int = 1
+    gpus_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def validate_step_batch_size(self):
+        assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
+        assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
+        return self
 
 
 def fake_chat_template(messages):
@@ -73,39 +89,72 @@ pa_schema = pa.schema(
     [
         ("input_tokens", pa.list_(pa.int32())),
         ("output_tokens", pa.list_(pa.int32())),
+        ("input_logprobs", pa.list_(pa.float32())),
+        ("output_logprobs", pa.list_(pa.float32())),
         ("advantages", pa.float32()),
+        ("rewards", pa.float32()),
         ("proofs", pa.binary()),
         ("step", pa.int32()),
     ]
 )
 
 
-def get_parquet_table(generated_tokens: list[vllm.RequestOutput], grouped_advantages: dict[int, list[float]], step: int) -> pa.Table:
-    # Initialize lists for each column
+@lru_cache(maxsize=1)
+def get_process_executor():
+    return concurrent.futures.ProcessPoolExecutor(max_workers=8)
+
+
+def get_own_logprobs(sample_logprobs: SampleLogprobs) -> float:
+    logprobs = []
+
+    for logprob in sample_logprobs:
+        assert isinstance(logprob, dict), "Logprobs should be a dict"
+        assert len(logprob) == 1, "Logprobs should be a dict with 1 key"
+
+        _token_id, logprob_p = list(logprob.items())[0]
+        logprobs.append(logprob_p.logprob)
+
+    return logprobs
+
+
+def get_parquet_table(
+    generated_tokens: list[vllm.RequestOutput],
+    grouped_advantages: dict[int, list[float]],
+    grouped_rewards: dict[int, torch.FloatTensor],
+    proofs: list[bytes],
+    step: int,
+) -> pa.Table:
     input_tokens_list = []
     output_tokens_list = []
+    input_logprobs_list = []
+    output_logprobs_list = []
     advantages_list = []
+    rewards_list = []
     proofs_list = []
     steps_list = []
 
-    # Process each RequestOutput, using the dictionary grouping.
+    proof_iter = iter(proofs)
+
     for i, request in enumerate(generated_tokens):
         advantages = grouped_advantages[i]
-        for adv, output in zip(advantages, request.outputs):
+        rewards = grouped_rewards[i].tolist()
+        for adv, reward, output in zip(advantages, rewards, request.outputs):
             input_tokens_list.append(request.prompt_token_ids)
-            # Output tokens from the completion
             output_tokens_list.append(output.token_ids)
+            input_logprobs_list.append([0] * len(request.prompt_token_ids))  # putting 0 for now as not needed in the grpo loss
+            output_logprobs_list.append(get_own_logprobs(output.logprobs))
             advantages_list.append(adv)
-            # TODO: Add toploc proof
-            proofs_list.append("I am toploc proof, handcrafted by jack".encode())
-            # Add step
+            rewards_list.append(reward)
+            proofs_list.append(next(proof_iter))
             steps_list.append(step)
 
-    # Create PyArrow arrays
     arrays = [
         pa.array(input_tokens_list, type=pa.list_(pa.int32())),
         pa.array(output_tokens_list, type=pa.list_(pa.int32())),
+        pa.array(input_logprobs_list, type=pa.list_(pa.float32())),
+        pa.array(output_logprobs_list, type=pa.list_(pa.float32())),
         pa.array(advantages_list, type=pa.float32()),
+        pa.array(rewards_list, type=pa.float32()),
         pa.array(proofs_list, type=pa.binary()),
         pa.array(steps_list, type=pa.int32()),
     ]
@@ -140,7 +189,7 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 async def compute_reward_for_output(output, verification_info):
     loop = asyncio.get_running_loop()
     # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
-    return await loop.run_in_executor(process_executor, compute_math_reward, output.text, verification_info)
+    return await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
 
 
 async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput], verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
@@ -174,41 +223,64 @@ def compute_advantages_grpo(grouped_rewards: dict[int, torch.FloatTensor], epsil
     return advantages
 
 
-def main(config: Config):
-    if config.tp == "all":
-        config.tp = torch.cuda.device_count()
-
+def inference(config: Config):
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
-        max_model_len=config.max_seq_len,
+        max_seq_len_to_capture=int(1.5 * config.sampling.max_tokens),  # 1.5 makes sure we capture the entire output even with prefill
         quantization=config.quant,
+        enforce_eager=config.enforce_eager,
+        dtype="bfloat16",
     )
     tokenizer = llm.get_tokenizer()
-    logger = get_logger("INFERENCE")
+    logger = get_logger(f"INFERENCE {os.environ.get('RANK', '')}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
-    dataset = load_dataset(config.dataset, split="train")
+    dataset = load_dataset(config.dataset, split="train").shuffle(generator=np.random.default_rng())
     max_samples = config.max_samples or len(dataset)
 
-    step = 0
-    total_samples = 0
+    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    toploc_cache = TopLocCache(max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size)
+
+    def logits_processor_hook(module, input):
+        assert isinstance(input[1], torch.Tensor)
+        assert isinstance(input[2], SamplingMetadata)
+        # If the lengths dont match its not a decode step
+        if len(input[2].seq_groups) != input[1].shape[0]:
+            return
+
+        index = [i.seq_ids[0] for i in input[2].seq_groups]
+        toploc_cache.add(index, input[1])
+
+    model.logits_processor.register_forward_pre_hook(logits_processor_hook)
+
+    ckpt_step = 0
+    real_step = 0
+
+    total_problems = 0
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
-        if config.rollout_path is not None:
-            last_step = list(Path(config.rollout_path).glob("step_*"))
-            if last_step:
-                last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
-                maybe_new_step = int(last_step.stem.split("_")[-1])
-                if step < maybe_new_step:
-                    stable_file = last_step / "stable"
-                    if stable_file.exists():
-                        logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
-                        llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
-                        step = maybe_new_step
-                        logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
-                    else:
-                        logger.info(f"No stable file found at {config.rollout_path} step {maybe_new_step}")
+        logger.info(
+            f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.max_async_level: {config.max_async_level}"
+        )
+        if config.rollout_path is not None and real_step - ckpt_step > config.max_async_level:
+            while True:
+                last_step = list(Path(config.rollout_path).glob("step_*"))
+                if last_step:
+                    last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
+                    maybe_new_step = int(last_step.stem.split("_")[-1])
+                    if ckpt_step < maybe_new_step:
+                        stable_file = last_step / "stable"
+                        if stable_file.exists():
+                            logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
+                            llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
+                            ckpt_step = maybe_new_step
+                            total_problems = 0
+                            total_tokens = 0
+                            logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
+                            break
+                logger.info(f"No checkpoint found at {config.rollout_path}, waiting for new checkpoint")
+                time.sleep(1)
 
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
@@ -225,13 +297,17 @@ def main(config: Config):
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
         end_time = time.time()
 
+        # This generates proofs for the remaining sequences that haven't reached max_len.
+        # We call here to give time for the proofs to be generated non-blocking in the background.
+        toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
+
         # Calculate tokens and throughput
         batch_input_tokens = sum(len(req.prompt_token_ids) for req in generated_tokens)
         batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in generated_tokens)
         batch_total_tokens = batch_input_tokens + batch_output_tokens
         total_tokens += batch_total_tokens
 
-        avg_seq_length = batch_total_tokens / len(generated_tokens) if generated_tokens else 0
+        avg_seq_length = batch_total_tokens / (len(generated_tokens) * config.sampling.n) if generated_tokens else 0
 
         elapsed_time = end_time - start_time
         tokens_per_second = batch_total_tokens / elapsed_time if elapsed_time > 0 else 0
@@ -240,33 +316,87 @@ def main(config: Config):
             f"Batch throughput: {tokens_per_second:.2f} tok/sec ({batch_total_tokens} tokens in {elapsed_time:.2f}s, avg seq len: {avg_seq_length:.1f})"
         )
 
-        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
-            logger.info(f"Generated {total_samples} total samples")
+        # Compute proofs
+        # Note (Jack): Currently, vllm guarantees that seq ids are in the same order as prompts passed to generate.
+        # Generate always adds requests to the engine in the order of the prompts.
+        # And returns them in the sequence they were added.
+        toploc_cache.wait_for_proofs()
+        proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
+        toploc_cache.reset_cache()
 
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
 
-        table = get_parquet_table(generated_tokens, grouped_advantages, step)
+        table = get_parquet_table(generated_tokens, grouped_advantages, grouped_rewards, proofs, ckpt_step)
 
-        step_path = Path(config.output_path) / f"step_{step}"
+        step_path = Path(config.output_path) / f"step_{real_step}"
         os.makedirs(step_path, exist_ok=True)
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
 
-        total_samples += len(prompts)
-        logger.info(f"Generated {total_samples} total samples")
+        total_problems += len(prompts)
 
-        if config.step_batch_size is not None and total_samples % config.step_batch_size == 0:
+        if total_problems % config.step_batch_size == 0:
+            logger.info(f"Generated {total_problems} problems for step {real_step}")
             stable_file = step_path / "stable"
             stable_file.touch()
+            real_step += 1
 
-        if config.total_step is not None and step >= config.total_step:
+        if config.total_step is not None and real_step >= config.total_step:
             logger.info(f"Reached total step {config.total_step}, stopping inference")
             break
 
+    get_process_executor().shutdown(wait=True)
+
+
+def inference_sub_process(config: Config, gpus_ids: list[int], rank: int) -> list[mp.Process]:
+    """
+    This function is used to run inference by creating a sub process.
+    """
+    os.environ["CUDA_VISIBLE_DEVICES"] = cuda_available_devices(gpus_ids)
+    # this is a hack that work with spawn, basically allow the env var to be overridden when spawn read the env var a second time
+
+    envs = {"CUDA_VISIBLE_DEVICES": cuda_available_devices(gpus_ids), "RANK": str(rank)}
+    print(f"start inference on {gpus_ids} with rank {rank}")
+    fn_env = EnvWrapper(inference, envs)
+    process = mp.Process(target=fn_env, args=(config,))
+    process.start()
+
+    return process
+
+
+def inference_run(config: Config) -> list[mp.Process]:
+    if config.dp > 1:
+        processes = []
+
+        config.step_batch_size = config.step_batch_size // config.dp
+
+        gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
+
+        assert len(gpus_ids) % (config.dp * config.tp) == 0, "Number of GPUs must be divisible by dp * tp"
+
+        num_process = len(gpus_ids) // config.tp
+        sub_process_ids = [gpus_ids[i * config.tp : (i + 1) * config.tp] for i in range(num_process)]
+
+        for rank, sub_process_id in enumerate(sub_process_ids):
+            processes.append(inference_sub_process(config, sub_process_id, rank))
+
+        return processes
+
+    else:
+        inference(config)
+        return []
+
+
+def main(config: Config) -> list[mp.Process]:
+    processes = inference_run(config)
+    for process in processes:
+        process.join()
+
 
 if __name__ == "__main__":
+    # Set spawn method before any other multiprocessing code
+    mp.set_start_method("spawn")
     config = Config(**parse_argv())  # type: ignore
     main(config)
-    process_executor.shutdown(wait=True)

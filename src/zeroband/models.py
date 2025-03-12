@@ -9,6 +9,7 @@ from transformers import (
 
 ModelName: TypeAlias = Literal["debugmodel", "150M", "1B", "Qwen32B", "Qwen1.5B", "Qwen7B", "Llama8B", "QwQ32B"]
 ModelType: TypeAlias = LlamaForCausalLM | Qwen2ForCausalLM
+AttnImpl: TypeAlias = Literal["flex_attention", "sdpa", "flash_attention_2"]
 
 name_to_hf_model = {
     "debugmodel": "PrimeIntellect/llama-2m-fresh",
@@ -44,10 +45,10 @@ name_to_class = {
 }
 
 
-def get_model_and_tokenizer(model_name: ModelName) -> tuple[ModelType, AutoTokenizer]:
+def get_model_and_tokenizer(model_name: ModelName, attn_impl: AttnImpl) -> tuple[ModelType, AutoTokenizer]:
     config_class, model_class = name_to_class[model_name]
     tokenizer = AutoTokenizer.from_pretrained(name_to_hf_tokenizer[model_name])
-    config_model = config_class.from_pretrained(name_to_hf_model[model_name], attn_implementation="flex_attention")
+    config_model = config_class.from_pretrained(name_to_hf_model[model_name], attn_implementation=attn_impl)
     config_model.use_cache = False
     model = model_class.from_pretrained(pretrained_model_name_or_path=name_to_hf_model[model_name], config=config_model)
     tokenizer.pad_token_id = tokenizer.eos_token_id

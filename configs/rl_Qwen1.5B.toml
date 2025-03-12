@@ -1,17 +1,30 @@
-total_steps = 50
-batch_size = 1024
+total_steps = 2000
+batch_size = 1024           
 
 
 [train]
 name_model = "Qwen1.5B"
-wandb = false
+project = "rl-Qwen1.5B"
 
 [train.train]
-micro_bs = 8
+micro_bs = 32
+reshard_after_forward = true
 
 [train.optim]
-warmup_steps = 1000
+warmup_steps = 1
+step_per_rollout = 8
+
+[train.data]
+timeout = 3600
+
+
+[train.optim.optim]
+lr = 1e-6
+
 
 [inference]
-dataset = "justus27/test-vcu"
-tp = 4
+name_model = "Qwen1.5B"
+batch_size = 32
+
+[inference.sampling]
+max_tokens = 16_000

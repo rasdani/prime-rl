@@ -1,15 +1,15 @@
 import os
 from pathlib import Path
+import shutil
 import time
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import model_validator
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
-from zeroband.models import ModelName, ModelType, get_model_and_tokenizer
+from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss
@@ -23,7 +23,11 @@ from jaxtyping import Float, Int
 
 from zeroband.training.world_info import WorldInfo, get_world_info
 
+from pydantic import model_validator
+
 from liger_kernel.transformers import apply_liger_kernel_to_qwen2
+from torch._guards import log as torch_log
+import logging
 
 
 class AdamConfig(BaseConfig):
@@ -42,6 +46,8 @@ class OptimConfig(BaseConfig):
     total_steps: int = 88_000
     batch_size: int = 512
 
+    step_per_rollout: int = 1
+
 
 class TrainConfig(BaseConfig):
     micro_bs: int = 1
@@ -49,6 +55,8 @@ class TrainConfig(BaseConfig):
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
     torch_compile: bool = True
     liger_qwen: bool = False
+
+    attn_impl: AttnImpl = "flex_attention"
 
 
 class CkptConfig(BaseConfig):
@@ -74,15 +82,6 @@ class Config(BaseConfig):
     gpus_ids: list[int] | None = None
 
     @model_validator(mode="after")
-    def check_batch_size(self):
-        if self.data.batch_size is None:
-            self.data.batch_size = self.optim.batch_size
-        assert self.optim.batch_size == self.data.batch_size, (
-            "The batch size in the config must be the same as the batch size in the data config."
-        )
-        return self
-    
-    @model_validator(mode="after")
     def check_liger(self):
         if self.train.liger_qwen:
             assert "Qwen" in self.name_model, "train.liger_qwen can only be applied to Qwen2 models."
@@ -93,10 +92,11 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     assert batch_size % world_info.world_size == 0
     batch_size = batch_size // world_info.world_size
 
-    assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})."
+    print(f"batch_size: {batch_size}, micro_bs: {micro_bs}, data_workers: {data_workers}")
+    assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
 
-    assert batch_size % (data_workers * world_info.world_size) == 0, (
-        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers}) times the number of GPUs ({world_info.world_size})."
+    assert batch_size % data_workers == 0, (
+        f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers})."
     )
 
     return batch_size // micro_bs
@@ -107,10 +107,10 @@ def apply_fsdp(model: ModelType, reshard_after_forward: bool):
 
     for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
-            reshard_after_forward = layer_id < len(model.model.layers) - 1
+            layer_reshard_after_forward = layer_id < len(model.model.layers) - 1
         else:
-            reshard_after_forward = False
-        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
+            layer_reshard_after_forward = False
+        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward)
     fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
 
 
@@ -128,6 +128,10 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
 
 def train(config: Config):
+    if "ZERO_BAND_DEV" not in os.environ:
+        torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
+        torch_log.setLevel(logging.CRITICAL)  #
+
     logger = get_logger()
     world_info = get_world_info()
 
@@ -147,9 +151,14 @@ def train(config: Config):
         config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
     )
 
-    model, tokenizer = get_model_and_tokenizer(config.name_model)
+    model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
-    train_dataloader = get_dataloader(tokenizer=tokenizer, batch_size=config.train.micro_bs, data_config=config.data)
+    train_dataloader = get_dataloader(
+        tokenizer=tokenizer,
+        micro_batch_size=config.train.micro_bs,
+        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
+        data_config=config.data,
+    )
 
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -184,28 +193,31 @@ def train(config: Config):
 
     perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
 
+    previous_ckpt_rollout = []
+
     while True:
         loss_batch = 0
+        average_rewards = 0
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            model.set_requires_gradient_sync(not is_accumulating) # no sync if we are accumulating gradients
+            model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
             # Load args
             batch = next(train_dataloader_iterator)
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
+            average_rewards += batch["rewards"].mean() / gradient_accumulation_steps
+            loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].to("cuda")
+            original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"].to("cuda")
+
             del batch
 
             # Gather args for grpo loss
             advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
-            policy_logprobs: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-            del input_ids
-            ref_logprobs: Float[torch.Tensor, "batch seq vocab"] = torch.ones_like(policy_logprobs)
-
-            # loss
-            loss = grpo_loss(policy_logprobs, ref_logprobs, advantages, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
-            del cpu_advantages, advantages, policy_logprobs, ref_logprobs
+            logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
+            del cpu_advantages, advantages, logits, loss_mask, input_ids, original_logprobs
 
             # backward
             loss.backward()
@@ -213,6 +225,8 @@ def train(config: Config):
             del loss
 
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+        average_rewards = average_rewards / world_info.world_size
+        dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
@@ -230,9 +244,9 @@ def train(config: Config):
         perf_counter.count_tokens(new_tokens)
         training_progress.total_tokens += new_tokens
 
-        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item()}  # fmt: skip
+        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item()}  # fmt: skip
 
-        log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}"
+        log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
         tokens_per_second = perf_counter.get_tokens_per_second()
         if tokens_per_second is not None:
@@ -248,9 +262,17 @@ def train(config: Config):
         if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
-        if config.ckpt.rollout_path is not None:
-            path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
+        if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
+            rollout_step = training_progress.step // config.optim.step_per_rollout
+            path = Path(config.ckpt.rollout_path) / f"step_{rollout_step}"
+            previous_ckpt_rollout.append(path)
             save_ckpt_for_rollout(model, path)
+
+            if len(previous_ckpt_rollout) > 2:
+                path_to_delete = previous_ckpt_rollout.pop(0)
+                if path_to_delete.exists():
+                    logger.info(f"Removing past rollout ckpt at {path_to_delete}")
+                    shutil.rmtree(path_to_delete)
 
         if training_progress.step >= config.optim.total_steps:
             break

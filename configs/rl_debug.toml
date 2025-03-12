@@ -1,5 +1,5 @@
 total_steps = 3
-batch_size = 8
+batch_size = 32
 
 
 [train]
@@ -10,16 +10,20 @@ wandb = false
 fake = false
 timeout = 1000000000000000000000000
 num_workers = 1
+seq_length = 128
 
 [train.train]
 micro_bs = 8
+torch_compile = false
 
 [train.optim]
-batch_size = 16
 warmup_steps = 10
+step_per_rollout = 2
 
 [inference]
 name_model = "debugmodel"
 max_samples = 100000
-batch_size = 8
-dataset = "justus27/deepscaler-math-genesys-format"
+enforce_eager = true
+
+[inference.sampling]
+max_tokens = 128

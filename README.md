@@ -31,12 +31,13 @@ source $HOME/.local/bin/env
 uv venv --python 3.10
 source .venv/bin/activate
 uv sync
+uv pip install flash-attn --no-build-isolation
 ```
 
 4. Precommit install
 
 ```bash
-uv pre-commit install
+uv run pre-commit install
 ```
 
 5. Test
