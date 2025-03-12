@@ -16,6 +16,7 @@ import time
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
 from vllm.sequence import SampleLogprobs
+from vllm.model_executor import SamplingMetadata
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
@@ -26,6 +27,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import multiprocessing as mp
 
+from zeroband.inferencing.toploc import TopLocCache
 from zeroband.training.mp import EnvWrapper, cuda_available_devices
 
 
@@ -118,6 +120,7 @@ def get_parquet_table(
     generated_tokens: list[vllm.RequestOutput],
     grouped_advantages: dict[int, list[float]],
     grouped_rewards: dict[int, torch.FloatTensor],
+    proofs: list[bytes],
     step: int,
 ) -> pa.Table:
     input_tokens_list = []
@@ -129,6 +132,8 @@ def get_parquet_table(
     proofs_list = []
     steps_list = []
 
+    proof_iter = iter(proofs)
+
     for i, request in enumerate(generated_tokens):
         advantages = grouped_advantages[i]
         rewards = grouped_rewards[i].tolist()
@@ -139,7 +144,7 @@ def get_parquet_table(
             output_logprobs_list.append(get_own_logprobs(output.logprobs))
             advantages_list.append(adv)
             rewards_list.append(reward)
-            proofs_list.append("I am toploc proof, handcrafted by jack".encode())
+            proofs_list.append(next(proof_iter))
             steps_list.append(step)
 
     arrays = [
@@ -224,12 +229,28 @@ def inference(config: Config):
         max_seq_len_to_capture=int(1.5 * config.sampling.max_tokens),  # 1.5 makes sure we capture the entire output even with prefill
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
+        dtype="bfloat16",
     )
     tokenizer = llm.get_tokenizer()
     logger = get_logger(f"INFERENCE {os.environ.get('RANK', '')}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
     dataset = load_dataset(config.dataset, split="train").shuffle()  # todo never set seed otherwise this will be fucked
     max_samples = config.max_samples or len(dataset)
+
+    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    toploc_cache = TopLocCache(max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size)
+
+    def logits_processor_hook(module, input):
+        assert isinstance(input[1], torch.Tensor)
+        assert isinstance(input[2], SamplingMetadata)
+        # If the lengths dont match its not a decode step
+        if len(input[2].seq_groups) != input[1].shape[0]:
+            return
+
+        index = [i.seq_ids[0] for i in input[2].seq_groups]
+        toploc_cache.add(index, input[1])
+
+    model.logits_processor.register_forward_pre_hook(logits_processor_hook)
 
     ckpt_step = 0
     real_step = 0
@@ -275,6 +296,10 @@ def inference(config: Config):
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
         end_time = time.time()
 
+        # This generates proofs for the remaining sequences that haven't reached max_len.
+        # We call here to give time for the proofs to be generated non-blocking in the background.
+        toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
+
         # Calculate tokens and throughput
         batch_input_tokens = sum(len(req.prompt_token_ids) for req in generated_tokens)
         batch_output_tokens = sum(sum(len(output.token_ids) for output in req.outputs) for req in generated_tokens)
@@ -290,19 +315,26 @@ def inference(config: Config):
             f"Batch throughput: {tokens_per_second:.2f} tok/sec ({batch_total_tokens} tokens in {elapsed_time:.2f}s, avg seq len: {avg_seq_length:.1f})"
         )
 
+        # Compute proofs
+        # Note (Jack): Currently, vllm guarantees that seq ids are in the same order as prompts passed to generate.
+        # Generate always adds requests to the engine in the order of the prompts.
+        # And returns them in the sequence they were added.
+        toploc_cache.wait_for_proofs()
+        proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
+        toploc_cache.reset_cache()
+
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
 
-        table = get_parquet_table(generated_tokens, grouped_advantages, grouped_rewards, ckpt_step)
+        table = get_parquet_table(generated_tokens, grouped_advantages, grouped_rewards, proofs, ckpt_step)
 
         step_path = Path(config.output_path) / f"step_{real_step}"
         os.makedirs(step_path, exist_ok=True)
         pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
 
         total_problems += len(prompts)
-        logger.info(f"Generated {total_problems} total samples")
 
         if total_problems % config.step_batch_size == 0:
             logger.info(f"Generated {total_problems} problems for step {real_step}")

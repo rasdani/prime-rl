@@ -22,6 +22,8 @@ dependencies = [
     "beartype",
     "math-verify>=0.7.0",
     "llmcompressor",
+    "toploc",
+    "llmcompressor",
     "liger_kernel",
 ] 
 
