@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import shutil
 import time
 from typing import TYPE_CHECKING, Literal
 
@@ -175,6 +176,8 @@ def train(config: Config):
 
     perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
 
+    previous_ckpt_rollout = []
+
     while True:
         loss_batch = 0
         average_rewards = 0
@@ -243,9 +246,15 @@ def train(config: Config):
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
         if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
-            step_per_rollout = training_progress.step
-            path = Path(config.ckpt.rollout_path) / f"step_{step_per_rollout}"
+            path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
+            previous_ckpt_rollout.append(path)
             save_ckpt_for_rollout(model, path)
+
+            if len(previous_ckpt_rollout) > 2:
+                path_to_delete = previous_ckpt_rollout.pop(0)
+                if path_to_delete.exists():
+                    logger.info(f"Removing past rollout ckpt at {path_to_delete}")
+                    shutil.rmtree(path_to_delete)
 
         if training_progress.step >= config.optim.total_steps:
             break

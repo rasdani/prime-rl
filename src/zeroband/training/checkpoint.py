@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import time
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 
-
+from zeroband.logger import get_logger
 from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
 
@@ -90,17 +91,19 @@ def load_checkpoint_fsdp_state(
     scheduler.load_state_dict(state["scheduler"])
 
 
-def save_ckpt_for_rollout(model: ModelType, path: str | Path):
+def save_ckpt_for_rollout(model: ModelType, path: Path):
     """
     Save the checkpoint for rollout as one unified checkpoint.
     """
-    path = _pathify(path)
+    logger = get_logger()
 
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
 
     path_file = path / "model.pt"
 
+    start_time = time.time()
+    logger.info(f"Saving rollout ckpt at {path}")
     state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True))
 
     # Only save on rank 0
@@ -109,3 +112,5 @@ def save_ckpt_for_rollout(model: ModelType, path: str | Path):
 
         stable_file = path / "stable"
         stable_file.touch()
+
+    logger.info(f"Rollout ckpt saved at {path} in {time.time() - start_time:.2f} seconds")
