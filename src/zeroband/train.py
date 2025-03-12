@@ -51,6 +51,7 @@ class TrainConfig(BaseConfig):
     micro_bs: int = 1
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
+    memory_profile: str | None = None
     torch_compile: bool = True
 
     attn_impl: AttnImpl = "flex_attention"
@@ -182,6 +183,9 @@ def train(config: Config):
         loss_batch = 0
         average_rewards = 0
 
+        if config.train.memory_profile and world_info.rank == 0:
+            torch.cuda.memory._record_memory_history()
+
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
             model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
@@ -230,6 +234,16 @@ def train(config: Config):
         metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item()}  # fmt: skip
 
         log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
+
+        del loss_batch, average_rewards, grad_norm
+
+        if config.train.memory_profile and training_progress.step == 1 and world_info.rank == 0:
+            logger.info("Dumping memory snapshot.")
+            pickle_path: str = config.train.memory_profile
+            if not pickle_path.endswith(".pickle"):
+                pickle_path += ".pickle"
+            torch.cuda.memory._dump_snapshot(pickle_path)
+            torch.cuda.memory._record_memory_history(enabled=False)
 
         tokens_per_second = perf_counter.get_tokens_per_second()
         if tokens_per_second is not None:
