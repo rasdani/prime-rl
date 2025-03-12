@@ -112,6 +112,8 @@ def apply_fsdp(model: ModelType, reshard_after_forward: bool):
         else:
             layer_reshard_after_forward = False
         fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward)
+    fully_shard(model.lm_head, mp_policy=mp_policy, reshard_after_forward=False)
+    fully_shard(model.embed_tokens, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
     fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
 
 
