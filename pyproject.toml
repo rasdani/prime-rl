@@ -22,7 +22,8 @@ dependencies = [
     "beartype",
     "math-verify>=0.7.0",
     "toploc",
-    "llmcompressor"
+    "llmcompressor",
+    "liger_kernel",
 ] 
 
 [build-system]

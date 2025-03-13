@@ -1098,6 +1098,19 @@ wheels = [
 ]
 
 [[package]]
+name = "liger-kernel"
+version = "0.5.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+    { name = "triton" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d6/96/d4e78c98bbd4c625de5fd999272a8d599652995d7386f01c5e7f5d982f87/liger_kernel-0.5.4.tar.gz", hash = "sha256:06af08e67d053c45ab0e85eff63aa229c4a342b984a8691e4374837f335224e1", size = 3558869 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/71/847f737552bb592be60df05fdc2164f1e4022877ca44850f182581721b65/liger_kernel-0.5.4-py3-none-any.whl", hash = "sha256:0f4c56496f694af30de197d308982781863b0a64d7024d4ea57139f4425ef3b2", size = 122851 },
+]
+
+[[package]]
 name = "llmcompressor"
 version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3169,7 +3182,7 @@ name = "triton"
 version = "3.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "filelock", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
+    { name = "filelock" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/98/29/69aa56dc0b2eb2602b553881e34243475ea2afd9699be042316842788ff5/triton-3.1.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6b0dd10a925263abbe9fa37dcde67a5e9b2383fc269fdf59f5657cac38c5d1d8", size = 209460013 },
@@ -3715,6 +3728,7 @@ dependencies = [
     { name = "beartype" },
     { name = "datasets" },
     { name = "jaxtyping" },
+    { name = "liger-kernel" },
     { name = "llmcompressor" },
     { name = "math-verify" },
     { name = "ninja" },
@@ -3744,6 +3758,7 @@ requires-dist = [
     { name = "beartype" },
     { name = "datasets", specifier = ">=3.0.0" },
     { name = "jaxtyping" },
+    { name = "liger-kernel" },
     { name = "llmcompressor" },
     { name = "math-verify", specifier = ">=0.7.0" },
     { name = "ninja" },
