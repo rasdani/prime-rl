@@ -67,6 +67,8 @@ class Config(BaseConfig):
     gpus_ids: list[int] | None = None
     prime_log_freq: int | None = None
 
+    seed: int | None = None  # THIS ARG FOR TESTING PURPOSES ONLY
+
     @model_validator(mode="after")
     def validate_step_batch_size(self):
         assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
@@ -239,9 +241,14 @@ def inference(config: Config):
         dtype="bfloat16",
     )
     tokenizer = llm.get_tokenizer()
-    logger = get_logger(f"INFERENCE {os.environ.get('RANK', '')}")
+    rank = os.environ.get("RANK", 0)
+    logger = get_logger(f"INFERENCE {rank}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
-    dataset = load_dataset(config.dataset, split="train").shuffle(generator=np.random.default_rng())
+
+    generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
+    # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
+
+    dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
     max_samples = config.max_samples or len(dataset)
 
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
