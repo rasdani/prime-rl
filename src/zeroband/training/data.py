@@ -13,6 +13,7 @@ from jaxtyping import Float, Int
 from pyarrow import dataset as ds
 
 from zeroband.logger import get_logger
+from zeroband.training.data_prefetch import GCPPrefetcher
 from zeroband.training.world_info import get_world_info
 
 
@@ -25,6 +26,8 @@ class DataConfig(BaseConfig):
     fake: bool = False
     num_workers: int = 2
     timeout: float = 360
+
+    local_dir: str = "/dev/shm/zeroband/data"  # only used if path is gcp
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -292,12 +295,23 @@ class PaddingColate:
         }
 
 
-def get_dataloader(tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig) -> DataLoader[BatchOutput]:
+def get_dataloader(
+    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig
+) -> tuple[DataLoader[BatchOutput], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
+
+    prefetcher = None
+    path = data_config.path
+
+    if "gs" in data_config.path:
+        if get_world_info().local_rank == 0:
+            prefetcher = GCPPrefetcher(data_config.path, data_config.local_dir)
+        path = data_config.local_dir
+
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = ParquetDataset(Path(data_config.path), batch_size, data_config.timeout)
+        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
-    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn)
+    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn), prefetcher
