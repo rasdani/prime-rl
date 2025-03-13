@@ -24,6 +24,7 @@ dependencies = [
     "llmcompressor",
     "pylatexenc>=2.10",
     "liger_kernel",
+    "google-cloud-storage",
 ] 
 
 [build-system]

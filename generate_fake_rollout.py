@@ -5,20 +5,20 @@
 import os
 from pathlib import Path
 from pydantic_config import parse_argv
-from zeroband.train import Config
+from zeroband.inference import Config
 
 from tests.conftest import _create_fake_rollout_parquet_file
 
 
 def main(config: Config):
-    path = Path(config.data.path)
+    path = Path(config.output_path)
     os.makedirs(path, exist_ok=True)
 
-    num_files = 4
-    batch_size = config.optim.batch_size // num_files
+    num_files = config.step_batch_size // config.batch_size
+    total_step = config.max_samples // config.batch_size
 
     _create_fake_rollout_parquet_file(
-        path, list(range(config.optim.total_steps)), num_files=num_files, batch_size=batch_size, seq_len=config.data.seq_length
+        path, list(range(total_step)), num_files=num_files, batch_size=config.batch_size, seq_len=config.sampling.max_tokens
     )
 
     print(f"Created test data at: {path}")

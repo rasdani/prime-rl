@@ -64,7 +64,7 @@ uv run python src/zeroband/inference.py @ configs/inference/debug.toml
 For now you need to generate fake rollout data for testing. 
 
 ```bash
-uv run python generate_fake_rollout.py @ configs/training/150M/A40.toml --data.path data/fake_rollout --optim.total_steps 1000
+uv run python generate_fake_rollout.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml --max-samples 10000 --sampling.max_tokens 8192
 ```
 
 and then do the training on it
