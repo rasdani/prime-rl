@@ -20,9 +20,9 @@ dependencies = [
     "vllm>=0.7.3",
     "jaxtyping",
     "beartype",
-    "math-verify>=0.7.0",
     "toploc",
-    "llmcompressor"
+    "llmcompressor",
+    "pylatexenc>=2.10",
 ] 
 
 [build-system]
