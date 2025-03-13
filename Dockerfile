@@ -1,4 +1,5 @@
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+# Build stage
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel AS builder
 LABEL maintainer="prime intellect"
 LABEL repository="prime-rl"
 
@@ -51,10 +52,29 @@ COPY ./uv.lock ./uv.lock
 COPY ./README.md ./README.md
 COPY ./src/ ./src/
 
-RUN uv sync
+# Create venv and install dependencies
+RUN uv venv .venv
+RUN . .venv/bin/activate && uv sync
 
+# Runtime stage
+FROM python:3.11-slim
+WORKDIR /root/prime-rl
+
+# Copy virtual environment
+COPY --from=builder /root/prime-rl/.venv /root/prime-rl/.venv
+RUN rm /root/prime-rl/.venv/bin/python
+RUN ln -s /usr/local/bin/python /root/prime-rl/.venv/bin/python
+ENV PATH="/root/prime-rl/.venv/bin:$PATH"
+
+# Note(Jack): Nothing should need to compile so we don't need these
+# COPY --from=builder /usr/local/cuda-12.4 /usr/local/cuda
+# ENV LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+# ENV CUDA_HOME=/usr/local/cuda-12.4
+# ENV PATH="/usr/local/cuda-12.4/bin:$PATH"
+
+# Copy application files
+COPY --from=builder /root/prime-rl/src ./src
 COPY ./configs/ ./configs/
 
-# uv run python src/zeroband/inference.py
-ENTRYPOINT ["uv", "run", "python", "src/zeroband/inference.py"]
-CMD ["@", "configs/inference/debug.toml"] 
+ENTRYPOINT ["python", "src/zeroband/inference.py"]
+CMD ["@", "configs/inference/debug.toml"]
