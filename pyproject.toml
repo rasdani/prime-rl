@@ -23,6 +23,7 @@ dependencies = [
     "toploc",
     "llmcompressor",
     "pylatexenc>=2.10",
+    "liger_kernel",
 ] 
 
 [build-system]

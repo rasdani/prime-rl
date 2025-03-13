@@ -9,7 +9,6 @@ import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 
-
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
@@ -24,6 +23,9 @@ from jaxtyping import Float, Int
 
 from zeroband.training.world_info import WorldInfo, get_world_info
 
+from pydantic import model_validator
+
+from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
 
@@ -51,7 +53,9 @@ class TrainConfig(BaseConfig):
     micro_bs: int = 1
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
+    memory_profile: str | None = None
     torch_compile: bool = True
+    liger_qwen: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
 
@@ -77,6 +81,12 @@ class Config(BaseConfig):
     train: TrainConfig
 
     gpus_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def check_liger(self):
+        if self.train.liger_qwen:
+            assert "Qwen" in self.name_model, "train.liger_qwen can only be applied to Qwen2 models."
+        return self
 
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
@@ -168,6 +178,14 @@ def train(config: Config):
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
+    if config.train.liger_qwen:
+        apply_liger_kernel_to_qwen2(
+            rope=True,
+            rms_norm=True,
+            swiglu=True,
+            model=model,
+        )
+
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
 
@@ -181,6 +199,9 @@ def train(config: Config):
     while True:
         loss_batch = 0
         average_rewards = 0
+
+        if config.train.memory_profile and world_info.rank == 0:
+            torch.cuda.memory._record_memory_history()
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
@@ -231,6 +252,16 @@ def train(config: Config):
 
         log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
+        del loss_batch, average_rewards, grad_norm
+
+        if config.train.memory_profile and training_progress.step == 1 and world_info.rank == 0:
+            logger.info("Dumping memory snapshot.")
+            pickle_path: str = config.train.memory_profile
+            if not pickle_path.endswith(".pickle"):
+                pickle_path += ".pickle"
+            torch.cuda.memory._dump_snapshot(pickle_path)
+            torch.cuda.memory._record_memory_history(enabled=False)
+
         tokens_per_second = perf_counter.get_tokens_per_second()
         if tokens_per_second is not None:
             metrics["tokens_per_second"] = tokens_per_second
@@ -246,7 +277,8 @@ def train(config: Config):
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
 
         if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
-            path = Path(config.ckpt.rollout_path) / f"step_{training_progress.step}"
+            rollout_step = training_progress.step // config.optim.step_per_rollout
+            path = Path(config.ckpt.rollout_path) / f"step_{rollout_step}"
             previous_ckpt_rollout.append(path)
             save_ckpt_for_rollout(model, path)
 
@@ -260,6 +292,7 @@ def train(config: Config):
             break
 
     logger.info("Training finished, exiting ...")
+    logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
 
 
 if __name__ == "__main__":
