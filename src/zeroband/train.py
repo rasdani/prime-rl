@@ -163,6 +163,14 @@ def train(config: Config):
 
     train_dataloader_iterator = iter(train_dataloader)
 
+    if config.train.liger_qwen:
+        apply_liger_kernel_to_qwen2(
+            rope=True,
+            rms_norm=True,
+            swiglu=True,
+            model=model,
+        )
+
     if config.train.ac_ckpt:
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
@@ -177,14 +185,6 @@ def train(config: Config):
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
-
-    if config.train.liger_qwen:
-        apply_liger_kernel_to_qwen2(
-            rope=True,
-            rms_norm=True,
-            swiglu=True,
-            model=model,
-        )
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
@@ -211,19 +211,25 @@ def train(config: Config):
             batch = next(train_dataloader_iterator)
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
+            cpu_loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"]
+            cpu_original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"]
             average_rewards += batch["rewards"].mean() / gradient_accumulation_steps
-            loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].to("cuda")
-            original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"].to("cuda")
-
             del batch
+
+            # Forward
+            logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
             # Gather args for grpo loss
             advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
-            logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
-            del cpu_advantages, advantages, logits, loss_mask, input_ids, original_logprobs
+            loss_mask: Int[torch.Tensor, "batch seq"] = cpu_loss_mask.to("cuda")
+            original_logprobs: Float[torch.Tensor, "batch seq"] = cpu_original_logprobs.to("cuda")
+            del cpu_advantages, cpu_loss_mask, cpu_original_logprobs
 
-            # backward
+            # Loss
+            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
+            del logits, input_ids, advantages, loss_mask, original_logprobs
+
+            # Backward
             loss.backward()
             loss_batch += loss.detach().clone()
             del loss
@@ -254,14 +260,6 @@ def train(config: Config):
 
         del loss_batch, average_rewards, grad_norm
 
-        if config.train.memory_profile and training_progress.step == 1 and world_info.rank == 0:
-            logger.info("Dumping memory snapshot.")
-            pickle_path: str = config.train.memory_profile
-            if not pickle_path.endswith(".pickle"):
-                pickle_path += ".pickle"
-            torch.cuda.memory._dump_snapshot(pickle_path)
-            torch.cuda.memory._record_memory_history(enabled=False)
-
         tokens_per_second = perf_counter.get_tokens_per_second()
         if tokens_per_second is not None:
             metrics["tokens_per_second"] = tokens_per_second
@@ -272,6 +270,14 @@ def train(config: Config):
             wandb.log(metrics)
 
         logger.info(log)
+
+        if config.train.memory_profile and (training_progress.step == 2) and world_info.rank == 0:
+            logger.info("Dumping memory snapshot.")
+            pickle_path: str = config.train.memory_profile
+            if not pickle_path.endswith(".pickle"):
+                pickle_path += ".pickle"
+            torch.cuda.memory._dump_snapshot(pickle_path)
+            torch.cuda.memory._record_memory_history(enabled=False)
 
         if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
             save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
