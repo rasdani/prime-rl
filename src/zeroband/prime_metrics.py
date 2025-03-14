@@ -75,7 +75,9 @@ class PrimeMetric:
                     message = {"label": key, "value": value, "task_id": task_id}
                     sock.sendall(json.dumps(message).encode())
             return True
-        except Exception:
+        except Exception as e:
+            print(f"Error sending message to Prime: {e}")
+            print(f"Socket path: {socket_path}")
             return False
 
     ### background system metrics
