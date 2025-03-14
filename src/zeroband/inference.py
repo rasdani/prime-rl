@@ -13,6 +13,7 @@ from pydantic_config import BaseConfig, parse_argv
 import vllm
 import concurrent.futures
 import time
+from toploc.utils import sha256sum
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
@@ -30,6 +31,7 @@ import multiprocessing as mp
 
 from zeroband.inferencing.toploc import TopLocCache
 from zeroband.training.mp import EnvWrapper, cuda_available_devices
+from zeroband.prime_metrics import PrimeMetric
 
 
 class SamplingParamConfig(BaseConfig):
@@ -62,6 +64,7 @@ class Config(BaseConfig):
     tp: int = 1
     dp: int = 1
     gpus_ids: list[int] | None = None
+    prime_log_freq: int | None = None
 
     @model_validator(mode="after")
     def validate_step_batch_size(self):
@@ -224,6 +227,7 @@ def compute_advantages_grpo(grouped_rewards: dict[int, torch.FloatTensor], epsil
 
 
 def inference(config: Config):
+    prime_metric = PrimeMetric(disable=config.prime_log_freq is None, period=config.prime_log_freq)
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
@@ -333,9 +337,15 @@ def inference(config: Config):
 
         step_path = Path(config.output_path) / f"step_{real_step}"
         os.makedirs(step_path, exist_ok=True)
-        pq.write_table(table, f"{step_path}/{uuid.uuid4()}.parquet")
+        pq_save_path = f"{step_path}/{uuid.uuid4()}.parquet"
+        pq.write_table(table, pq_save_path)
+        file_sha = sha256sum(pq_save_path)
+        prime_metric.log_prime({"file_sha": file_sha, "file_name": pq_save_path})
+        logger.info(f"✨ Saved {len(proofs)} samples to {pq_save_path} with sha {file_sha or 'NA'}")
 
         total_problems += len(prompts)
+        metric = {"dashbord-progress/total": total_problems, f"dashbord-progress/{config.dataset}": total_tokens}
+        prime_metric.log_prime(metric)
 
         if total_problems % config.step_batch_size == 0:
             logger.info(f"Generated {total_problems} problems for step {real_step}")
