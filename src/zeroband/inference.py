@@ -34,7 +34,7 @@ from zeroband.training.mp import EnvWrapper, cuda_available_devices
 
 class SamplingParamConfig(BaseConfig):
     temperature: float = 0.6
-    max_tokens: int = 16_000
+    max_tokens: int | None = None
     ignore_eos: bool = False
     top_p: float = 0.95
     n: int = 8
@@ -55,6 +55,7 @@ class Config(BaseConfig):
 
     sampling: SamplingParamConfig = SamplingParamConfig()
     enforce_eager: bool = False
+    max_model_len: int | None = None
 
     max_async_level: int = 2  # the amount of step for which we can be in advance
 
@@ -227,8 +228,8 @@ def inference(config: Config):
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
-        max_seq_len_to_capture=config.sampling.max_tokens,
-        max_model_len=config.sampling.max_tokens,
+        max_seq_len_to_capture=config.max_model_len,
+        max_model_len=config.max_model_len,
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
         dtype="bfloat16",
