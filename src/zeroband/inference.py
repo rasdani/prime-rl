@@ -227,7 +227,8 @@ def inference(config: Config):
     llm = LLM(
         model=name_to_hf_model[config.name_model],
         tensor_parallel_size=config.tp,
-        max_seq_len_to_capture=int(1.5 * config.sampling.max_tokens),  # 1.5 makes sure we capture the entire output even with prefill
+        max_seq_len_to_capture=config.sampling.max_tokens,
+        max_model_len=config.sampling.max_tokens,
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
         dtype="bfloat16",
@@ -296,6 +297,11 @@ def inference(config: Config):
         start_time = time.time()
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
         end_time = time.time()
+
+        # Dropping like this isnt ideal. But in practice, we shouldnt have any prompts that are too long.
+        generated_tokens = [req for req in generated_tokens if len(req.outputs[0].token_ids) > 0]
+        if len(generated_tokens) != len(prompts):
+            logger.warning(f"{len(prompts) - len(generated_tokens)} prompts were filtered out because they were too long")
 
         # This generates proofs for the remaining sequences that haven't reached max_len.
         # We call here to give time for the proofs to be generated non-blocking in the background.
