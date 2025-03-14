@@ -1,0 +1,10 @@
+name_model = "Qwen1.5B"
+max_samples = 1000
+batch_size = 8
+enforce_eager = true
+step_batch_size = 24
+total_step = 5
+
+[sampling]
+max_tokens = 128
+n = 8
