@@ -154,7 +154,7 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
-    train_dataloader = get_dataloader(
+    train_dataloader, prefetcher = get_dataloader(
         tokenizer=tokenizer,
         micro_batch_size=config.train.micro_bs,
         batch_size=config.optim.batch_size * config.optim.step_per_rollout,
@@ -296,6 +296,9 @@ def train(config: Config):
 
         if training_progress.step >= config.optim.total_steps:
             break
+
+    if prefetcher is not None:
+        prefetcher.shutdown()
 
     logger.info("Training finished, exiting ...")
     logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
