@@ -66,7 +66,7 @@ class PriorityThreadPool:
             except queue.Empty:
                 continue
 
-    def submit(self, priority, func, *args, **kwargs):
+    def submit(self, func, *args, priority: int = 0, **kwargs):
         self.priority_queue.put(PrioritizedJob(priority, func, args, kwargs))
 
     def shutdown(self, wait=True):
@@ -95,8 +95,6 @@ class GCPPrefetcher:
     def __init__(self, gcp_path: str, local_dir: str, max_buffer_steps: int | None = None, max_workers: int = 8):
         self.prefetcher_process = mp.Process(target=self._prefetch, args=(gcp_path, local_dir, max_buffer_steps, max_workers))
         self.prefetcher_process.start()
-        # self.logger = get_logger()
-        # self.logger.info(f"Started GCPPrefetcher for {gcp_path} / {local_dir}")
 
     def _prefetch(self, *args, **kwargs):
         prefetcher = _GCPPrefetcherInternal(*args, **kwargs)
@@ -154,7 +152,7 @@ class _GCPPrefetcherInternal:
             for step_number in step_to_download:
                 files = self.filter_to_download(steps_blobs[step_number])
                 for file in files:
-                    self.thread_pool_download.submit(step_number, self._download_files, file)
+                    self.thread_pool_download.submit(self._download_files, file, priority=step_number)
                     # we want to download the file from the oldest step first
                     self.files_downloaded.append(file.name)
 
