@@ -1,3 +1,4 @@
+from functools import partial
 import os
 from pathlib import Path
 import shutil
@@ -6,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 import wandb
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
@@ -28,6 +29,8 @@ from pydantic import model_validator
 from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
+
+from CPUOptimizer import CPUOptimizer
 
 
 class AdamConfig(BaseConfig):
@@ -56,6 +59,10 @@ class TrainConfig(BaseConfig):
     memory_profile: str | None = None
     torch_compile: bool = True
     liger_qwen: bool = False
+
+    fsdp_cpuoffload: bool = False
+    cpu_optimizer: bool = False
+    cpu_optimizer_pipeline: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
 
@@ -87,6 +94,14 @@ class Config(BaseConfig):
         if self.train.liger_qwen:
             assert "Qwen" in self.name_model, "train.liger_qwen can only be applied to Qwen2 models."
         return self
+    
+    @model_validator(mode="after")
+    def check_cpu_optimizer(self):
+        if self.train.cpu_optimizer and not self.train.fsdp_cpuoffload:
+            raise ValueError("train.cpu_optimizer can only be used with train.fsdp_cpuoffload, as the grads must be on CPU.")
+        if self.train.cpu_optimizer_pipeline and not self.train.cpu_optimizer:
+            raise ValueError("train.cpu_optimizer_pipeline can only be used with train.cpu_optimizer.")
+        return self
 
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
@@ -103,16 +118,17 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_fsdp(model: ModelType, reshard_after_forward: bool):
+def apply_fsdp(model: ModelType, config: TrainConfig):
+    offload_policy = CPUOffloadPolicy() if config.fsdp_cpuoffload else None
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
 
     for layer_id, transformer_block in enumerate(model.model.layers):
-        if reshard_after_forward:
+        if config.reshard_after_forward:
             layer_reshard_after_forward = layer_id < len(model.model.layers) - 1
         else:
             layer_reshard_after_forward = False
-        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward)
-    fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
+        fully_shard(transformer_block, mp_policy=mp_policy, offload_policy=offload_policy, reshard_after_forward=layer_reshard_after_forward)
+    fully_shard(model, mp_policy=mp_policy, offload_policy=offload_policy, reshard_after_forward=config.reshard_after_forward)
 
 
 def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> int:
@@ -175,9 +191,13 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    apply_fsdp(model, config.train.reshard_after_forward)
+    apply_fsdp(model, config.train)
 
-    optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
+    def pipeline_hook(param):
+        optimizer.step_param(param) # type: ignore
+
+    optim_constructor = partial(torch.optim.AdamW, fused=config.train.fsdp_cpuoffload) if not config.train.cpu_optimizer else partial(CPUOptimizer, pipeline_hook=pipeline_hook if config.train.cpu_optimizer_pipeline else None)
+    optimizer = optim_constructor(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
 
@@ -230,6 +250,8 @@ def train(config: Config):
             del logits, input_ids, advantages, loss_mask, original_logprobs
 
             # Backward
+            if config.train.cpu_optimizer_pipeline:
+                optimizer.begin_step() # type: ignore
             loss.backward()
             loss_batch += loss.detach().clone()
             del loss
@@ -238,7 +260,7 @@ def train(config: Config):
         average_rewards = average_rewards / world_info.world_size
         dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor() if not config.train.cpu_optimizer_pipeline else torch.tensor(0) # type: ignore (is a dtensor)
 
         optimizer.step()
         scheduler.step()

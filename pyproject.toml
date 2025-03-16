@@ -20,6 +20,7 @@ dependencies = [
     "vllm>=0.7.3",
     "jaxtyping",
     "beartype",
+    "CPUOptimizer @ git+https://github.com/PrimeIntellect-ai/CPUOptimizer.git@02e432e",
     "toploc",
     "llmcompressor",
     "pylatexenc>=2.10",
