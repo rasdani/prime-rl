@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
 import wandb
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
@@ -56,6 +56,7 @@ class TrainConfig(BaseConfig):
     memory_profile: str | None = None
     torch_compile: bool = True
     liger_qwen: bool = False
+    fsdp_cpuoffload: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
 
@@ -103,16 +104,17 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_fsdp(model: ModelType, reshard_after_forward: bool):
+def apply_fsdp(model: ModelType, config: TrainConfig):
+    offload_policy = CPUOffloadPolicy() if config.fsdp_cpuoffload else None
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
 
     for layer_id, transformer_block in enumerate(model.model.layers):
-        if reshard_after_forward:
+        if config.reshard_after_forward:
             layer_reshard_after_forward = layer_id < len(model.model.layers) - 1
         else:
             layer_reshard_after_forward = False
-        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward)
-    fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
+        fully_shard(transformer_block, mp_policy=mp_policy, offload_policy=offload_policy, reshard_after_forward=layer_reshard_after_forward)
+    fully_shard(model, mp_policy=mp_policy, offload_policy=offload_policy, reshard_after_forward=config.reshard_after_forward)
 
 
 def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> int:
@@ -175,7 +177,7 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    apply_fsdp(model, config.train.reshard_after_forward)
+    apply_fsdp(model, config.train)
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
