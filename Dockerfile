@@ -54,7 +54,7 @@ COPY ./src/ ./src/
 
 # Create venv and install dependencies
 RUN uv venv .venv
-RUN . .venv/bin/activate && uv sync
+RUN . .venv/bin/activate && uv sync && uv pip install flash-attn --no-build-isolation
 
 # Runtime stage
 FROM python:3.11-slim
