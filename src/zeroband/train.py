@@ -94,9 +94,11 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     batch_size = batch_size // world_info.world_size
 
     print(f"batch_size: {batch_size}, micro_bs: {micro_bs}, data_workers: {data_workers}")
-    assert batch_size % micro_bs == 0, f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
+    assert batch_size % micro_bs == 0, str(
+        f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
+    )
 
-    assert batch_size % data_workers == 0, (
+    assert batch_size % data_workers == 0, str(
         f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers})."
     )
 
