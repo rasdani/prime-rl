@@ -213,7 +213,7 @@ def train(config: Config):
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
             cpu_loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"]
             cpu_original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"]
-            average_rewards += batch["rewards"].mean() / gradient_accumulation_steps
+            average_rewards += batch["rewards"][cpu_loss_mask].mean() / gradient_accumulation_steps
             del batch
 
             # Forward
