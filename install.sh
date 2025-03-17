@@ -53,9 +53,9 @@ main() {
     
     log_info "Installing dependencies..."
     uv sync
-        
-    log_info "Updating git submodules..."
-    git submodule update --init --recursive
+
+    log_info "Installing flash-attn..."
+    uv pip install flash-attn --no-build-isolation
     
     log_info "Installation completed! You can double check that everything is install correctly by running"
 }
