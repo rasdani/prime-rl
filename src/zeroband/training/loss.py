@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from jaxtyping import Float, Int, jaxtyped
+from jaxtyping import Float, Int, jaxtyped, Bool
 from beartype import beartype as typechecker
 
 
@@ -11,7 +11,7 @@ def grpo_loss(
     input_ids: Int[Tensor, "batch seq"],
     advantages: Float[Tensor, "batch seq"],
     original_logprobs: Float[Tensor, "batch seq"],
-    loss_mask: Int[Tensor, "batch seq"],
+    loss_mask: Bool[Tensor, "batch seq"],
     epsilon: float = 0.2,
 ):
     """

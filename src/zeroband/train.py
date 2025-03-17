@@ -211,7 +211,7 @@ def train(config: Config):
             batch = next(train_dataloader_iterator)
             input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
             cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
-            cpu_loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"]
+            cpu_loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].bool()
             cpu_original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"]
             average_rewards += batch["rewards"][cpu_loss_mask].mean() / gradient_accumulation_steps
             del batch
