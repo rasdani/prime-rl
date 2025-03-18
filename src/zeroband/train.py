@@ -204,6 +204,7 @@ def train(config: Config):
         loss_batch = 0
         average_rewards = 0
         clip_ratio_batch = 0
+        seq_lens_batch = 0
 
         if config.train.memory_profile and world_info.rank == 0:
             torch.cuda.memory._record_memory_history()
@@ -217,6 +218,7 @@ def train(config: Config):
             input_ids = batch["input_ids"].to("cuda")
             loss_mask = batch["loss_mask"].bool()
             average_rewards += batch["rewards"][loss_mask].mean() / gradient_accumulation_steps
+            seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
             # Forward
             logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -225,7 +227,6 @@ def train(config: Config):
             advantages = batch["advantages"].to("cuda")
             loss_mask = loss_mask.to("cuda")
             original_logprobs = batch["logprobs"].to("cuda")
-
             # Loss
             loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
             loss = loss / gradient_accumulation_steps
@@ -240,12 +241,13 @@ def train(config: Config):
             del loss, clip_ratio
 
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+        dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
 
         average_rewards = average_rewards / world_info.world_size
         dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
 
-        clip_ratio_batch = clip_ratio_batch / world_info.world_size
-        dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
+        seq_lens_batch = seq_lens_batch / world_info.world_size
+        dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
@@ -263,7 +265,7 @@ def train(config: Config):
         perf_counter.count_tokens(new_tokens)
         training_progress.total_tokens += new_tokens
 
-        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "rollout_step": training_progress.step // config.optim.step_per_rollout, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item(), "clip_ratio": clip_ratio_batch.item()}  # fmt: skip
+        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "rollout_step": training_progress.step // config.optim.step_per_rollout, "seq_lens": seq_lens_batch.item(), "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item(), "clip_ratio": clip_ratio_batch.item()}  # fmt: skip
 
         log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
