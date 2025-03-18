@@ -232,7 +232,7 @@ def train(config: Config):
             target_ids = input_ids[:, 1:]  # Shift right by 1
             flatten_logits = logits.reshape(-1, logits.size(-1))
             flatten_target = target_ids.reshape(-1)
-            loss = F.cross_entropy(flatten_logits, flatten_target) / gradient_accumulation_steps
+            loss = F.cross_entropy(flatten_logits, flatten_target, ignore_index=tokenizer.pad_token_id) / gradient_accumulation_steps
 
             del logits, input_ids, advantages, loss_mask, original_logprobs
 
