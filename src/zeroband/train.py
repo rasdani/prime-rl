@@ -82,6 +82,8 @@ class Config(BaseConfig):
 
     gpus_ids: list[int] | None = None
 
+    temperature: float = 0.6  # todo remove this and add this to the data
+
     @model_validator(mode="after")
     def check_liger(self):
         if self.train.liger_qwen:
@@ -201,6 +203,7 @@ def train(config: Config):
     while True:
         loss_batch = 0
         average_rewards = 0
+        clip_ratio_batch = 0
 
         if config.train.memory_profile and world_info.rank == 0:
             torch.cuda.memory._record_memory_history()
@@ -228,17 +231,25 @@ def train(config: Config):
             del cpu_advantages, cpu_loss_mask, cpu_original_logprobs
 
             # Loss
-            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
+            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            loss = loss / gradient_accumulation_steps
+            clip_ratio = clip_ratio / gradient_accumulation_steps
+
             del logits, input_ids, advantages, loss_mask, original_logprobs
 
             # Backward
             loss.backward()
             loss_batch += loss.detach().clone()
-            del loss
+            clip_ratio_batch += clip_ratio.detach().clone()
+            del loss, clip_ratio
 
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+
         average_rewards = average_rewards / world_info.world_size
         dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
+
+        clip_ratio_batch = clip_ratio_batch / world_info.world_size
+        dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
@@ -256,7 +267,7 @@ def train(config: Config):
         perf_counter.count_tokens(new_tokens)
         training_progress.total_tokens += new_tokens
 
-        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item()}  # fmt: skip
+        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item(), "clip_ratio": clip_ratio_batch.item()}  # fmt: skip
 
         log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
