@@ -19,7 +19,7 @@ from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 from zeroband.logger import get_logger
 
 from pydantic_config import BaseConfig, parse_argv
-from jaxtyping import Float, Int
+from jaxtyping import Float
 
 from zeroband.training.world_info import WorldInfo, get_world_info
 
@@ -214,28 +214,24 @@ def train(config: Config):
 
             # Load args
             batch = next(train_dataloader_iterator)
-            input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
-            cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
-            cpu_loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].bool()
-            cpu_original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"]
-            average_rewards += batch["rewards"][cpu_loss_mask].mean() / gradient_accumulation_steps
-            del batch
+            input_ids = batch["input_ids"].to("cuda")
+            loss_mask = batch["loss_mask"].bool()
+            average_rewards += batch["rewards"][loss_mask].mean() / gradient_accumulation_steps
 
             # Forward
             logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
             # Gather args for grpo loss
-            advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
-            loss_mask: Int[torch.Tensor, "batch seq"] = cpu_loss_mask.to("cuda")
-            original_logprobs: Float[torch.Tensor, "batch seq"] = cpu_original_logprobs.to("cuda")
-            del cpu_advantages, cpu_loss_mask, cpu_original_logprobs
+            advantages = batch["advantages"].to("cuda")
+            loss_mask = loss_mask.to("cuda")
+            original_logprobs = batch["logprobs"].to("cuda")
 
             # Loss
             loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
             loss = loss / gradient_accumulation_steps
             clip_ratio = clip_ratio / gradient_accumulation_steps
 
-            del logits, input_ids, advantages, loss_mask, original_logprobs
+            del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
             # Backward
             loss.backward()
