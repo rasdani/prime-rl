@@ -33,9 +33,9 @@ import logging
 class AdamConfig(BaseConfig):
     type: Literal["adam"] = "adam"
     lr: float = 4e-4
-    weight_decay: float = 0.1
+    weight_decay: float = 0.01
     betas1: float = 0.9
-    betas2: float = 0.95
+    betas2: float = 0.99
 
 
 class OptimConfig(BaseConfig):
