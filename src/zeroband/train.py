@@ -12,7 +12,6 @@ import wandb
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -28,6 +27,7 @@ from pydantic import model_validator
 from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
+import torch.nn.functional as F
 
 
 class AdamConfig(BaseConfig):
@@ -228,7 +228,12 @@ def train(config: Config):
             del cpu_advantages, cpu_loss_mask, cpu_original_logprobs
 
             # Loss
-            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
+            logits = logits[:, :-1]  # Remove last position
+            target_ids = input_ids[:, 1:]  # Shift right by 1
+            flatten_logits = logits.reshape(-1, logits.size(-1))
+            flatten_target = target_ids.reshape(-1)
+            loss = F.cross_entropy(flatten_logits, flatten_target) / gradient_accumulation_steps
+
             del logits, input_ids, advantages, loss_mask, original_logprobs
 
             # Backward
