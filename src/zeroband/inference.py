@@ -237,7 +237,7 @@ def inference(config: Config):
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
         dtype="bfloat16",
-        max_num_batched_tokens=2048,
+        max_num_batched_tokens=8192,  # https://github.com/volcengine/verl/blob/468adf22c43b744348051fccd7a5d830c6c3c36a/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py#L85
     )
     tokenizer = llm.get_tokenizer()
     logger = get_logger(f"INFERENCE {os.environ.get('RANK', '')}")
