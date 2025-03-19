@@ -241,7 +241,7 @@ def inference(config: Config):
         dtype="bfloat16",
     )
     tokenizer = llm.get_tokenizer()
-    rank = os.environ.get("RANK", 0)
+    rank = int(os.environ.get("RANK", "0"))
     logger = get_logger(f"INFERENCE {rank}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
