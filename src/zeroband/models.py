@@ -20,6 +20,7 @@ name_to_hf_model = {
     "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
     "Llama8B": "meta-llama/Meta-Llama-3-8B",
     "QwQ32B": "Qwen/QwQ-32B",
+    "Qwen0.5B": "Qwen/Qwen2.5-0.5B",
 }
 
 name_to_hf_tokenizer = {
@@ -31,6 +32,7 @@ name_to_hf_tokenizer = {
     "Qwen32B": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
     "Llama8B": "meta-llama/Meta-Llama-3-8B",
     "QwQ32B": "Qwen/QwQ-32B",
+    "Qwen0.5B": "Qwen/Qwen2.5-0.5B",
 }
 
 name_to_class = {
@@ -42,6 +44,7 @@ name_to_class = {
     "Qwen32B": (Qwen2Config, Qwen2ForCausalLM),
     "Llama8B": (LlamaConfig, LlamaForCausalLM),
     "QwQ32B": (Qwen2Config, Qwen2ForCausalLM),
+    "Qwen0.5B": (Qwen2Config, Qwen2ForCausalLM),
 }
 
 
