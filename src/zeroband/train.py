@@ -6,8 +6,18 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
+from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
+
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    parallelize_module,
+    PrepareModuleInput,
+    RowwiseParallel,
+    #SequenceParallel,
+)
+from torch.distributed.tensor.placement_types import Replicate, Shard
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
@@ -59,6 +69,9 @@ class TrainConfig(BaseConfig):
 
     attn_impl: AttnImpl = "flex_attention"
 
+    dp: int = -1 # World size by default, otherwise specifiy with tp
+    tp: int = 1
+
 
 class CkptConfig(BaseConfig):
     path: str | None = None
@@ -105,16 +118,68 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_fsdp(model: ModelType, reshard_after_forward: bool):
+def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
+    if device_mesh is not None:
+        get_logger().info(f"Tensor Parallel device mesh: {device_mesh}")
+        #model.tensor_parallel(device_mesh["tp"])
+
+    parallelize_module(
+        model,
+        device_mesh,
+        {
+            "lm_head": ColwiseParallel(
+                input_layouts=Shard(1),
+                output_layouts=Replicate(),
+                use_local_output=True,
+            ),
+        },
+    )
+
+
+    parallelize_module(
+        model.model,
+        device_mesh,
+        {
+            "embed_tokens": RowwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Shard(1),
+                use_local_output=True,
+            ),
+            # "norm": SequenceParallel(
+            #     sequence_dim=1,
+            #     use_local_output=True
+            # ),
+        }
+    )
+
+    for layer_id, transformer_block in enumerate(model.model.layers):
+        parallelize_module(
+            transformer_block,
+            device_mesh,
+            {
+                'layers.*.self_attn.q_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.self_attn.k_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.self_attn.v_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.self_attn.o_proj':   RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
+                'layers.*.mlp.gate_proj':      ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.mlp.up_proj':        ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.mlp.down_proj':      RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
+            },
+        )
+
+
+def apply_fsdp(model: ModelType, reshard_after_forward: bool, device_mesh: DeviceMesh | None):
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
+
+    get_logger().info(f"FSDP device mesh: {device_mesh}")
 
     for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
             layer_reshard_after_forward = layer_id < len(model.model.layers) - 1
         else:
             layer_reshard_after_forward = False
-        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward)
-    fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
+        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward, mesh=device_mesh)
+    fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward, mesh=device_mesh)
 
 
 def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> int:
@@ -138,7 +203,7 @@ def train(config: Config):
     logger = get_logger()
     world_info = get_world_info()
 
-    logger.info(f"start training on {world_info.world_size}")
+    logger.info(f"start training with world size: {world_info.world_size}")
 
     # Allow eager fallback during production so that that the training runs dont die
     # However, in development, we want to know that we broke torch compile
@@ -177,7 +242,26 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    apply_fsdp(model, config.train.reshard_after_forward)
+    from zeroband.training.parallel_dims import ParallelDims
+    if config.train.dp == -1:
+        assert world_info.world_size % config.train.tp == 0, "world size must be divisible by tp"
+        config.train.dp = world_info.world_size // config.train.tp
+    parallel_dims = ParallelDims(
+        dp_replicate=1, # FSDP, not HSDP.
+        dp_shard=config.train.dp,
+        cp=1,
+        tp=config.train.tp,
+        pp=1,
+        world_size=world_info.world_size,
+        enable_loss_parallel=False,
+    )
+    world_mesh = parallel_dims.build_mesh("cuda")
+    logger.info(f"World device mesh: {world_mesh}")
+
+    apply_tp(model, config.train, device_mesh=world_mesh["tp"])
+
+    dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp") if parallel_dims.dp_replicate_enabled else ("dp_shard_cp",)
+    apply_fsdp(model, config.train.reshard_after_forward, device_mesh=world_mesh[dp_mesh_dim_names])
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
@@ -240,7 +324,9 @@ def train(config: Config):
         average_rewards = average_rewards / world_info.world_size
         dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+        # TODO: This crashes with device mesh mismatch.
+        #grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+        grad_norm = None
 
         optimizer.step()
         scheduler.step()
