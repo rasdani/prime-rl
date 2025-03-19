@@ -96,8 +96,10 @@ def _compile_grpo_loss(
 
     # Divide logits by sampling temperature.
     # See https://huggingface.co/blog/the_n_implementation_details_of_rlhf_with_ppo#policy-training-implementation-details
-    logits = logits / temperature
-    per_token_logps = selective_log_softmax(logits, input_ids)
+
+    with torch.no_grad():
+        logits = logits / temperature
+        per_token_logps = selective_log_softmax(logits, input_ids).detach()
 
     coef_1 = torch.exp(per_token_logps - original_logprobs)
     coef_2 = torch.clamp(coef_1, 1 - epsilon, 1 + epsilon)
