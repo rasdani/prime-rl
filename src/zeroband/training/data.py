@@ -245,6 +245,7 @@ class BatchOutput(TypedDict):
     rewards: Float[torch.Tensor, "batch seq"]
     loss_mask: Int[torch.Tensor, "batch seq"]
     logprobs: Float[torch.Tensor, "batch seq"]
+    seq_lens: Int[torch.Tensor, "batch"]
 
 
 class PaddingColate:
@@ -262,12 +263,17 @@ class PaddingColate:
         rewards = []
         loss_masks = []
         logprobs = []
+        seq_lens = []
         for sample in samples:
             ids = sample["input_ids"]
+            seq_len = len(ids)
+            # seq_len = self._seq_len
+
             adv = sample["advantages"]
             rew = sample["rewards"]
             loss_mask = sample["loss_mask"]
             logprob = sample["logprobs"]
+
             if len(ids) >= self._seq_len:
                 ids = ids[: self._seq_len]
                 adv = adv[: self._seq_len]
@@ -280,6 +286,8 @@ class PaddingColate:
                 rew = torch.cat([rew, torch.zeros(self._seq_len - len(rew), dtype=rew.dtype)])
                 loss_mask = torch.cat([loss_mask, torch.zeros(self._seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
                 logprob = torch.cat([logprob, torch.zeros(self._seq_len - len(logprob), dtype=logprob.dtype)])
+
+            seq_lens.append(seq_len)
             inputs_ids.append(ids)
             advantages.append(adv)
             rewards.append(rew)
@@ -292,6 +300,7 @@ class PaddingColate:
             "rewards": torch.stack(rewards, dim=0),
             "loss_mask": torch.stack(loss_masks, dim=0).int(),
             "logprobs": torch.stack(logprobs, dim=0),
+            "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
         }
 
 

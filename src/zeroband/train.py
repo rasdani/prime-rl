@@ -29,7 +29,7 @@ from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 from zeroband.logger import get_logger
 
 from pydantic_config import BaseConfig, parse_argv
-from jaxtyping import Float, Int
+from jaxtyping import Float
 
 from zeroband.training.world_info import WorldInfo, get_world_info
 
@@ -94,6 +94,8 @@ class Config(BaseConfig):
     train: TrainConfig
 
     gpus_ids: list[int] | None = None
+
+    temperature: float = 0.6  # todo remove this and add this to the data
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -285,6 +287,8 @@ def train(config: Config):
     while True:
         loss_batch = 0
         average_rewards = 0
+        clip_ratio_batch = 0
+        seq_lens_batch = 0
 
         if config.train.memory_profile and world_info.rank == 0:
             torch.cuda.memory._record_memory_history()
@@ -295,34 +299,39 @@ def train(config: Config):
 
             # Load args
             batch = next(train_dataloader_iterator)
-            input_ids: Int[torch.Tensor, "batch seq"] = batch["input_ids"].to("cuda")
-            cpu_advantages: Float[torch.Tensor, "batch seq"] = batch["advantages"]
-            cpu_loss_mask: Int[torch.Tensor, "batch seq"] = batch["loss_mask"].bool()
-            cpu_original_logprobs: Float[torch.Tensor, "batch seq"] = batch["logprobs"]
-            average_rewards += batch["rewards"][cpu_loss_mask].mean() / gradient_accumulation_steps
-            del batch
+            input_ids = batch["input_ids"].to("cuda")
+            loss_mask = batch["loss_mask"].bool()
+            average_rewards += batch["rewards"][loss_mask].mean() / gradient_accumulation_steps
+            seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
             # Forward
             logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
             # Gather args for grpo loss
-            advantages: Float[torch.Tensor, "batch seq"] = cpu_advantages.to("cuda")
-            loss_mask: Int[torch.Tensor, "batch seq"] = cpu_loss_mask.to("cuda")
-            original_logprobs: Float[torch.Tensor, "batch seq"] = cpu_original_logprobs.to("cuda")
-            del cpu_advantages, cpu_loss_mask, cpu_original_logprobs
-
+            advantages = batch["advantages"].to("cuda")
+            loss_mask = loss_mask.to("cuda")
+            original_logprobs = batch["logprobs"].to("cuda")
             # Loss
-            loss = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask) / gradient_accumulation_steps
-            del logits, input_ids, advantages, loss_mask, original_logprobs
+            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            loss = loss / gradient_accumulation_steps
+            clip_ratio = clip_ratio / gradient_accumulation_steps
+
+            del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
             # Backward
             loss.backward()
             loss_batch += loss.detach().clone()
-            del loss
+            clip_ratio_batch += clip_ratio.detach().clone()
+            del loss, clip_ratio
 
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+        dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
+
         average_rewards = average_rewards / world_info.world_size
         dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
+
+        seq_lens_batch = seq_lens_batch / world_info.world_size
+        dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
 
         # TODO: This crashes with device mesh mismatch.
         #grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
@@ -342,9 +351,24 @@ def train(config: Config):
         perf_counter.count_tokens(new_tokens)
         training_progress.total_tokens += new_tokens
 
-        metrics = {"Loss": loss_batch.item(), "step": training_progress.step, "inner_lr": inner_lr, "Perplexity": torch.exp(loss_batch).item(), "total_tokens": training_progress.total_tokens, "time": time.time(), "grad_norm": grad_norm.item(), "average_rewards": average_rewards.item()}  # fmt: skip
+        padding_proportion = (config.data.seq_length - seq_lens_batch.item() - 1) / config.data.seq_length
 
-        log = f"step: {training_progress.step}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
+        metrics = {
+            "Loss": loss_batch.item(),
+            "step": training_progress.step,
+            "rollout_step": training_progress.step // config.optim.step_per_rollout,
+            "seq_lens": seq_lens_batch.item(),
+            "inner_lr": inner_lr,
+            "Perplexity": torch.exp(loss_batch).item(),
+            "total_tokens": training_progress.total_tokens,
+            "time": time.time(),
+            "grad_norm": grad_norm.item(),
+            "average_rewards": average_rewards.item(),
+            "clip_ratio": clip_ratio_batch.item(),
+            "padding_proportion": padding_proportion,
+        }
+
+        log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
         del loss_batch, average_rewards, grad_norm
 
