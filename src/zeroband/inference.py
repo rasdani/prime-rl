@@ -237,6 +237,7 @@ def inference(config: Config):
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
         dtype="bfloat16",
+        max_num_batched_tokens=2048,
     )
     tokenizer = llm.get_tokenizer()
     logger = get_logger(f"INFERENCE {os.environ.get('RANK', '')}")
