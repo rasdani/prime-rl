@@ -7,7 +7,7 @@ from transformers import (
     Qwen2ForCausalLM,
 )
 
-ModelName: TypeAlias = Literal["debugmodel", "150M", "1B", "Qwen32B", "Qwen1.5B", "Qwen7B", "Llama8B", "QwQ32B"]
+ModelName: TypeAlias = Literal["debugmodel", "150M", "1B", "Qwen32B", "Qwen1.5B", "Qwen7B", "Llama8B", "QwQ32B", "Qwen0.5B"]
 ModelType: TypeAlias = LlamaForCausalLM | Qwen2ForCausalLM
 AttnImpl: TypeAlias = Literal["flex_attention", "sdpa", "flash_attention_2"]
 
