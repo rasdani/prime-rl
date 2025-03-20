@@ -246,8 +246,8 @@ def train(config: Config):
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
         dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
 
-        # average_rewards = average_rewards / world_info.world_size
-        # dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
+        average_rewards = average_rewards / world_info.world_size
+        dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
 
         seq_lens_batch = seq_lens_batch / world_info.world_size
         dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
