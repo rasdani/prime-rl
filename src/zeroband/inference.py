@@ -238,7 +238,7 @@ def inference(config: Config):
         max_model_len=config.max_model_len,
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
-        dtype="bfloat16",
+        dtype=torch.float32,
     )
     tokenizer = llm.get_tokenizer()
     rank = int(os.environ.get("RANK", "0"))
