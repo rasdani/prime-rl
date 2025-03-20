@@ -28,7 +28,10 @@ jobs:
         run: uv python install 3.10.13
 
       - name: Install the project
-        run: uv sync --all-extras --dev
+        run: |
+          uv sync --all-extras --dev 
+          uv pip install flash-attn --no-build-isolation
+        
       - name: Run tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
