@@ -221,14 +221,17 @@ def train(config: Config):
             seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
             # Forward
-            logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+            # logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
             # Gather args for grpo loss
             advantages = batch["advantages"].to("cuda")
             loss_mask = loss_mask.to("cuda")
             original_logprobs = batch["logprobs"].to("cuda")
             # Loss
-            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            # loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            logits = None
+            loss = torch.tensor(0.0, device="cuda", requires_grad=True)
+            clip_ratio = torch.tensor(0.0, device="cuda")
             loss = loss / gradient_accumulation_steps
             clip_ratio = clip_ratio / gradient_accumulation_steps
 
@@ -243,14 +246,15 @@ def train(config: Config):
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
         dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
 
-        average_rewards = average_rewards / world_info.world_size
-        dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
+        # average_rewards = average_rewards / world_info.world_size
+        # dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
 
         seq_lens_batch = seq_lens_batch / world_info.world_size
         dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
 
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
-
+        # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+        grad_norm = torch.tensor(0.0, device="cuda", requires_grad=True)
+        
         optimizer.step()
         scheduler.step()
 
