@@ -97,6 +97,8 @@ def train():
     for epoch in range(num_epochs):
         epoch_loss = torch.tensor(0.0, device='cuda')
         for i, (inputs, labels) in enumerate(train_loader):
+            if pd.dp_shard > 1:
+                model.set_requires_gradient_sync(True)
 
             inputs = inputs.to("cuda")
             labels = labels.to("cuda")
