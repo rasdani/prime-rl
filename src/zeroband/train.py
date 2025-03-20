@@ -57,7 +57,7 @@ class TrainConfig(BaseConfig):
     torch_compile: bool = True
     liger_qwen: bool = False
 
-    attn_impl: AttnImpl = "flex_attention"
+    attn_impl: AttnImpl = "flash_attention_2"
 
 
 class CkptConfig(BaseConfig):
