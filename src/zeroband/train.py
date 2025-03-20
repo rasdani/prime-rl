@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+import torch.distributed.tensor
 import wandb
 
 from torch.distributed.tensor.parallel import (
@@ -265,7 +266,7 @@ def train(config: Config):
     dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp") if parallel_dims.dp_replicate_enabled else ("dp_shard_cp",)
     apply_fsdp(model, config.train.reshard_after_forward, device_mesh=world_mesh[dp_mesh_dim_names])
 
-    optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
+    optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
 
@@ -285,10 +286,10 @@ def train(config: Config):
     previous_ckpt_rollout = []
 
     while True:
-        loss_batch = 0
-        average_rewards = 0
-        clip_ratio_batch = 0
-        seq_lens_batch = 0
+        loss_batch = torch.tensor(0.0, device="cuda")
+        average_rewards = torch.tensor(0.0, device="cuda")
+        clip_ratio_batch = torch.tensor(0.0, device="cuda")
+        seq_lens_batch = torch.tensor(0.0, device="cuda")
 
         if config.train.memory_profile and world_info.rank == 0:
             torch.cuda.memory._record_memory_history()
@@ -324,18 +325,38 @@ def train(config: Config):
             clip_ratio_batch += clip_ratio.detach().clone()
             del loss, clip_ratio
 
-        dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
-        dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
+        from torch.distributed._functional_collectives import all_reduce_inplace
+        
 
-        average_rewards = average_rewards / world_info.world_size
-        dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
+        #dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+        all_reduce_inplace(tensor=loss_batch, op="avg", group=world_mesh["dp_shard"])
+        #dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
+        all_reduce_inplace(tensor=clip_ratio_batch, op="avg", group=world_mesh["dp_shard"])
+
+        average_rewards = average_rewards / world_info.world_size  # need to use gloo here so not AVG
+        #dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)
+        all_reduce_inplace(tensor=average_rewards, op="sum", group=world_mesh["dp_shard"])
 
         seq_lens_batch = seq_lens_batch / world_info.world_size
-        dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
+        #dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM, group=world_mesh["dp_cp"])
+        all_reduce_inplace(tensor=seq_lens_batch, op="sum", group=world_mesh["dp_shard"])
+
+        print(type(loss_batch))
+        print(type(clip_ratio_batch))
+        print(type(average_rewards))
+        print(type(seq_lens_batch))
+
+
+        for param in model.parameters():
+            if isinstance(param.grad, torch.distributed.tensor.DTensor):
+                param.grad = param.grad.full_tensor()
 
         # TODO: This crashes with device mesh mismatch.
-        #grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
-        grad_norm = None
+        from zeroband.train_util import clip_grad_norm_
+        grad_norm = clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
+        if isinstance(grad_norm, torch.distributed.tensor.DTensor):
+            grad_norm = grad_norm.full_tensor()
+        #grad_norm = None
 
         optimizer.step()
         scheduler.step()
