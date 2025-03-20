@@ -12,14 +12,12 @@ import wandb
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
 from zeroband.logger import get_logger
 
 from pydantic_config import BaseConfig, parse_argv
-from jaxtyping import Float
 
 from zeroband.training.world_info import WorldInfo, get_world_info
 
@@ -206,6 +204,12 @@ def train(config: Config):
         clip_ratio_batch = 0
         seq_lens_batch = 0
 
+        if training_progress.step % config.optim.step_per_rollout == 0:
+            loss_rollout = 0
+            clip_ratio_rollout = 0
+            seq_lens_rollout = 0
+            average_rewards_rollout = 0
+
         if config.train.memory_profile and world_info.rank == 0:
             torch.cuda.memory._record_memory_history()
 
@@ -254,7 +258,15 @@ def train(config: Config):
 
         # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
         grad_norm = torch.tensor(0.0, device="cuda", requires_grad=True)
-        
+
+        if training_progress.step % config.optim.step_per_rollout == 0:
+            average_rewards_rollout += average_rewards / config.optim.step_per_rollout
+            seq_lens_rollout += seq_lens_batch / config.optim.step_per_rollout
+            loss_rollout += loss_batch / config.optim.step_per_rollout
+            clip_ratio_rollout += clip_ratio_batch / config.optim.step_per_rollout
+
+        # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+
         optimizer.step()
         scheduler.step()
 
@@ -284,6 +296,10 @@ def train(config: Config):
             "average_rewards": average_rewards.item(),
             "clip_ratio": clip_ratio_batch.item(),
             "padding_proportion": padding_proportion,
+            "average_rewards_rollout": average_rewards_rollout.item(),
+            "seq_lens_rollout": seq_lens_rollout.item(),
+            "loss_rollout": loss_rollout.item(),
+            "clip_ratio_rollout": clip_ratio_rollout.item(),
         }
 
         log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
@@ -298,6 +314,9 @@ def train(config: Config):
 
         if world_info.rank == 0 and config.wandb:
             wandb.log(metrics)
+
+        if training_progress.step % config.optim.step_per_rollout == 0:
+            log += f", average_rewards_rollout: {average_rewards_rollout.item():.4f}"
 
         logger.info(log)
 
