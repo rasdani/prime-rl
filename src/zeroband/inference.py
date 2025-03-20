@@ -338,7 +338,7 @@ def inference(config: Config):
         # Generate always adds requests to the engine in the order of the prompts.
         # And returns them in the sequence they were added.
         # toploc_cache.wait_for_proofs()
-        proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
+        # proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
         proofs = [b"hello prof jack toploc helo the world is beautiful when the reward go up" for _ in range(len(generated_tokens))]
         # toploc_cache.reset_cache()
 
