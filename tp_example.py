@@ -46,7 +46,7 @@ def train():
             return x
 
     
-    world_mesh = ParallelDims(
+    pd = ParallelDims(
         dp_replicate=1,
         dp_shard=2,
         cp=1,
@@ -54,34 +54,34 @@ def train():
         pp=1,
         world_size=8,
         enable_loss_parallel=False,
-    ).build_mesh("cuda")
+    )
+    world_mesh = pd.build_mesh("cuda")
 
     tp_plan = {
-        "embed": RowwiseParallel(input_layouts=Replicate(), output_layouts=Shard(0), use_local_output=True),
-        "layers.*.fc1": ColwiseParallel(input_layouts=Shard(0), output_layouts=Shard(1), use_local_output=True),
-        "layers.*.fc2": RowwiseParallel(input_layouts=Shard(1), output_layouts=Shard(0), use_local_output=True),
-        "head": RowwiseParallel(input_layouts=Shard(0), output_layouts=Replicate(), use_local_output=True),
+        "embed": RowwiseParallel(input_layouts=Replicate(), output_layouts=Shard(0)),
+        "layers.*.fc1": ColwiseParallel(input_layouts=Shard(0), output_layouts=Shard(1)),
+        "layers.*.fc2": RowwiseParallel(input_layouts=Shard(1), output_layouts=Shard(0)),
+        "head": RowwiseParallel(input_layouts=Shard(0), output_layouts=Replicate()),
     }
 
 
     model = MNISTModel()
 
-    tp_mesh = world_mesh["tp"]
-    parallelize_module(model, tp_mesh, tp_plan)
+    if pd.tp > 1:
+        tp_mesh = world_mesh["tp"]
+        parallelize_module(model, tp_mesh, tp_plan)
     
-    dp_mesh = world_mesh[("dp_shard_cp",)]
-    for layer in model.layers:
-        fully_shard(layer, mesh=dp_mesh)
-    fully_shard(model, mesh=dp_mesh)
+    
+    if pd.dp_shard > 1:
+        dp_mesh = world_mesh[("dp_shard_cp",)]
+        for layer in model.layers:
+            fully_shard(layer, mesh=dp_mesh)
+        fully_shard(model, mesh=dp_mesh)
 
     model = model.to('cuda')
 
     loss_fn = nn.CrossEntropyLoss()
 
-
-    # Arguments are the same as torch.optim.Adam/AdamW.
-    # Torch's AdamW implementation is substantially different from the original paper,
-    # while Adam is the same. We have implemented all of them.
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=4e-6,
@@ -90,36 +90,34 @@ def train():
         weight_decay=0.0,
     )
 
+    from torch.distributed._functional_collectives import all_reduce_inplace
+
     num_epochs = 50
     train_loader = DataLoader(datasets.MNIST(root='./data', train=True, download=True, transform=transforms.ToTensor()), batch_size=64, shuffle=True)
     for epoch in range(num_epochs):
-        epoch_loss = 0
+        epoch_loss = torch.tensor(0.0, device='cuda')
         for i, (inputs, labels) in enumerate(train_loader):
 
             inputs = inputs.to("cuda")
             labels = labels.to("cuda")
 
-            # Forward as normal
             outputs = model(inputs)
 
-            # Calculate loss as normal
             loss = loss_fn(outputs, labels)
 
-            # With a pipeline hook, as grads become available during backward() the optimizer step runs asynchronously on CPU.
-            # Overlapping the optimizer step with backward() in this way leads to large speed improvements.
-            # If you didn't define a pipeline hook, no changes.
             loss.backward()
 
-            # If you're using a pipeline hook, the step() function waits for the async optimizer step queued by backward() to finish.
-            # If you aren't using a pipeline hook, optimizer.step() behaves as normal.
             optimizer.step()
-
-            # Zero grad as normal.
             optimizer.zero_grad()
 
-            # Everything else is unchanged.
-            epoch_loss += loss.item()
-            print(f'\r\33[2K\033[0;32mEpoch [{epoch+1}/{num_epochs}]\033[0m, \033[0;31mLoss: {loss.item():.4f}\033[0m, \033[0;36mStep [{i+1}/{len(train_loader)}]\033[0m', end="")
-        print(f"\r\33[2K\033[0;32mEpoch [{epoch+1}/{num_epochs}]\033[0m, \033[0;31mLoss: {epoch_loss/len(train_loader):.4f}\033[0m")
+            loss_detached = loss.detach().clone()
+            all_reduce_inplace(loss_detached, op="avg", group=world_mesh[("dp_shard_cp",)])
+            loss_item = loss_detached.item()
+            epoch_loss += loss_item
+            print(f'\r\33[2K\033[0;32mEpoch [{epoch+1}/{num_epochs}]\033[0m, \033[0;31mLoss: {loss_item:.4f}\033[0m, \033[0;36mStep [{i+1}/{len(train_loader)}]\033[0m', end="")
+
+        epoch_loss = epoch_loss.detach().clone()
+        all_reduce_inplace(epoch_loss, op="avg", group=world_mesh[("dp_shard_cp",)])
+        print(f"\r\33[2K\033[0;32mEpoch [{epoch+1}/{num_epochs}]\033[0m, \033[0;31mLoss: {epoch_loss.item()/len(train_loader):.4f}\033[0m")
 
 train()

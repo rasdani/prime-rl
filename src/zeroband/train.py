@@ -122,10 +122,6 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
-    if device_mesh is not None:
-        get_logger().info(f"Tensor Parallel device mesh: {device_mesh}")
-        #model.tensor_parallel(device_mesh["tp"])
-
     parallelize_module(
         model,
         device_mesh,
@@ -261,10 +257,12 @@ def train(config: Config):
     world_mesh = parallel_dims.build_mesh("cuda")
     logger.info(f"World device mesh: {world_mesh}")
 
-    apply_tp(model, config.train, device_mesh=world_mesh["tp"])
+    if parallel_dims.tp > 1:
+        apply_tp(model, config.train, device_mesh=world_mesh["tp"])
 
     dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp") if parallel_dims.dp_replicate_enabled else ("dp_shard_cp",)
-    apply_fsdp(model, config.train.reshard_after_forward, device_mesh=world_mesh[dp_mesh_dim_names])
+    if parallel_dims.dp_shard > 1:
+        apply_fsdp(model, config.train.reshard_after_forward, device_mesh=world_mesh[dp_mesh_dim_names])
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
 
