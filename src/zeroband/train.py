@@ -228,7 +228,7 @@ def train(config: Config):
             loss_mask = loss_mask.to("cuda")
             original_logprobs = batch["logprobs"].to("cuda")
             # Loss
-            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, grad_acc_step)
             loss = loss / gradient_accumulation_steps
             clip_ratio = clip_ratio / gradient_accumulation_steps
 

@@ -14,6 +14,7 @@ def grpo_loss(
     original_logprobs: Float[Tensor, "batch seq"],
     loss_mask: Bool[Tensor, "batch seq"],
     temperature: float,
+    step: int,
     epsilon: float = 0.2,
 ) -> tuple[Tensor, Tensor]:
     """
@@ -35,6 +36,7 @@ def grpo_loss(
         loss_mask=loss_mask,
         temperature=temperature,
         epsilon=epsilon,
+        step=step,
     )
 
 
@@ -83,6 +85,7 @@ def _compile_grpo_loss(
     original_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
     temperature: float,
+    step: int,
     epsilon: float,
 ) -> tuple[Tensor, Tensor]:
     # we start by dropping the bos token because it does not have a corresponding logit
@@ -105,8 +108,17 @@ def _compile_grpo_loss(
     per_token_loss2 = coef_2 * advantages.unsqueeze(1)
     per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
 
+    with torch.no_grad():
+        diff = per_token_logps - original_logprobs
+        print(
+            f"step={step}, diff_mean={diff.mean():.2f}, diff_std={diff.std():.2f}, diff_max={diff.max():.2f}, diff_min={diff.min():.2f}, "
+            f"coef_1_mean={coef_1.mean():.2f}, coef_1_std={coef_1.std():.2f}, coef_1_max={coef_1.max():.2f}, coef_1_min={coef_1.min():.2f}, "
+            f"coef_2_mean={coef_2.mean():.2f}, coef_2_std={coef_2.std():.2f}, coef_2_max={coef_2.max():.2f}, coef_2_min={coef_2.min():.2f}"
+        )
+
     loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
 
     is_clipped = (per_token_loss1 < per_token_loss2).float()
     clip_ratio = (is_clipped * loss_mask).sum() / loss_mask.sum()
+
     return loss, clip_ratio
