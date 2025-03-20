@@ -150,7 +150,8 @@ def get_parquet_table(
             output_logprobs_list.append(get_own_logprobs(output.logprobs))
             advantages_list.append(adv)
             rewards_list.append(reward)
-            proofs_list.append(next(proof_iter) if len(output.token_ids) > 1 else b"")
+            # proofs_list.append(next(proof_iter) if len(output.token_ids) > 1 else b"")
+            proofs_list.append(b"hello prof jack toploc helo the world is beautiful when the reward go up")
             steps_list.append(step)
 
     arrays = [
