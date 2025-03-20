@@ -206,6 +206,12 @@ def train(config: Config):
         clip_ratio_batch = 0
         seq_lens_batch = 0
 
+        if training_progress.step % config.optim.step_per_rollout == 0:
+            loss_rollout = 0
+            clip_ratio_rollout = 0
+            seq_lens_rollout = 0
+            average_rewards_rollout = 0
+
         if config.train.memory_profile and world_info.rank == 0:
             torch.cuda.memory._record_memory_history()
 
@@ -249,6 +255,11 @@ def train(config: Config):
         seq_lens_batch = seq_lens_batch / world_info.world_size
         dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
 
+        average_rewards_rollout += average_rewards / config.optim.step_per_rollout
+        seq_lens_rollout += seq_lens_batch / config.optim.step_per_rollout
+        loss_rollout += loss_batch / config.optim.step_per_rollout
+        clip_ratio_rollout += clip_ratio_batch / config.optim.step_per_rollout
+
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
         optimizer.step()
@@ -280,6 +291,10 @@ def train(config: Config):
             "average_rewards": average_rewards.item(),
             "clip_ratio": clip_ratio_batch.item(),
             "padding_proportion": padding_proportion,
+            "average_rewards_rollout": average_rewards_rollout.item(),
+            "seq_lens_rollout": seq_lens_rollout.item(),
+            "loss_rollout": loss_rollout.item(),
+            "clip_ratio_rollout": clip_ratio_rollout.item(),
         }
 
         log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
@@ -294,6 +309,9 @@ def train(config: Config):
 
         if world_info.rank == 0 and config.wandb:
             wandb.log(metrics)
+
+        if training_progress.step % config.optim.step_per_rollout == 0:
+            log += f", average_rewards_rollout: {average_rewards_rollout.item():.4f}"
 
         logger.info(log)
 
