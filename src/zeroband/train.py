@@ -291,11 +291,21 @@ def train(config: Config):
             "average_rewards": average_rewards.item(),
             "clip_ratio": clip_ratio_batch.item(),
             "padding_proportion": padding_proportion,
-            "average_rewards_rollout": average_rewards_rollout.item(),
-            "seq_lens_rollout": seq_lens_rollout.item(),
-            "loss_rollout": loss_rollout.item(),
-            "clip_ratio_rollout": clip_ratio_rollout.item(),
         }
+
+        if training_progress.step % config.optim.step_per_rollout == 0:
+            if world_info.rank == 0 and config.wandb:
+                wandb.log(
+                    {
+                        "average_rewards_rollout": average_rewards_rollout.item(),
+                        "seq_lens_rollout": seq_lens_rollout.item(),
+                        "loss_rollout": loss_rollout.item(),
+                        "clip_ratio_rollout": clip_ratio_rollout.item(),
+                        "step": training_progress.step,
+                        "rollout_step": training_progress.step // config.optim.step_per_rollout,
+                        "time": time.time(),
+                    }
+                )
 
         log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
