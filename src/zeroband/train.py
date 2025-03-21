@@ -16,7 +16,7 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
     PrepareModuleInput,
     RowwiseParallel,
-    #SequenceParallel,
+    SequenceParallel,
 )
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
@@ -122,6 +122,41 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
+
+    parallelize_module(
+        model.model,
+        device_mesh,
+        {
+            # "embed_tokens": RowwiseParallel(
+            #     input_layouts=Replicate(),
+            #     output_layouts=Shard(1),
+            #     use_local_output=True,
+            # ),
+            "norm": SequenceParallel(
+                sequence_dim=1,
+                use_local_output=True
+            ),
+        }
+    )
+
+    for layer_id, transformer_block in enumerate(model.model.layers):
+        parallelize_module(
+            transformer_block,
+            device_mesh,
+            {
+                'layers.*.input_layernorm':             SequenceParallel(sequence_dim=1, use_local_output=True),
+                'layers.*.self_attn.q_proj':            ColwiseParallel(input_layouts=Shard(1), output_layouts=Shard(dim=0), use_local_output=True),
+                'layers.*.self_attn.k_proj':            ColwiseParallel(input_layouts=Shard(1), output_layouts=Shard(dim=0), use_local_output=True),
+                'layers.*.self_attn.v_proj':            ColwiseParallel(input_layouts=Shard(1), output_layouts=Shard(dim=0), use_local_output=True),
+                'layers.*.self_attn.o_proj':            RowwiseParallel(input_layouts=Shard(dim=0), output_layouts=Shard(1), use_local_output=True),
+                'layers.*.post_attention_layernorm':    SequenceParallel(sequence_dim=1, use_local_output=True),
+                'layers.*.mlp':                         PrepareModuleInput(input_layouts=(Shard(dim=1),), desired_input_layouts=(Replicate(),)),
+                'layers.*.mlp.gate_proj':               ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=True),
+                'layers.*.mlp.up_proj':                 ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=True),
+                'layers.*.mlp.down_proj':               RowwiseParallel(input_layouts=Shard(-1), output_layouts=Shard(1), use_local_output=True),
+            },
+        )
+    
     parallelize_module(
         model,
         device_mesh,
@@ -134,43 +169,11 @@ def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
         },
     )
 
-
-    parallelize_module(
-        model.model,
-        device_mesh,
-        {
-            "embed_tokens": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-                use_local_output=True,
-            ),
-            # "norm": SequenceParallel(
-            #     sequence_dim=1,
-            #     use_local_output=True
-            # ),
-        }
-    )
-
-    for layer_id, transformer_block in enumerate(model.model.layers):
-        parallelize_module(
-            transformer_block,
-            device_mesh,
-            {
-                'layers.*.self_attn.q_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.self_attn.k_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.self_attn.v_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.self_attn.o_proj':   RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
-                'layers.*.mlp.gate_proj':      ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.mlp.up_proj':        ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.mlp.down_proj':      RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
-            },
-        )
+    pass
 
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool, device_mesh: DeviceMesh | None):
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
-
-    get_logger().info(f"FSDP device mesh: {device_mesh}")
 
     for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
@@ -178,6 +181,8 @@ def apply_fsdp(model: ModelType, reshard_after_forward: bool, device_mesh: Devic
         else:
             layer_reshard_after_forward = False
         fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward, mesh=device_mesh)
+    fully_shard(model.get_input_embeddings(), mp_policy=mp_policy, reshard_after_forward=reshard_after_forward, mesh=device_mesh)
+    fully_shard(model.get_output_embeddings(), mp_policy=mp_policy, reshard_after_forward=False, mesh=device_mesh)
     fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward, mesh=device_mesh)
 
 
@@ -258,13 +263,21 @@ def train(config: Config):
     logger.info(f"World device mesh: {world_mesh}")
 
     if parallel_dims.tp > 1:
+        logger.info(f"TP device mesh: {world_mesh['tp']}")
         apply_tp(model, config.train, device_mesh=world_mesh["tp"])
 
     dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp") if parallel_dims.dp_replicate_enabled else ("dp_shard_cp",)
     if parallel_dims.dp_shard > 1:
+        logger.info(f"FSDP device mesh: {world_mesh[dp_mesh_dim_names]}")
         apply_fsdp(model, config.train.reshard_after_forward, device_mesh=world_mesh[dp_mesh_dim_names])
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
+    # from zeroband.opt_wrapper import OptimizersContainer
+    # optimizer = OptimizersContainer([model], optimizer_kwargs={
+    #     "lr": config.optim.optim.lr,
+    #     "weight_decay": config.optim.optim.weight_decay,
+    #     "betas": (config.optim.optim.betas1, config.optim.optim.betas2),
+    # })
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
 
@@ -275,6 +288,9 @@ def train(config: Config):
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
+
+    #model = model.to("cuda")
+
 
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
@@ -294,7 +310,8 @@ def train(config: Config):
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
+            if parallel_dims.dp_shard > 1:
+                model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
             # Load args
             batch = next(train_dataloader_iterator)
@@ -339,22 +356,11 @@ def train(config: Config):
         #dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM, group=world_mesh["dp_cp"])
         all_reduce_inplace(tensor=seq_lens_batch, op="sum", group=world_mesh["dp_shard"])
 
-        print(type(loss_batch))
-        print(type(clip_ratio_batch))
-        print(type(average_rewards))
-        print(type(seq_lens_batch))
-
-
-        for param in model.parameters():
-            if isinstance(param.grad, torch.distributed.tensor.DTensor):
-                param.grad = param.grad.full_tensor()
-
-        # TODO: This crashes with device mesh mismatch.
         from zeroband.train_util import clip_grad_norm_
         grad_norm = clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
         if isinstance(grad_norm, torch.distributed.tensor.DTensor):
             grad_norm = grad_norm.full_tensor()
-        #grad_norm = None
+        #grad_norm = torch.tensor(0)
 
         optimizer.step()
         scheduler.step()

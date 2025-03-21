@@ -32,7 +32,7 @@ def clip_grad_norm_(
         parameters: an iterable of Tensors or a single Tensor that will have gradients normalized
         max_norm (float): max norm of the gradients
         norm_type (float): type of the used p-norm. Can be ``'inf'`` for
-            infinity norm.
+            infinity norm. # Added this line
         error_if_nonfinite (bool): if True, an error is thrown if the total
             norm of the gradients from :attr:`parameters` is ``nan``,
             ``inf``, or ``-inf``. Default: False (will switch to True in the future)
@@ -47,6 +47,17 @@ def clip_grad_norm_(
 
     """
     grads = [p.grad for p in parameters if p.grad is not None]
+    grads = [g.full_tensor() if isinstance(g, DTensor) else g for g in grads] # Added this line, not present in torchtitan
+    # for p in parameters:
+    #     if p.grad is not None:
+    #         continue
+    #     g = p.grad
+    #     if not g.device_mesh == grads[0].device_mesh:
+    #         print(f"Got incompatible meshes: {g.device_mesh} and {grads[0].device_mesh}")
+    #         print("Original tensor shape:")
+    # exit()
+
+    # TODO: Figure out how they're sharded and try to reduce communication
     total_norm = _get_total_norm(
         grads, norm_type, error_if_nonfinite, foreach
     )
