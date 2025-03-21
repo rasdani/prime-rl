@@ -222,8 +222,8 @@ def train(config: Config):
             # Load args
             batch = next(train_dataloader_iterator)
             input_ids = batch["input_ids"].to("cuda")
-            loss_mask = batch["loss_mask"].bool()
-            average_rewards += batch["rewards"][loss_mask].mean() / gradient_accumulation_steps
+            loss_mask = batch["loss_mask"]
+            average_rewards += (batch["rewards"] * loss_mask).mean() / gradient_accumulation_steps
             seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
             # Forward
