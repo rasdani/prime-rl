@@ -45,7 +45,7 @@ class FakeTokenizedDataset(IterableDataset):
             len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
-            rewards = torch.randn(len_)
+            rewards = torch.clamp(torch.randn(len_), min=0.0, max=1.0)
             self.step += 1
             yield {
                 "input_ids": input_ids,
