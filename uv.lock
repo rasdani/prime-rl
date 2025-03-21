@@ -1,4 +1,5 @@
 version = 1
+revision = 1
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.12' and platform_machine == 'aarch64' and sys_platform == 'linux'",
@@ -2254,6 +2255,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pyext"
+version = "0.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b0/be/9b6005ac644aaef022527ce49617263379e49dbdbd433d1d3dd66d71f570/pyext-0.7.tar.gz", hash = "sha256:e618a635be4e8c4a84b443cc27186601ad052efe35f01839815f2a2cf3947cdf", size = 7772 }
+
+[[package]]
 name = "pygments"
 version = "2.19.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3702,6 +3709,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "pydantic-config" },
+    { name = "pyext" },
     { name = "setuptools" },
     { name = "torch" },
     { name = "torchdata" },
@@ -3730,6 +3738,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "pydantic-config", git = "https://github.com/samsja/pydantic_config.git?rev=b7becc3" },
+    { name = "pyext", specifier = ">=0.7" },
     { name = "setuptools" },
     { name = "torch" },
     { name = "torchdata", specifier = ">=0.8.0" },

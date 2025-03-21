@@ -23,7 +23,7 @@ from datasets import load_dataset
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=48)
+process_executor = concurrent.futures.ProcessPoolExecutor(max_workers=8)
 
 
 class SamplingParamConfig(BaseConfig):
