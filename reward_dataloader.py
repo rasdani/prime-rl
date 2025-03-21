@@ -23,6 +23,7 @@ def main(config: Config):
 
     train_dataloader_iterator = iter(train_dataloader)
 
+    print(f"gradient_accumulation_steps: {gradient_accumulation_steps}")
     step = 0
     while True:
         if step % config.optim.step_per_rollout == 0:
