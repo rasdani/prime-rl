@@ -259,11 +259,10 @@ def train(config: Config):
         # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
         grad_norm = torch.tensor(0.0, device="cuda", requires_grad=True)
 
-        if training_progress.step % config.optim.step_per_rollout == 0:
-            average_rewards_rollout += average_rewards / config.optim.step_per_rollout
-            seq_lens_rollout += seq_lens_batch / config.optim.step_per_rollout
-            loss_rollout += loss_batch / config.optim.step_per_rollout
-            clip_ratio_rollout += clip_ratio_batch / config.optim.step_per_rollout
+        average_rewards_rollout += average_rewards / config.optim.step_per_rollout
+        seq_lens_rollout += seq_lens_batch / config.optim.step_per_rollout
+        loss_rollout += loss_batch / config.optim.step_per_rollout
+        clip_ratio_rollout += clip_ratio_batch / config.optim.step_per_rollout
 
         # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
