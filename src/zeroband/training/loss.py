@@ -11,7 +11,7 @@ def grpo_loss(
     logits: Float[Tensor, "batch seq vocab"],
     input_ids: Int[Tensor, "batch seq"],
     advantages: Float[Tensor, "batch seq"],
-    original_logprobs: Float[Tensor, "batch seq"],
+    original_logprobs: Float[Tensor, "batch seq_minus_1"],
     loss_mask: Int[Tensor, "batch seq"],
     temperature: float,
     epsilon: float,
@@ -75,7 +75,7 @@ def selective_log_softmax(logits, index):
     return per_token_logps
 
 
-@torch.compile
+# @torch.compile
 def _compile_grpo_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -88,7 +88,7 @@ def _compile_grpo_loss(
     # we start by dropping the bos token because it does not have a corresponding logit
     input_ids = input_ids[:, 1:]
     advantages = advantages[:, 1:]
-    original_logprobs = original_logprobs[:, 1:]
+    # original_logprobs = original_logprobs[:, 1:] # no need to do it now
     loss_mask = loss_mask[:, 1:]
 
     # from the logits we drop the last logits because it corresponds to the next token that will be sample but is not here yet

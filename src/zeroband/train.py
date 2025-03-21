@@ -12,7 +12,7 @@ import wandb
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss
+from zeroband.training.loss import grpo_loss, selective_log_softmax
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -84,6 +84,8 @@ class Config(BaseConfig):
 
     temperature: float = 0.6  # todo remove this and add this to the data
     grpo_epsilon: float = 0.2
+
+    on_policy_log_prob: bool = False
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -203,6 +205,32 @@ def train(config: Config):
 
     while True:
         time_start = time.time()
+
+        # here we want to pre-compute the logprobs with the model before update
+        with torch.no_grad():
+            if config.on_policy_log_prob:
+                data = []
+
+                for rollout_step in range(config.optim.step_per_rollout):
+                    for grad_acc_step in range(gradient_accumulation_steps):
+                        batch = next(train_dataloader_iterator)
+                        input_ids = batch["input_ids"].to("cuda")
+
+                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+
+                        input_ids = input_ids[:, 1:]
+                        logits = logits[:, :-1, :] / config.temperature
+
+                        per_token_logps = selective_log_softmax(logits, input_ids)
+                        batch["logprobs"] = per_token_logps.to("cpu")
+
+                        del logits, per_token_logps
+                        data.append(batch)
+
+                logprobs_aware_iterator = iter(data)
+            else:
+                logprobs_aware_iterator = train_dataloader_iterator
+
         for rollout_step in range(config.optim.step_per_rollout):
             loss_batch = 0
             clip_ratio_batch = 0
@@ -219,7 +247,7 @@ def train(config: Config):
                 model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
                 # Load args
-                batch = next(train_dataloader_iterator)
+                batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
@@ -236,6 +264,9 @@ def train(config: Config):
                 advantages = batch["advantages"].to("cuda")
                 loss_mask = loss_mask.to("cuda")
                 original_logprobs = batch["logprobs"].to("cuda")
+                if not config.on_policy_log_prob:
+                    original_logprobs = original_logprobs[:, 1:]
+
                 # Loss
                 loss, clip_ratio = grpo_loss(
                     logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
