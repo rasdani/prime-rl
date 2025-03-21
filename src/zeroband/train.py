@@ -202,15 +202,11 @@ def train(config: Config):
 
     while True:
         loss_batch = 0
-        average_rewards = 0
         clip_ratio_batch = 0
         seq_lens_batch = 0
 
-        if training_progress.step % config.optim.step_per_rollout == 0:
-            loss_rollout = 0
-            clip_ratio_rollout = 0
-            seq_lens_rollout = 0
-            average_rewards_rollout = 0
+        rewards_sum = torch.tensor(0.0)
+        rewards_token_count = torch.tensor(0.0)
 
         if config.train.memory_profile and world_info.rank == 0:
             torch.cuda.memory._record_memory_history()
@@ -222,8 +218,12 @@ def train(config: Config):
             # Load args
             batch = next(train_dataloader_iterator)
             input_ids = batch["input_ids"].to("cuda")
-            loss_mask = batch["loss_mask"].bool()
-            average_rewards += batch["rewards"][loss_mask].mean() / gradient_accumulation_steps
+            loss_mask = batch["loss_mask"]
+
+            rewards = batch["rewards"][loss_mask.bool()]
+            rewards_sum += rewards.sum()
+            rewards_token_count += rewards.numel()
+
             seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
             # Forward
@@ -249,16 +249,12 @@ def train(config: Config):
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
         dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
 
-        average_rewards = average_rewards / world_info.world_size
-        dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)  # need to use gloo here so not AVG
-
         seq_lens_batch = seq_lens_batch / world_info.world_size
         dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
 
-        average_rewards_rollout += average_rewards / config.optim.step_per_rollout
-        seq_lens_rollout += seq_lens_batch / config.optim.step_per_rollout
-        loss_rollout += loss_batch / config.optim.step_per_rollout
-        clip_ratio_rollout += clip_ratio_batch / config.optim.step_per_rollout
+        dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
+        average_rewards = rewards_sum / rewards_token_count
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
@@ -293,20 +289,6 @@ def train(config: Config):
             "padding_proportion": padding_proportion,
         }
 
-        if training_progress.step % config.optim.step_per_rollout == 0:
-            if world_info.rank == 0 and config.wandb:
-                wandb.log(
-                    {
-                        "average_rewards_rollout": average_rewards_rollout.item(),
-                        "seq_lens_rollout": seq_lens_rollout.item(),
-                        "loss_rollout": loss_rollout.item(),
-                        "clip_ratio_rollout": clip_ratio_rollout.item(),
-                        "step": training_progress.step,
-                        "rollout_step": training_progress.step // config.optim.step_per_rollout,
-                        "time": time.time(),
-                    }
-                )
-
         log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
         del loss_batch, average_rewards, grad_norm
@@ -319,9 +301,6 @@ def train(config: Config):
 
         if world_info.rank == 0 and config.wandb:
             wandb.log(metrics)
-
-        if training_progress.step % config.optim.step_per_rollout == 0:
-            log += f", average_rewards_rollout: {average_rewards_rollout.item():.4f}"
 
         logger.info(log)
 
