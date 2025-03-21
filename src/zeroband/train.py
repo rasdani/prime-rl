@@ -218,7 +218,6 @@ def train(config: Config):
                     logits = logits[:, :-1, :] / config.temperature
 
                     per_token_logps = selective_log_softmax(logits, input_ids)
-                    print(f"per_token_logps.shape: {per_token_logps.shape}, input_ids.shape: {input_ids.shape}")
                     batch["logprobs"] = per_token_logps.to("cpu")
 
                     del logits, per_token_logps
