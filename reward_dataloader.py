@@ -29,28 +29,37 @@ def main(config: Config):
         if step % config.optim.step_per_rollout == 0:
             avg_rewards = 0
             non_masked_avg_rewards = 0
+            mask_avg_rollout = 0
 
         batch_rewards = 0
         non_masked_rewards = 0
+        mask_avg = 0
+
         for j in range(gradient_accumulation_steps):
             batch = next(train_dataloader_iterator)
             rewards = batch["rewards"]
-            mask = batch["loss_mask"].bool()
-            batch_rewards += rewards[mask].mean() / gradient_accumulation_steps
+            mask = batch["loss_mask"].float()
+            mask_avg += mask.mean() / gradient_accumulation_steps
+            batch_rewards += (rewards * mask).mean() / gradient_accumulation_steps
             non_masked_rewards += rewards.mean() / gradient_accumulation_steps
 
         batch_rewards = batch_rewards / world_info.world_size
         non_masked_rewards = non_masked_rewards / world_info.world_size
-
+        mask_avg = mask_avg / world_info.world_size
         dist.all_reduce(batch_rewards, op=dist.ReduceOp.SUM)
         dist.all_reduce(non_masked_rewards, op=dist.ReduceOp.SUM)
+        dist.all_reduce(mask_avg, op=dist.ReduceOp.SUM)
 
         avg_rewards += batch_rewards / config.optim.step_per_rollout
         non_masked_avg_rewards += non_masked_rewards / config.optim.step_per_rollout
+        mask_avg_rollout += mask_avg / config.optim.step_per_rollout
+
         step += 1
 
         if step % config.optim.step_per_rollout == 0:
-            print(f"[rank {world_info.rank}] step {step} rewards: {avg_rewards:.4f}, non-masked rewards: {non_masked_avg_rewards:.4f}")
+            print(
+                f"[rank {world_info.rank}] step {step} rewards: {avg_rewards:.4f}, non-masked rewards: {non_masked_avg_rewards:.4f}, mask avg: {mask_avg_rollout:.4f}"
+            )
 
         if step >= config.optim.total_steps:
             break
