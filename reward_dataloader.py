@@ -1,4 +1,5 @@
 from pydantic_config import parse_argv
+import torch.distributed as dist
 from transformers import AutoTokenizer
 from zeroband.training.data import get_dataloader
 from zeroband.train import Config, get_gradient_accumulation_steps
@@ -25,21 +26,33 @@ def main(config: Config):
     step = 0
     while True:
         avg_rewards = 0
+        non_masked_avg_rewards = 0
         for i in range(config.optim.step_per_rollout):
             batch_rewards = 0
+            non_masked_rewards = 0
             for j in range(gradient_accumulation_steps):
                 batch = next(train_dataloader_iterator)
-                rewards = batch["rewards"].mean()
-                batch_rewards += rewards / gradient_accumulation_steps
+                rewards = batch["rewards"]
+                mask = batch["loss_mask"].bool()
+                batch_rewards += rewards[mask].mean() / gradient_accumulation_steps
+                non_masked_rewards += rewards.mean() / gradient_accumulation_steps
+
+            batch_rewards = batch_rewards / world_info.world_size
+            non_masked_rewards = non_masked_rewards / world_info.world_size
+
+            dist.all_reduce(batch_rewards, op=dist.ReduceOp.SUM)
+            dist.all_reduce(non_masked_rewards, op=dist.ReduceOp.SUM)
 
             avg_rewards += batch_rewards / config.optim.step_per_rollout
+            non_masked_avg_rewards += non_masked_rewards / config.optim.step_per_rollout
             step += 1
 
-        print(f"[rank {world_info.rank}] step {step} rewards: {avg_rewards:.4f}")
+        print(f"[rank {world_info.rank}] step {step} rewards: {avg_rewards:.4f}, non-masked rewards: {non_masked_avg_rewards:.4f}")
 
         if step >= config.optim.total_steps:
             break
 
 
 if __name__ == "__main__":
+    dist.init_process_group()
     main(Config(**parse_argv()))
