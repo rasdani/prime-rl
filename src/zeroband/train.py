@@ -83,6 +83,7 @@ class Config(BaseConfig):
     gpus_ids: list[int] | None = None
 
     temperature: float = 0.6  # todo remove this and add this to the data
+    epsilon: float = 0.2
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -234,7 +235,7 @@ def train(config: Config):
             loss_mask = loss_mask.to("cuda")
             original_logprobs = batch["logprobs"].to("cuda")
             # Loss
-            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.epsilon)
             loss = loss / gradient_accumulation_steps
             clip_ratio = clip_ratio / gradient_accumulation_steps
 

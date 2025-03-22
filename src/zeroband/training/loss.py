@@ -14,7 +14,7 @@ def grpo_loss(
     original_logprobs: Float[Tensor, "batch seq"],
     loss_mask: Int[Tensor, "batch seq"],
     temperature: float,
-    epsilon: float = 0.2,
+    epsilon: float,
 ) -> tuple[Tensor, Tensor]:
     """
     DeepSeek Math Loss: https://arxiv.org/abs/2402.03300
