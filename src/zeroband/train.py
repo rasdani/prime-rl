@@ -121,39 +121,42 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
+def apply_tp(model: ModelType, device_mesh: DeviceMesh):
+
+    local_output = True
 
     parallelize_module(
         model.model,
         device_mesh,
         {
-            # "embed_tokens": RowwiseParallel(
-            #     input_layouts=Replicate(),
-            #     output_layouts=Shard(1),
-            #     use_local_output=True,
-            # ),
+            "embed_tokens": RowwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Shard(1),
+                use_local_output=local_output,
+            ),
             "norm": SequenceParallel(
                 sequence_dim=1,
-                use_local_output=True
+                use_local_output=local_output
             ),
         }
     )
 
-    for layer_id, transformer_block in enumerate(model.model.layers):
+    for _, transformer_block in enumerate(model.model.layers):
         parallelize_module(
             transformer_block,
             device_mesh,
             {
-                'layers.*.input_layernorm':             SequenceParallel(sequence_dim=1, use_local_output=True),
-                'layers.*.self_attn.q_proj':            ColwiseParallel(input_layouts=Shard(1), output_layouts=Shard(dim=0), use_local_output=True),
-                'layers.*.self_attn.k_proj':            ColwiseParallel(input_layouts=Shard(1), output_layouts=Shard(dim=0), use_local_output=True),
-                'layers.*.self_attn.v_proj':            ColwiseParallel(input_layouts=Shard(1), output_layouts=Shard(dim=0), use_local_output=True),
-                'layers.*.self_attn.o_proj':            RowwiseParallel(input_layouts=Shard(dim=0), output_layouts=Shard(1), use_local_output=True),
-                'layers.*.post_attention_layernorm':    SequenceParallel(sequence_dim=1, use_local_output=True),
-                'layers.*.mlp':                         PrepareModuleInput(input_layouts=(Shard(dim=1),), desired_input_layouts=(Replicate(),)),
-                'layers.*.mlp.gate_proj':               ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=True),
-                'layers.*.mlp.up_proj':                 ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=True),
-                'layers.*.mlp.down_proj':               RowwiseParallel(input_layouts=Shard(-1), output_layouts=Shard(1), use_local_output=True),
+                'layers.*.input_layernorm':             SequenceParallel(sequence_dim=1, use_local_output=local_output),
+                'layers.*.self_attn.forward':           PrepareModuleInput(input_layouts=(Shard(1),), desired_input_layouts=(Replicate(),), use_local_output=local_output),
+                'layers.*.self_attn.q_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
+                'layers.*.self_attn.k_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
+                'layers.*.self_attn.v_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
+                'layers.*.self_attn.o_proj':            RowwiseParallel(input_layouts=Shard(-1), output_layouts=Replicate(), use_local_output=local_output),
+                'layers.*.post_attention_layernorm':    SequenceParallel(sequence_dim=1, use_local_output=local_output),
+                'layers.*.mlp':                         PrepareModuleInput(input_layouts=(Shard(1),), desired_input_layouts=(Replicate(),), use_local_output=local_output),
+                'layers.*.mlp.gate_proj':               ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
+                'layers.*.mlp.up_proj':                 ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
+                'layers.*.mlp.down_proj':               RowwiseParallel(input_layouts=Shard(-1), output_layouts=Shard(1), use_local_output=local_output),
             },
         )
     
@@ -225,15 +228,6 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
-    train_dataloader, prefetcher = get_dataloader(
-        tokenizer=tokenizer,
-        micro_batch_size=config.train.micro_bs,
-        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
-        data_config=config.data,
-    )
-
-    train_dataloader_iterator = iter(train_dataloader)
-
     if config.train.liger_qwen:
         apply_liger_kernel_to_qwen2(
             rope=True,
@@ -250,7 +244,7 @@ def train(config: Config):
     if config.train.dp == -1:
         assert world_info.world_size % config.train.tp == 0, "world size must be divisible by tp"
         config.train.dp = world_info.world_size // config.train.tp
-    parallel_dims = ParallelDims(
+    pd = ParallelDims(
         dp_replicate=1, # FSDP, not HSDP.
         dp_shard=config.train.dp,
         cp=1,
@@ -259,27 +253,38 @@ def train(config: Config):
         world_size=world_info.world_size,
         enable_loss_parallel=False,
     )
-    world_mesh = parallel_dims.build_mesh("cuda")
+    world_mesh = pd.build_mesh("cuda")
     logger.info(f"World device mesh: {world_mesh}")
 
-    if parallel_dims.tp > 1:
-        logger.info(f"TP device mesh: {world_mesh['tp']}")
-        apply_tp(model, config.train, device_mesh=world_mesh["tp"])
+    if pd.tp > 1:
+        tp_mesh = world_mesh["tp"]
+        tp_rank = tp_mesh.get_local_rank()
+        logger.info(f"tp_mesh: {tp_mesh}, tp_rank: {tp_rank}")
+        apply_tp(model, device_mesh=world_mesh["tp"])
+    else:
+        tp_rank = 0
 
-    dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp") if parallel_dims.dp_replicate_enabled else ("dp_shard_cp",)
-    if parallel_dims.dp_shard > 1:
-        logger.info(f"FSDP device mesh: {world_mesh[dp_mesh_dim_names]}")
-        apply_fsdp(model, config.train.reshard_after_forward, device_mesh=world_mesh[dp_mesh_dim_names])
+    if pd.dp_shard > 1:
+        dp_mesh = world_mesh[("dp_shard_cp",)]
+        dp_rank = dp_mesh.get_local_rank()
+        logger.info(f"dp_mesh: {dp_mesh}, dp_rank: {dp_rank}")
+        apply_fsdp(model, config.train.reshard_after_forward, device_mesh=dp_mesh)
+    else:
+        dp_rank = 0
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
-    # from zeroband.opt_wrapper import OptimizersContainer
-    # optimizer = OptimizersContainer([model], optimizer_kwargs={
-    #     "lr": config.optim.optim.lr,
-    #     "weight_decay": config.optim.optim.weight_decay,
-    #     "betas": (config.optim.optim.betas1, config.optim.optim.betas2),
-    # })
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
+
+    train_dataloader, prefetcher = get_dataloader(
+        tokenizer=tokenizer,
+        micro_batch_size=config.train.micro_bs,
+        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
+        data_config=config.data,
+        dp_rank=dp_rank,
+        dp_world_size=config.train.dp,
+    )
+    train_dataloader_iterator = iter(train_dataloader)
 
     training_progress = TrainingProgress(total_tokens=0, step=0)
 
@@ -288,8 +293,9 @@ def train(config: Config):
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
+        pass
 
-    #model = model.to("cuda")
+    model = model.to("cuda")
 
 
     if config.ckpt.resume:
@@ -310,7 +316,7 @@ def train(config: Config):
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            if parallel_dims.dp_shard > 1:
+            if pd.dp_shard > 1: # If FSDP enabled
                 model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
             # Load args
@@ -360,7 +366,6 @@ def train(config: Config):
         grad_norm = clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
         if isinstance(grad_norm, torch.distributed.tensor.DTensor):
             grad_norm = grad_norm.full_tensor()
-        #grad_norm = torch.tensor(0)
 
         optimizer.step()
         scheduler.step()

@@ -40,12 +40,12 @@ class FakeTokenizedDataset(IterableDataset):
         self.step = 0
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
+        len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
+        input_ids = torch.randint(3, self.vocab_size, (len_,))
+        advantages = torch.randn(len_)
+        rewards = torch.randn(len_)
         while True:
             # Generate a random length between 1 and self.seq_len
-            len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
-            input_ids = torch.randint(3, self.vocab_size, (len_,))
-            advantages = torch.randn(len_)
-            rewards = torch.randn(len_)
             self.step += 1
             yield {
                 "input_ids": input_ids,
@@ -239,6 +239,72 @@ class ParquetDataset(IterableDataset):
                     break
 
 
+from torchdata.stateful_dataloader import StatefulDataLoader
+from torch.utils.data import IterableDataset
+import pickle
+
+class ParallelAwareDataloader(StatefulDataLoader):
+    """Dataloader that is aware of distributed data parallelism.
+
+    This dataloader is used to load data in a distributed data parallel fashion. It also
+    utilizes ``torchdata.stateful_dataloader.StatefulDataLoader`` to implement the necessary
+    methods such as ``__iter__``.
+
+    Args:
+        dataset (IterableDataset): The dataset to iterate over.
+        dp_rank: Data parallelism rank for this dataloader.
+        dp_world_size: The world size of the data parallelism.
+        batch_size: The batch size to use for each iteration.
+    """
+
+    dp_rank: int
+    dp_world_size: int
+    batch_size: int
+
+    def __init__(
+        self,
+        dataset: IterableDataset,
+        batch_size: int,
+        dp_rank: int,
+        dp_world_size: int,
+        **kwargs,
+    ):
+        self.dp_world_size = dp_world_size
+        self.dp_rank = dp_rank
+        self.batch_size = batch_size
+        super().__init__(dataset, batch_size, **kwargs)
+        self._rank_id = f"dp_rank_{dp_rank}"
+
+    def state_dict(self) -> dict[str, Any]:
+        # Store state only for dp rank to avoid replicating the same state across other dimensions.
+        return {
+            # We don't have to use pickle as DCP will serialize the state_dict. However,
+            # we have to keep this for backward compatibility.
+            self._rank_id: pickle.dumps(super().state_dict()),
+            "world_size": self.dp_world_size,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        # State being empty is valid.
+        if not state_dict:
+            return
+
+        if self._rank_id not in state_dict:
+            print(
+                f"DataLoader state is empty for dp rank {self.dp_rank}, "
+                "expected key {self._rank_id}"
+            )
+            return
+
+        assert self.dp_world_size == state_dict["world_size"], (
+            "dp_degree is inconsistent before and after checkpoint, "
+            "dataloader resharding is not supported yet."
+        )
+        # We don't have to use pickle as DCP will serialize the state_dict. However, we have to
+        # keep this for backward compatibility.
+        super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
+
+
 class BatchOutput(TypedDict):
     input_ids: Int[torch.Tensor, "batch seq"]
     advantages: Float[torch.Tensor, "batch seq"]
@@ -305,7 +371,7 @@ class PaddingColate:
 
 
 def get_dataloader(
-    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig
+    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, dp_rank: int, dp_world_size: int
 ) -> tuple[DataLoader[BatchOutput], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
@@ -323,4 +389,4 @@ def get_dataloader(
         train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
-    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn), prefetcher
+    return ParallelAwareDataloader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn, dp_rank=dp_rank, dp_world_size=dp_world_size), prefetcher
