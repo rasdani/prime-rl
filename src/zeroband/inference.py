@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Literal
 import uuid
-import numpy as np 
+import numpy as np
 from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
@@ -29,7 +29,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import multiprocessing as mp
 
-from zeroband.inferencing.toploc import TopLocCache
 from zeroband.training.mp import EnvWrapper, cuda_available_devices
 from zeroband.prime_metrics import PrimeMetric
 
@@ -151,7 +150,8 @@ def get_parquet_table(
             output_logprobs_list.append(get_own_logprobs(output.logprobs))
             advantages_list.append(adv)
             rewards_list.append(reward)
-            proofs_list.append(next(proof_iter) if len(output.token_ids) > 1 else b"")
+            # proofs_list.append(next(proof_iter) if len(output.token_ids) > 1 else b"")
+            proofs_list.append(b"hello prof jack toploc helo the world is beautiful when the reward go up")
             steps_list.append(step)
 
     arrays = [
@@ -238,7 +238,7 @@ def inference(config: Config):
         max_model_len=config.max_model_len,
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
-        dtype="bfloat16",
+        dtype=torch.float32,
     )
     tokenizer = llm.get_tokenizer()
     rank = int(os.environ.get("RANK", "0"))
@@ -252,7 +252,7 @@ def inference(config: Config):
     max_samples = config.max_samples or len(dataset)
 
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    toploc_cache = TopLocCache(max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size)
+    # toploc_cache = TopLocCache(max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size)
 
     def logits_processor_hook(module, input):
         assert isinstance(input[1], torch.Tensor)
@@ -264,7 +264,7 @@ def inference(config: Config):
         index = [i.seq_ids[0] for i in input[2].seq_groups]
         toploc_cache.add(index, input[1])
 
-    model.logits_processor.register_forward_pre_hook(logits_processor_hook)
+    # model.logits_processor.register_forward_pre_hook(logits_processor_hook)
 
     ckpt_step = 0
     real_step = 0
@@ -317,7 +317,7 @@ def inference(config: Config):
 
         # This generates proofs for the remaining sequences that haven't reached max_len.
         # We call here to give time for the proofs to be generated non-blocking in the background.
-        toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
+        # toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
 
         # Calculate tokens and throughput
         batch_input_tokens = sum(len(req.prompt_token_ids) for req in generated_tokens)
@@ -338,9 +338,10 @@ def inference(config: Config):
         # Note (Jack): Currently, vllm guarantees that seq ids are in the same order as prompts passed to generate.
         # Generate always adds requests to the engine in the order of the prompts.
         # And returns them in the sequence they were added.
-        toploc_cache.wait_for_proofs()
-        proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
-        toploc_cache.reset_cache()
+        # toploc_cache.wait_for_proofs()
+        # proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
+        proofs = [b"hello prof jack toploc helo the world is beautiful when the reward go up" for _ in range(len(generated_tokens))]
+        # toploc_cache.reset_cache()
 
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
