@@ -203,6 +203,9 @@ def train(config: Config):
     while True:
         loss_batch = 0
         average_rewards = 0
+        average_advantages = 0
+        min_advantage = float("inf")
+        max_advantage = float("-inf")
         clip_ratio_batch = 0
         seq_lens_batch = 0
 
@@ -211,6 +214,9 @@ def train(config: Config):
             clip_ratio_rollout = 0
             seq_lens_rollout = 0
             average_rewards_rollout = 0
+            average_advantages_rollout = 0
+            max_advantage_rollout = float("-inf")
+            min_advantage_rollout = float("inf")
 
         if config.train.memory_profile and world_info.rank == 0:
             torch.cuda.memory._record_memory_history()
@@ -225,6 +231,13 @@ def train(config: Config):
             loss_mask = batch["loss_mask"].bool()
             average_rewards += batch["rewards"][loss_mask].mean() / gradient_accumulation_steps
             seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
+            average_advantages += batch["advantages"].float().mean() / gradient_accumulation_steps
+
+            if batch["advantages"].min() < min_advantage:
+                min_advantage = batch["advantages"].min()
+
+            if batch["advantages"].max() > max_advantage:
+                max_advantage = batch["advantages"].max()
 
             # Forward
             logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -255,10 +268,19 @@ def train(config: Config):
         seq_lens_batch = seq_lens_batch / world_info.world_size
         dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
 
+        average_advantages = average_advantages / world_info.world_size
+        dist.all_reduce(tensor=average_advantages, op=dist.ReduceOp.SUM)
+
+        dist.all_reduce(tensor=min_advantage, op=dist.ReduceOp.MIN)
+        dist.all_reduce(tensor=max_advantage, op=dist.ReduceOp.MAX)
+
         average_rewards_rollout += average_rewards / config.optim.step_per_rollout
         seq_lens_rollout += seq_lens_batch / config.optim.step_per_rollout
         loss_rollout += loss_batch / config.optim.step_per_rollout
         clip_ratio_rollout += clip_ratio_batch / config.optim.step_per_rollout
+        average_advantages_rollout += average_advantages / config.optim.step_per_rollout
+        min_advantage_rollout = min_advantage if min_advantage < min_advantage_rollout else min_advantage_rollout
+        max_advantage_rollout = max_advantage if max_advantage > max_advantage_rollout else max_advantage_rollout
 
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
@@ -291,6 +313,9 @@ def train(config: Config):
             "average_rewards": average_rewards.item(),
             "clip_ratio": clip_ratio_batch.item(),
             "padding_proportion": padding_proportion,
+            "avg_advantage": average_advantages,
+            "min_advantage": min_advantage,
+            "max_advantage": max_advantage,
         }
 
         if training_progress.step % config.optim.step_per_rollout == 0:
@@ -304,6 +329,9 @@ def train(config: Config):
                         "step": training_progress.step,
                         "rollout_step": training_progress.step // config.optim.step_per_rollout,
                         "time": time.time(),
+                        "average_advantage_rollout": average_advantages_rollout.item(),
+                        "min_advantage_rollout": min_advantage_rollout.item(),
+                        "max_advantage_rollout": max_advantage_rollout.item(),
                     }
                 )
 
