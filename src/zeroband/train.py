@@ -206,6 +206,7 @@ def train(config: Config):
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             data = []
+            diff = []
 
             for rollout_step in range(config.optim.step_per_rollout):
                 for grad_acc_step in range(gradient_accumulation_steps):
@@ -213,15 +214,27 @@ def train(config: Config):
                     input_ids = batch["input_ids"].to("cuda")
 
                     logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-
+                    mask = batch["loss_mask"].bool()
                     input_ids = input_ids[:, 1:]
                     logits = logits[:, :-1, :] / config.temperature
 
-                    per_token_logps = selective_log_softmax(logits, input_ids)
+                    per_token_logps = selective_log_softmax(logits, input_ids).to("cpu")
+
+                    logprobs = batch["logprobs"]
+                    logprobs = logprobs[:, 1:]
+                    mask = mask[:, 1:]
+                    assert logprobs.shape == per_token_logps.shape
+                    assert logprobs[mask].shape == per_token_logps[mask].shape
+                    diff.append((logprobs[mask] - per_token_logps[mask]).abs())
+
                     batch["logprobs"] = per_token_logps.to("cpu")
 
                     del logits, per_token_logps
                     data.append(batch)
+
+            diff = torch.cat(diff)
+
+            logger.info(f" step {training_progress.step} {diff.mean()=}, {diff.std()=}, {diff.max()=}")
 
             logprobs_aware_iterator = iter(data)
 
