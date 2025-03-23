@@ -12,7 +12,7 @@ import wandb
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss
+from zeroband.training.loss import grpo_loss, compute_entropy
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -248,6 +248,9 @@ def train(config: Config):
             original_logprobs = batch["logprobs"].to("cuda")
             # Loss
             loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            entropy = compute_entropy(logits, loss_mask)
+
+            loss = loss - 0.001 * entropy
             loss = loss / gradient_accumulation_steps
             clip_ratio = clip_ratio / gradient_accumulation_steps
 

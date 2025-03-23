@@ -76,6 +76,17 @@ def selective_log_softmax(logits, index):
 
 
 @torch.compile
+def compute_entropy(logits: torch.Tensor, loss_mask: torch.Tensor):
+    logits = logits[:, :-1, :]
+    loss_mask = loss_mask[:, 1:]
+    pd = torch.nn.functional.softmax(logits, dim=-1)
+    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
+    masked_entropy = entropy * loss_mask
+
+    return masked_entropy.sum() / loss_mask.sum()
+
+
+@torch.compile
 def _compile_grpo_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
