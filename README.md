@@ -87,6 +87,22 @@ You can pass any config that you would pass for training via `--train.<config_na
 
 In the future this launcher will make sure that both training and inference configs are compatible with each other. For now there is no specific config validation logic.
 
+## manual 4k run
+
+on two different terminal do:
+
+```bash
+export CUDA_VISIBLE_DEVICES=6,7
+uv  run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/Qwen1.5B/Qwen1.5b.toml --data.path data_rollout --ckpt.rollout_path outputs --train.micro_bs 4 --data.seq_length 4096 --optim.batch_size 64 --optim.step_per_rollout 16 --train.attn_impl flash_attention_2
+```
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+uv run python src/zeroband/inference.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml --batch-size 22 --dp 6 --rollout_path outputs --output_path data_rollout --step_batch_size 132  --max_model_len 4096 --seed 42
+```
+
+
+
 ## Checkpoints management
 
 To save a checkpoint to gcp you need to:
