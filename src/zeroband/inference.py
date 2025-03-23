@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Literal
 import uuid
-import numpy as np 
+import numpy as np
 from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
@@ -68,6 +68,8 @@ class Config(BaseConfig):
     prime_log_freq: int | None = None
 
     seed: int | None = None  # THIS ARG FOR TESTING PURPOSES ONLY
+
+    dtype: Literal["fp32", "bf16"] = "bf16"
 
     @model_validator(mode="after")
     def validate_step_batch_size(self):
@@ -238,7 +240,7 @@ def inference(config: Config):
         max_model_len=config.max_model_len,
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
-        dtype="bfloat16",
+        dtype="bfloat16" if config.dtype == "bf16" else torch.float32,
     )
     tokenizer = llm.get_tokenizer()
     rank = int(os.environ.get("RANK", "0"))
@@ -252,7 +254,9 @@ def inference(config: Config):
     max_samples = config.max_samples or len(dataset)
 
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    toploc_cache = TopLocCache(max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size)
+    toploc_cache = TopLocCache(
+        max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size, disable=config.dtype == "fp32"
+    )
 
     def logits_processor_hook(module, input):
         assert isinstance(input[1], torch.Tensor)
@@ -264,7 +268,8 @@ def inference(config: Config):
         index = [i.seq_ids[0] for i in input[2].seq_groups]
         toploc_cache.add(index, input[1])
 
-    model.logits_processor.register_forward_pre_hook(logits_processor_hook)
+    if not toploc_cache.disable:
+        model.logits_processor.register_forward_pre_hook(logits_processor_hook)
 
     ckpt_step = 0
     real_step = 0
