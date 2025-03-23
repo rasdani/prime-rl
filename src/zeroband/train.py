@@ -12,7 +12,7 @@ import wandb
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss
+from zeroband.training.loss import grpo_loss, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -84,6 +84,7 @@ class Config(BaseConfig):
 
     temperature: float = 0.6  # todo remove this and add this to the data
     grpo_epsilon: float = 0.2
+    entropy_loss_coeff: float = 0.001
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -203,6 +204,8 @@ def train(config: Config):
 
     while True:
         loss_batch = 0
+        pg_loss_batch = 0
+        entropy_loss_batch = 0
         clip_ratio_batch = 0
         seq_lens_batch = 0
 
@@ -235,9 +238,12 @@ def train(config: Config):
             loss_mask = loss_mask.to("cuda")
             original_logprobs = batch["logprobs"].to("cuda")
             # Loss
-            loss, clip_ratio = grpo_loss(
+            pg_loss, clip_ratio = grpo_loss(
                 logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
             )
+            entropy = entropy_loss(logits, loss_mask, config.temperature)
+
+            loss = pg_loss - config.entropy_loss_coeff * entropy
             loss = loss / gradient_accumulation_steps
             clip_ratio = clip_ratio / gradient_accumulation_steps
 
@@ -246,10 +252,14 @@ def train(config: Config):
             # Backward
             loss.backward()
             loss_batch += loss.detach().clone()
+            pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
+            entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
             clip_ratio_batch += clip_ratio.detach().clone()
-            del loss, clip_ratio
+            del loss, clip_ratio, pg_loss, entropy
 
         dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
+        dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
+        dist.all_reduce(tensor=entropy_loss_batch, op=dist.ReduceOp.AVG)
         dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
 
         seq_lens_batch = seq_lens_batch / world_info.world_size
@@ -279,6 +289,8 @@ def train(config: Config):
 
         metrics = {
             "Loss": loss_batch.item(),
+            "pg_loss": pg_loss_batch.item(),
+            "entropy_loss": entropy_loss_batch.item(),
             "step": training_progress.step,
             "rollout_step": training_progress.step // config.optim.step_per_rollout,
             "seq_lens": seq_lens_batch.item(),
@@ -292,9 +304,13 @@ def train(config: Config):
             "padding_proportion": padding_proportion,
         }
 
-        log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
+        log = (
+            f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
+            f"loss: {loss_batch.item():.4f}, pg_loss: {pg_loss_batch.item():.4f}, "
+            f"entropy_loss: {entropy_loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
+        )
 
-        del loss_batch, average_rewards, grad_norm
+        del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
 
         tokens_per_second = perf_counter.get_tokens_per_second()
         if tokens_per_second is not None:
