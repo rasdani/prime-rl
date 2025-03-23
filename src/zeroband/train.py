@@ -12,7 +12,7 @@ import wandb
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss, selective_log_softmax
+from zeroband.training.loss import grpo_loss, grpo_loss_verl
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -21,6 +21,7 @@ from zeroband.logger import get_logger
 from pydantic_config import BaseConfig, parse_argv
 from jaxtyping import Float
 
+from zeroband.training.verl_utils import logprobs_from_logits
 from zeroband.training.world_info import WorldInfo, get_world_info
 
 from pydantic import model_validator
@@ -86,6 +87,8 @@ class Config(BaseConfig):
     grpo_epsilon: float = 0.2
 
     on_policy_log_prob: bool = False
+
+    verl_loss: bool = False
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -218,10 +221,10 @@ def train(config: Config):
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                        input_ids = input_ids[:, 1:]
-                        logits = logits[:, :-1, :] / config.temperature
-
-                        per_token_logps = selective_log_softmax(logits, input_ids)
+                        logits.div_(config.temperature)
+                        response_length = logits.shape[1]
+                        logits = logits[:, -response_length - 1 : -1]  # (bsz, response_length)
+                        per_token_logps = logprobs_from_logits(logits, input_ids)
                         batch["logprobs"] = per_token_logps.to("cpu")
 
                         del logits, per_token_logps
@@ -268,7 +271,8 @@ def train(config: Config):
                     original_logprobs = original_logprobs[:, 1:]
 
                 # Loss
-                loss, clip_ratio = grpo_loss(
+                loss_fn = grpo_loss_verl if config.verl_loss else grpo_loss
+                loss, clip_ratio = loss_fn(
                     logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
                 )
                 loss = loss / gradient_accumulation_steps
