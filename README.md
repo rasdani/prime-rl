@@ -73,6 +73,8 @@ and then do the training on it
 uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/150M/A40.toml --data.path data/fake_rollout 
 ```
 
+when using `on_policy_log_prob` you might need to do `ulimit -n 4096` to avoid crash.
+
 ## RL launcher
 
 rl launcher is a script that allow to start training and inference at the same time and assign GPUs to each process.
