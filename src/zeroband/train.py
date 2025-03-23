@@ -306,8 +306,7 @@ def train(config: Config):
 
         log = (
             f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
-            f"loss: {loss_batch.item():.4f}, pg_loss: {pg_loss_batch.item():.4f}, "
-            f"entropy_loss: {entropy_loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
+            f"loss: {loss_batch.item():.4f}, pg_loss: {pg_loss_batch.item():.4f}"
         )
 
         del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
