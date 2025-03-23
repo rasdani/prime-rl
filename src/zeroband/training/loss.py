@@ -101,9 +101,9 @@ def _compile_grpo_loss(
 
     coef_1 = torch.exp(per_token_logps - original_logprobs)
     coef_2 = torch.clamp(coef_1, 1 - epsilon, 1 + epsilon)
-    per_token_loss1 = coef_1 * advantages.unsqueeze(1)
-    per_token_loss2 = coef_2 * advantages.unsqueeze(1)
-    per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+    per_token_loss1 = -coef_1 * advantages
+    per_token_loss2 = -coef_2 * advantages
+    per_token_loss = torch.max(per_token_loss1, per_token_loss2)
 
     loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
 
