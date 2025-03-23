@@ -40,10 +40,18 @@ class FakeTokenizedDataset(IterableDataset):
         self.step = 0
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
+        import random
+        random.seed(42)
+        torch.manual_seed(42)
+        import numpy as np
+        np.random.seed(42)
+
         len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
         input_ids = torch.randint(3, self.vocab_size, (len_,))
         advantages = torch.randn(len_)
         rewards = torch.randn(len_)
+        loss_mask = torch.ones(len_).int()
+        logprobs = torch.randn(len_)
         while True:
             # Generate a random length between 1 and self.seq_len
             self.step += 1
@@ -51,8 +59,8 @@ class FakeTokenizedDataset(IterableDataset):
                 "input_ids": input_ids,
                 "advantages": advantages,
                 "rewards": rewards,
-                "loss_mask": torch.ones(len_).int(),
-                "logprobs": torch.randn(len_),
+                "loss_mask": loss_mask,
+                "logprobs": logprobs,
             }
 
 
@@ -372,7 +380,7 @@ class PaddingColate:
 
 def get_dataloader(
     tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, dp_rank: int, dp_world_size: int
-) -> tuple[DataLoader[BatchOutput], GCPPrefetcher | None]:
+) -> tuple[StatefulDataLoader[BatchOutput], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
     prefetcher = None

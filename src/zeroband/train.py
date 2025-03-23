@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed import DeviceMesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import torch.distributed.tensor
 import wandb
@@ -147,11 +147,15 @@ def apply_tp(model: ModelType, device_mesh: DeviceMesh):
             device_mesh,
             {
                 'layers.*.input_layernorm':             SequenceParallel(sequence_dim=1, use_local_output=local_output),
-                'layers.*.self_attn.forward':           PrepareModuleInput(input_layouts=(Shard(1),), desired_input_layouts=(Replicate(),), use_local_output=local_output),
+                'layers.*.self_attn':                   PrepareModuleInput(
+                                                            input_kwarg_layouts={"hidden_states": Shard(1),},
+                                                            desired_input_kwarg_layouts={"hidden_states": Replicate(),},
+                                                            use_local_output=local_output,
+                                                        ),
                 'layers.*.self_attn.q_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
                 'layers.*.self_attn.k_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
                 'layers.*.self_attn.v_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
-                'layers.*.self_attn.o_proj':            RowwiseParallel(input_layouts=Shard(-1), output_layouts=Replicate(), use_local_output=local_output),
+                'layers.*.self_attn.o_proj':            RowwiseParallel(input_layouts=Shard(-1), output_layouts=Shard(1), use_local_output=local_output),
                 'layers.*.post_attention_layernorm':    SequenceParallel(sequence_dim=1, use_local_output=local_output),
                 'layers.*.mlp':                         PrepareModuleInput(input_layouts=(Shard(1),), desired_input_layouts=(Replicate(),), use_local_output=local_output),
                 'layers.*.mlp.gate_proj':               ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
@@ -204,7 +208,7 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
 def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
-        torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
+        torch._logging.set_logs(dynamo=logging.CRITICAL)  # type: ignore (silence flex attn error)
         torch_log.setLevel(logging.CRITICAL)  #
 
     logger = get_logger()
@@ -240,38 +244,25 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    from zeroband.training.parallel_dims import ParallelDims
     if config.train.dp == -1:
         assert world_info.world_size % config.train.tp == 0, "world size must be divisible by tp"
         config.train.dp = world_info.world_size // config.train.tp
-    pd = ParallelDims(
-        dp_replicate=1, # FSDP, not HSDP.
-        dp_shard=config.train.dp,
-        cp=1,
-        tp=config.train.tp,
-        pp=1,
-        world_size=world_info.world_size,
-        enable_loss_parallel=False,
-    )
-    world_mesh = pd.build_mesh("cuda")
+    #assert config.train.dp != 1, "Must apply fsdp for mixed precision model, and cannot build the device mesh without at least 2 fsdp dims. Set config.train.dp >= 2 or config.train.tp to half the world size or less."
+    
+    world_mesh: DeviceMesh = init_device_mesh("cuda", mesh_shape=(config.train.dp, config.train.tp), mesh_dim_names=("fsdp", "tp"))
     logger.info(f"World device mesh: {world_mesh}")
 
-    if pd.tp > 1:
-        tp_mesh = world_mesh["tp"]
-        tp_rank = tp_mesh.get_local_rank()
-        logger.info(f"tp_mesh: {tp_mesh}, tp_rank: {tp_rank}")
+    tp_mesh = world_mesh["tp"]
+    tp_rank = tp_mesh.get_local_rank() if config.train.tp > 1 else 0  # type: ignore
+    logger.info(f"tp_rank: {tp_rank}, tp_mesh: {tp_mesh}")
+    if config.train.tp > 1:
         apply_tp(model, device_mesh=world_mesh["tp"])
-    else:
-        tp_rank = 0
-
-    if pd.dp_shard > 1:
-        dp_mesh = world_mesh[("dp_shard_cp",)]
-        dp_rank = dp_mesh.get_local_rank()
-        logger.info(f"dp_mesh: {dp_mesh}, dp_rank: {dp_rank}")
-        apply_fsdp(model, config.train.reshard_after_forward, device_mesh=dp_mesh)
-    else:
-        dp_rank = 0
-
+    
+    dp_mesh = world_mesh["fsdp"]
+    dp_rank = dp_mesh.get_local_rank() if config.train.dp > 1 else 0
+    logger.info(f"dp_rank: {dp_rank}, dp_mesh: {dp_mesh}")
+    apply_fsdp(model, config.train.reshard_after_forward, device_mesh=dp_mesh) # Always enabled for Mixed Precision
+    
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
@@ -316,7 +307,7 @@ def train(config: Config):
 
         for grad_acc_step in range(gradient_accumulation_steps):
             is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-            if pd.dp_shard > 1: # If FSDP enabled
+            if config.train.dp > 1: # If FSDP enabled
                 model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
             # Load args
@@ -334,7 +325,8 @@ def train(config: Config):
             loss_mask = loss_mask.to("cuda")
             original_logprobs = batch["logprobs"].to("cuda")
             # Loss
-            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            loss, clip_ratio = logits.abs().sum(), torch.tensor(0)
+            #loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
             loss = loss / gradient_accumulation_steps
             clip_ratio = clip_ratio / gradient_accumulation_steps
 
@@ -350,17 +342,17 @@ def train(config: Config):
         
 
         #dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
-        all_reduce_inplace(tensor=loss_batch, op="avg", group=world_mesh["dp_shard"])
+        all_reduce_inplace(tensor=loss_batch, op="avg", group=dp_mesh)
         #dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
-        all_reduce_inplace(tensor=clip_ratio_batch, op="avg", group=world_mesh["dp_shard"])
+        all_reduce_inplace(tensor=clip_ratio_batch, op="avg", group=dp_mesh)
 
         average_rewards = average_rewards / world_info.world_size  # need to use gloo here so not AVG
         #dist.all_reduce(tensor=average_rewards, op=dist.ReduceOp.SUM)
-        all_reduce_inplace(tensor=average_rewards, op="sum", group=world_mesh["dp_shard"])
+        all_reduce_inplace(tensor=average_rewards, op="sum", group=dp_mesh)
 
         seq_lens_batch = seq_lens_batch / world_info.world_size
         #dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM, group=world_mesh["dp_cp"])
-        all_reduce_inplace(tensor=seq_lens_batch, op="sum", group=world_mesh["dp_shard"])
+        all_reduce_inplace(tensor=seq_lens_batch, op="sum", group=dp_mesh)
 
         from zeroband.train_util import clip_grad_norm_
         grad_norm = clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
