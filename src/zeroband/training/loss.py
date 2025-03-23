@@ -110,3 +110,21 @@ def _compile_grpo_loss(
     is_clipped = (per_token_loss1 < per_token_loss2).float()
     clip_ratio = (is_clipped * loss_mask).sum() / loss_mask.sum()
     return loss, clip_ratio
+
+
+@jaxtyped(typechecker=typechecker)
+def entropy_loss(logits: Float[Tensor, "batch seq vocab"], loss_mask: Int[Tensor, "batch seq"], temperature: float) -> Tensor:
+    return _compile_entropy_loss(logits=logits, loss_mask=loss_mask, temperature=temperature)
+
+
+@torch.compile
+def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, temperature: float):
+    logits = logits[:, :-1, :]
+    logits = logits / temperature
+
+    loss_mask = loss_mask[:, 1:]
+    pd = torch.nn.functional.softmax(logits, dim=-1)
+    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
+    masked_entropy = entropy * loss_mask
+
+    return masked_entropy.sum() / loss_mask.sum()
