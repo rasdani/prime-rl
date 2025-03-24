@@ -25,7 +25,7 @@ from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
-from zeroband.training.utils import PerfCounter, apply_ac_ckpt
+from zeroband.training.utils import PerfCounter, apply_ac_ckpt, clip_grad_norm_
 
 from zeroband.logger import get_logger
 
@@ -348,7 +348,6 @@ def train(config: Config):
                 clip_ratio_batch += clip_ratio.detach().clone()
                 del loss, clip_ratio, pg_loss, entropy
 
-
             all_reduce_inplace(tensor=loss_batch, op="avg", group=dp_mesh)
             all_reduce_inplace(tensor=pg_loss_batch, op="avg", group=dp_mesh)
             all_reduce_inplace(tensor=entropy_loss_batch, op="avg", group=dp_mesh)
@@ -361,7 +360,6 @@ def train(config: Config):
             all_reduce_inplace(rewards_token_count, op="sum", group=dp_mesh)
             average_rewards = rewards_sum / rewards_token_count
 
-            from zeroband.train_util import clip_grad_norm_
             grad_norm = clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
             if isinstance(grad_norm, torch.distributed.tensor.DTensor):
                 grad_norm = grad_norm.full_tensor()
