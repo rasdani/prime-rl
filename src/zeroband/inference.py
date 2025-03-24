@@ -308,6 +308,8 @@ def inference(config: Config):
 
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
+            for i, p in enumerate(prompts):
+                prompts[i] = p.replace("<｜begin▁of▁sentence｜>", "")
         else:
             prompts = fake_chat_template(messages)
 
