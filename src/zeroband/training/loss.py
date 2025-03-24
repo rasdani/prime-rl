@@ -99,11 +99,17 @@ def _compile_grpo_loss(
     logits = logits / temperature
     per_token_logps = selective_log_softmax(logits, input_ids)
 
+    print("original logprobs", original_logprobs[:, 79:99])
+    print("logprobs", per_token_logps[:, 79:99])
+
     coef_1 = torch.exp(per_token_logps - original_logprobs)
     coef_2 = torch.clamp(coef_1, 1 - epsilon, 1 + epsilon)
     per_token_loss1 = -coef_1 * advantages
     per_token_loss2 = -coef_2 * advantages
     per_token_loss = torch.max(per_token_loss1, per_token_loss2)
+
+    print("pg losses", per_token_loss1)
+    print("pg losses2", per_token_loss2)
 
     loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
 

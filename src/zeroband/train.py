@@ -29,6 +29,8 @@ from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
 
+import json
+
 
 class AdamConfig(BaseConfig):
     type: Literal["adam"] = "adam"
@@ -74,7 +76,7 @@ class Config(BaseConfig):
     ckpt: CkptConfig = CkptConfig()
 
     project: str = "prime_simple"
-    wandb: bool = True
+    wandb: bool = False
 
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
@@ -86,7 +88,7 @@ class Config(BaseConfig):
     grpo_epsilon: float = 0.2
     entropy_loss_coeff: float = 0.001
 
-    on_policy_log_prob: bool = False
+    on_policy_log_prob: bool = True
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -112,7 +114,7 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool):
-    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.float16, reduce_dtype=None)
 
     for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
@@ -160,7 +162,9 @@ def train(config: Config):
         config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
     )
 
-    model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
+    model, tokenizer = get_model_and_tokenizer(config.name_model, None)
+
+    model = model.cuda()
 
     train_dataloader, prefetcher = get_dataloader(
         tokenizer=tokenizer,
@@ -183,7 +187,7 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    apply_fsdp(model, config.train.reshard_after_forward)
+    # apply_fsdp(model, config.train.reshard_after_forward)
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
@@ -207,17 +211,41 @@ def train(config: Config):
     while True:
         time_start = time.time()
 
+        with open("grouped_metrics.json", "r") as f:
+            group_data = json.load(f)
+
+        for k in group_data.keys():
+            local = group_data[k][0]
+
+        batch, target_logp = get_batch()
+        for k in batch.keys():
+            print(batch[k].shape)
+
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             if config.on_policy_log_prob:
                 data = []
 
-                for rollout_step in range(config.optim.step_per_rollout):
-                    for grad_acc_step in range(gradient_accumulation_steps):
-                        batch = next(train_dataloader_iterator)
+                for rollout_step in range(2):
+                    for grad_acc_step in range(2):
+                        # batch = next(train_dataloader_iterator)
+                        # for k in batch.keys():
+                        #    print(batch[k].shape)
+
+                        # print("batch", batch.keys())
                         input_ids = batch["input_ids"].to("cuda")
+                        # attention_mask = batch["full_attention_mask"].to("cuda")
+                        # position_ids = batch["full_position_ids"].to("cuda")
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                        logits.div_(0.6)
+
+                        alt_log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+                        target_ids = input_ids[:, 1:]  # Assuming you want to predict the next token
+                        batch_size, seq_len = target_ids.shape
+                        token_log_probs = alt_log_probs[:, :-1, :].gather(dim=2, index=target_ids.unsqueeze(-1)).squeeze(-1)
+
+                        print("alt token log probs", token_log_probs[:, 44:120])
 
                         input_ids = input_ids[:, 1:]
                         logits = logits[:, :-1, :] / config.temperature
@@ -225,10 +253,14 @@ def train(config: Config):
                         per_token_logps = selective_log_softmax(logits, input_ids)
                         batch["logprobs"] = per_token_logps.to("cpu")
 
+                        print(batch["logprobs"].shape)
+
+                        print("logprobs", batch["logprobs"][:, 44:120])
+
                         del logits, per_token_logps
                         data.append(batch)
 
-                logprobs_aware_iterator = iter(data)
+                # logprobs_aware_iterator = iter(data)
             else:
                 logprobs_aware_iterator = train_dataloader_iterator
 
@@ -250,13 +282,13 @@ def train(config: Config):
                 model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
                 # Load args
-                batch = next(logprobs_aware_iterator)
+                # batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
-                rewards = batch["rewards"][loss_mask.bool()]
-                rewards_sum += rewards.sum()
-                rewards_token_count += rewards.numel()
+                # rewards = batch["rewards"][loss_mask.bool()]
+                # rewards_sum += rewards.sum()
+                # rewards_token_count += rewards.numel()
 
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
@@ -271,6 +303,12 @@ def train(config: Config):
                     original_logprobs = original_logprobs[:, 1:]
 
                 # Loss
+                print("target logprob", target_logp[:20])
+                # diff = (target_logp-original_logprobs[:,79:]).abs()
+                # print("diff mean", diff.mean())
+                # print("diff max", diff.max())
+                print("all close???", torch.allclose(target_logp, original_logprobs[:, 44:]))
+
                 pg_loss, clip_ratio = grpo_loss(
                     logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
                 )
@@ -289,6 +327,7 @@ def train(config: Config):
                 entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
                 clip_ratio_batch += clip_ratio.detach().clone()
                 del loss, clip_ratio, pg_loss, entropy
+                break
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
@@ -298,12 +337,13 @@ def train(config: Config):
             seq_lens_batch = seq_lens_batch / world_info.world_size
             dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
 
-            dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
-            average_rewards = rewards_sum / rewards_token_count
+            # dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
+            # dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
+            # average_rewards = rewards_sum / rewards_token_count
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # .full_tensor()  # type: ignore (is a dtensor)
 
+            print("grad norm", grad_norm)
             optimizer.step()
             scheduler.step()
 
@@ -332,14 +372,14 @@ def train(config: Config):
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
                 "grad_norm": grad_norm.item(),
-                "average_rewards": average_rewards.item(),
+                # "average_rewards": average_rewards.item(),
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
             }
 
-            log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
+            log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}"  # , average_rewards: {average_rewards.item():.4f}"
 
-            del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
+            del loss_batch, grad_norm, pg_loss_batch, entropy_loss_batch  # , average_rewards
 
             tokens_per_second = perf_counter.get_tokens_per_second()
             if tokens_per_second is not None:
@@ -375,12 +415,18 @@ def train(config: Config):
                         logger.info(f"Removing past rollout ckpt at {path_to_delete}")
                         shutil.rmtree(path_to_delete, ignore_errors=True)
 
+            print("EXITING")
+            exit()
+
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
             wandb.log({"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time.time() - time_start})
 
         if training_progress.step >= config.optim.total_steps:
             break
+
+        print("DONE WITH STEP")
+        exit()
 
     if prefetcher is not None:
         prefetcher.shutdown()
@@ -389,5 +435,121 @@ def train(config: Config):
     logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
 
 
+def get_num_leading_eos(input_ids, eos_id=151643):
+    # Find the index of the first token that is not the eos token.
+    non_eos = (input_ids != eos_id).nonzero(as_tuple=True)[0]
+    if non_eos.numel() == 0:
+        # In case all tokens are eos_id, return an empty tensor.
+        return input_ids[:0]
+    first_non_eos_idx = non_eos[0].item()
+    return first_non_eos_idx
+
+
+def get_batch():
+    KEYS = ["old_log_prob", "log_prob", "advantages", "pg_losses", "pg_losses2", "old_log_probs"]
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    with open("grouped_metrics_2.json", "r") as f:
+        data = json.load(f)
+
+    for k in data.keys():
+        batch = dict()
+        for key in data[k][4].keys():
+            print("key", key)
+            try:
+                print(torch.Tensor(data[k][4][key]).shape)
+            except Exception:
+                pass
+        input_ids = torch.LongTensor(data[k][4]["input_ids"])
+        advantages = torch.LongTensor([])
+        non_eos_idx = get_num_leading_eos(input_ids)
+        batch["input_ids"] = input_ids[non_eos_idx:].unsqueeze(0)
+        batch["advantages"] = torch.Tensor([data[k][4]["advantages"][513]] * batch["input_ids"].shape[1]).unsqueeze(0)
+        batch["loss_mask"] = torch.LongTensor(data[k][4]["attention_mask"][non_eos_idx:]).unsqueeze(0)
+        batch["seq_lens"] = torch.LongTensor(data[k][4]["attention_mask"]).sum().unsqueeze(0)
+        batch["full_input_ids"] = torch.LongTensor(input_ids.unsqueeze(0))
+        batch["full_attention_mask"] = torch.LongTensor(data[k][4]["attention_mask"]).unsqueeze(0)
+        batch["full_position_ids"] = torch.LongTensor(data[k][4]["position_ids"]).unsqueeze(0)
+
+        print("full attention mask", batch["full_attention_mask"][:, :20])
+        print("full attention mask", batch["full_attention_mask"][:, 350:500])
+        print("full attention mask", batch["full_attention_mask"][:, 2980:3000])
+
+        print("INPUT IDS SHAPE", batch["full_input_ids"].shape)
+        print("LOG PROB SHAPE", torch.Tensor(data[k][4]["log_prob"]).shape)
+
+        print("decoded", tokenizer.decode(batch["full_input_ids"][0, 512:550]))
+        print("\n\n")
+        print("text", tokenizer.decode(batch["input_ids"][0, 44:600]))
+
+        print(batch)
+
+        print("Losses:")
+        for key in KEYS:
+            print("key", key)
+            print(torch.BFloat16Tensor(data[k][4][key]))
+            print("\n- - - - - - - - - -\n")
+
+        # batch["returns"] = [data[k][4]["returns"][513]]*len(input_ids)
+        # batch["rewards"] = [batch["rewards"][0]]*len(input_ids)
+
+        logp = torch.BFloat16Tensor(data[k][4]["log_prob"]).cuda()
+
+        return batch, logp
+
+
+# batch dict_keys(['input_ids', 'advantages', 'rewards', 'loss_mask', 'logprobs', 'seq_lens'])
+
 if __name__ == "__main__":
+    # get_batch()
+
+    """
+    import json
+    
+    KEYS = [
+        'old_log_prob', 
+        'log_prob', 
+        'advantages', 
+        'eos_mask', 
+        'cliprange', 
+        'negative_approx_kl', 
+        'ratio', 
+        'ppo_kl', 
+        'pg_losses', 
+        'pg_losses2', 
+        'pg_loss', 
+        'pg_clipfrac', 
+        'responses', 
+        'position_ids', 
+        'attention_mask', 
+        'input_ids', 
+        'prompts', 
+        'token_level_scores', 
+        'old_log_probs', 
+        'ref_log_prob', 
+        'token_level_rewards', 
+        'returns'
+    ]
+    
+    from transformers import AutoTokenizer
+    
+    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    
+    with open("grouped_metrics.json", "r") as f:
+        data = json.load(f)
+            
+    for k in data.keys():
+        input_ids = torch.LongTensor(data[k][4]["input_ids"])
+        print(list(data[k][4].keys()))
+        print("\n\n- - - - - - - - - - -\n\n")
+        print(input_ids.shape)
+        print(input_ids[432:450])
+        print(tokenizer.decode(input_ids[432:470]))
+        #print(input_ids[600:620])
+        #print(input_ids[-20:])
+        break
+    
+    """
+
     train(Config(**parse_argv()))
