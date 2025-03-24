@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from jaxtyping import Float, Int, jaxtyped, Bool
+from jaxtyping import Float, Int, jaxtyped
 from beartype import beartype as typechecker
 import torch.nn.functional as F
 
@@ -11,10 +11,10 @@ def grpo_loss(
     logits: Float[Tensor, "batch seq vocab"],
     input_ids: Int[Tensor, "batch seq"],
     advantages: Float[Tensor, "batch seq"],
-    original_logprobs: Float[Tensor, "batch seq"],
-    loss_mask: Bool[Tensor, "batch seq"],
+    original_logprobs: Float[Tensor, "batch seq_minus_1"],
+    loss_mask: Int[Tensor, "batch seq"],
     temperature: float,
-    epsilon: float = 0.2,
+    epsilon: float,
 ) -> tuple[Tensor, Tensor]:
     """
     DeepSeek Math Loss: https://arxiv.org/abs/2402.03300
@@ -75,7 +75,7 @@ def selective_log_softmax(logits, index):
     return per_token_logps
 
 
-@torch.compile
+# @torch.compile
 def _compile_grpo_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -88,7 +88,7 @@ def _compile_grpo_loss(
     # we start by dropping the bos token because it does not have a corresponding logit
     input_ids = input_ids[:, 1:]
     advantages = advantages[:, 1:]
-    original_logprobs = original_logprobs[:, 1:]
+    # original_logprobs = original_logprobs[:, 1:] # no need to do it now
     loss_mask = loss_mask[:, 1:]
 
     # from the logits we drop the last logits because it corresponds to the next token that will be sample but is not here yet
@@ -101,12 +101,30 @@ def _compile_grpo_loss(
 
     coef_1 = torch.exp(per_token_logps - original_logprobs)
     coef_2 = torch.clamp(coef_1, 1 - epsilon, 1 + epsilon)
-    per_token_loss1 = coef_1 * advantages.unsqueeze(1)
-    per_token_loss2 = coef_2 * advantages.unsqueeze(1)
-    per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+    per_token_loss1 = -coef_1 * advantages
+    per_token_loss2 = -coef_2 * advantages
+    per_token_loss = torch.max(per_token_loss1, per_token_loss2)
 
     loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
 
     is_clipped = (per_token_loss1 < per_token_loss2).float()
     clip_ratio = (is_clipped * loss_mask).sum() / loss_mask.sum()
     return loss, clip_ratio
+
+
+@jaxtyped(typechecker=typechecker)
+def entropy_loss(logits: Float[Tensor, "batch seq vocab"], loss_mask: Int[Tensor, "batch seq"], temperature: float) -> Tensor:
+    return _compile_entropy_loss(logits=logits, loss_mask=loss_mask, temperature=temperature)
+
+
+@torch.compile
+def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, temperature: float):
+    logits = logits[:, :-1, :]
+    logits = logits / temperature
+
+    loss_mask = loss_mask[:, 1:]
+    pd = torch.nn.functional.softmax(logits, dim=-1)
+    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
+    masked_entropy = entropy * loss_mask
+
+    return masked_entropy.sum() / loss_mask.sum()

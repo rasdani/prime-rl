@@ -67,6 +67,10 @@ class Config(BaseConfig):
     gpus_ids: list[int] | None = None
     prime_log_freq: int | None = None
 
+    seed: int | None = None  # THIS ARG FOR TESTING PURPOSES ONLY
+
+    dtype: Literal["fp32", "bf16"] = "bf16"
+
     @model_validator(mode="after")
     def validate_step_batch_size(self):
         assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
@@ -236,16 +240,23 @@ def inference(config: Config):
         max_model_len=config.max_model_len,
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
-        dtype="bfloat16",
+        dtype="bfloat16" if config.dtype == "bf16" else torch.float32,
     )
     tokenizer = llm.get_tokenizer()
-    logger = get_logger(f"INFERENCE {os.environ.get('RANK', '')}")
+    rank = int(os.environ.get("RANK", "0"))
+    logger = get_logger(f"INFERENCE {rank}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
-    dataset = load_dataset(config.dataset, split="train").shuffle(generator=np.random.default_rng())
+
+    generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
+    # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
+
+    dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
     max_samples = config.max_samples or len(dataset)
 
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-    toploc_cache = TopLocCache(max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size)
+    toploc_cache = TopLocCache(
+        max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size, disable=config.dtype == "fp32"
+    )
 
     def logits_processor_hook(module, input):
         assert isinstance(input[1], torch.Tensor)
@@ -257,7 +268,8 @@ def inference(config: Config):
         index = [i.seq_ids[0] for i in input[2].seq_groups]
         toploc_cache.add(index, input[1])
 
-    model.logits_processor.register_forward_pre_hook(logits_processor_hook)
+    if not toploc_cache.disable:
+        model.logits_processor.register_forward_pre_hook(logits_processor_hook)
 
     ckpt_step = 0
     real_step = 0

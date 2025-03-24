@@ -40,20 +40,14 @@ class FakeTokenizedDataset(IterableDataset):
         self.step = 0
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
-        import random
-        random.seed(42)
-        torch.manual_seed(42)
-        import numpy as np
-        np.random.seed(42)
-
-        len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
-        input_ids = torch.randint(3, self.vocab_size, (len_,))
-        advantages = torch.randn(len_)
-        rewards = torch.randn(len_)
-        loss_mask = torch.ones(len_).int()
-        logprobs = torch.randn(len_)
         while True:
             # Generate a random length between 1 and self.seq_len
+            len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
+            input_ids = torch.randint(3, self.vocab_size, (len_,))
+            advantages = torch.randn(len_)
+            rewards = torch.randn(len_)
+            loss_mask = torch.ones(len_).int()
+            logprobs = torch.randn(len_)
             self.step += 1
             yield {
                 "input_ids": input_ids,
