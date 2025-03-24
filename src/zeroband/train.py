@@ -126,7 +126,7 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_tp(model: ModelType, device_mesh: DeviceMesh):
-
+    # TODO: Qwen2 only, can also split on sequence parallel on dim one and shard lm_head and embeddings.
     for _, transformer_block in enumerate(model.model.layers):
         parallelize_module(
             transformer_block,
