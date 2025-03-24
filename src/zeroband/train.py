@@ -114,7 +114,7 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool):
-    mp_policy = MixedPrecisionPolicy(param_dtype=torch.float16, reduce_dtype=None)
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
 
     for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
@@ -162,7 +162,7 @@ def train(config: Config):
         config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
     )
 
-    model, tokenizer = get_model_and_tokenizer(config.name_model, None)
+    model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
     model = model.cuda()
 
@@ -187,7 +187,7 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    # apply_fsdp(model, config.train.reshard_after_forward)
+    apply_fsdp(model, config.train.reshard_after_forward)
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
@@ -198,8 +198,8 @@ def train(config: Config):
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
-    if config.train.torch_compile:
-        model = torch.compile(model) if not TYPE_CHECKING else model
+    #if config.train.torch_compile:
+    #    model = torch.compile(model) if not TYPE_CHECKING else model
 
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
@@ -234,28 +234,18 @@ def train(config: Config):
 
                         # print("batch", batch.keys())
                         input_ids = batch["input_ids"].to("cuda")
-                        # attention_mask = batch["full_attention_mask"].to("cuda")
-                        # position_ids = batch["full_position_ids"].to("cuda")
+                        attention_mask = batch["full_attention_mask"].to("cuda")
+                        position_ids = batch["full_position_ids"].to("cuda")
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-                        logits.div_(0.6)
-
-                        alt_log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-                        target_ids = input_ids[:, 1:]  # Assuming you want to predict the next token
-                        batch_size, seq_len = target_ids.shape
-                        token_log_probs = alt_log_probs[:, :-1, :].gather(dim=2, index=target_ids.unsqueeze(-1)).squeeze(-1)
-
-                        print("alt token log probs", token_log_probs[:, 44:120])
+                        logits = model(input_ids=input_ids).logits#.contiguous()
 
                         input_ids = input_ids[:, 1:]
                         logits = logits[:, :-1, :] / config.temperature
 
                         per_token_logps = selective_log_softmax(logits, input_ids)
+                        
+                        print("per token logps", per_token_logps[:,44:64])
                         batch["logprobs"] = per_token_logps.to("cpu")
-
-                        print(batch["logprobs"].shape)
-
-                        print("logprobs", batch["logprobs"][:, 44:120])
 
                         del logits, per_token_logps
                         data.append(batch)
@@ -321,6 +311,7 @@ def train(config: Config):
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
+                print("loss", loss)
                 loss.backward()
                 loss_batch += loss.detach().clone()
                 pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
@@ -341,9 +332,10 @@ def train(config: Config):
             # dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
             # average_rewards = rewards_sum / rewards_token_count
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # .full_tensor()  # type: ignore (is a dtensor)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
-            print("grad norm", grad_norm)
+            print("grad_norm", grad_norm)
+
             optimizer.step()
             scheduler.step()
 
@@ -494,7 +486,7 @@ def get_batch():
         # batch["returns"] = [data[k][4]["returns"][513]]*len(input_ids)
         # batch["rewards"] = [batch["rewards"][0]]*len(input_ids)
 
-        logp = torch.BFloat16Tensor(data[k][4]["log_prob"]).cuda()
+        logp = torch.BFloat16Tensor(data[k][4]["old_log_probs"]).cuda()
 
         return batch, logp
 

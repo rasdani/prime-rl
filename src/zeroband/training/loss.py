@@ -99,8 +99,8 @@ def _compile_grpo_loss(
     logits = logits / temperature
     per_token_logps = selective_log_softmax(logits, input_ids)
 
-    print("original logprobs", original_logprobs[:, 79:99])
-    print("logprobs", per_token_logps[:, 79:99])
+    print("original logprobs", original_logprobs[:, 44:64])
+    print("logprobs", per_token_logps[:, 44:64])
 
     coef_1 = torch.exp(per_token_logps - original_logprobs)
     coef_2 = torch.clamp(coef_1, 1 - epsilon, 1 + epsilon)
