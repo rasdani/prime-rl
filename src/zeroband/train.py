@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import torch.distributed.tensor
@@ -123,60 +124,20 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 def apply_tp(model: ModelType, device_mesh: DeviceMesh):
 
-    local_output = True
-
-    parallelize_module(
-        model.model,
-        device_mesh,
-        {
-            "embed_tokens": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-                use_local_output=local_output,
-            ),
-            "norm": SequenceParallel(
-                sequence_dim=1,
-                use_local_output=local_output
-            ),
-        }
-    )
-
     for _, transformer_block in enumerate(model.model.layers):
         parallelize_module(
             transformer_block,
             device_mesh,
             {
-                'layers.*.input_layernorm':             SequenceParallel(sequence_dim=1, use_local_output=local_output),
-                'layers.*.self_attn':                   PrepareModuleInput(
-                                                            input_kwarg_layouts={"hidden_states": Shard(1),},
-                                                            desired_input_kwarg_layouts={"hidden_states": Replicate(),},
-                                                            use_local_output=local_output,
-                                                        ),
-                'layers.*.self_attn.q_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
-                'layers.*.self_attn.k_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
-                'layers.*.self_attn.v_proj':            ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
-                'layers.*.self_attn.o_proj':            RowwiseParallel(input_layouts=Shard(-1), output_layouts=Shard(1), use_local_output=local_output),
-                'layers.*.post_attention_layernorm':    SequenceParallel(sequence_dim=1, use_local_output=local_output),
-                'layers.*.mlp':                         PrepareModuleInput(input_layouts=(Shard(1),), desired_input_layouts=(Replicate(),), use_local_output=local_output),
-                'layers.*.mlp.gate_proj':               ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
-                'layers.*.mlp.up_proj':                 ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(-1), use_local_output=local_output),
-                'layers.*.mlp.down_proj':               RowwiseParallel(input_layouts=Shard(-1), output_layouts=Shard(1), use_local_output=local_output),
-            },
+                'layers.*.self_attn.q_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.self_attn.k_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.self_attn.v_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.self_attn.o_proj':   RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
+                'layers.*.mlp.gate_proj':      ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.mlp.up_proj':        ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'layers.*.mlp.down_proj':      RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
+            }
         )
-    
-    parallelize_module(
-        model,
-        device_mesh,
-        {
-            "lm_head": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Replicate(),
-                use_local_output=True,
-            ),
-        },
-    )
-
-    pass
 
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool, device_mesh: DeviceMesh | None):
@@ -325,8 +286,7 @@ def train(config: Config):
             loss_mask = loss_mask.to("cuda")
             original_logprobs = batch["logprobs"].to("cuda")
             # Loss
-            loss, clip_ratio = logits.abs().sum(), torch.tensor(0)
-            #loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
+            loss, clip_ratio = grpo_loss(logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature)
             loss = loss / gradient_accumulation_steps
             clip_ratio = clip_ratio / gradient_accumulation_steps
 
