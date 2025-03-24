@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import shutil
 import time
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -198,7 +198,7 @@ def train(config: Config):
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
-    #if config.train.torch_compile:
+    # if config.train.torch_compile:
     #    model = torch.compile(model) if not TYPE_CHECKING else model
 
     if config.ckpt.resume:
@@ -237,14 +237,14 @@ def train(config: Config):
                         attention_mask = batch["full_attention_mask"].to("cuda")
                         position_ids = batch["full_position_ids"].to("cuda")
 
-                        logits = model(input_ids=input_ids).logits#.contiguous()
+                        logits = model(input_ids=input_ids).logits  # .contiguous()
 
                         input_ids = input_ids[:, 1:]
                         logits = logits[:, :-1, :] / config.temperature
 
                         per_token_logps = selective_log_softmax(logits, input_ids)
-                        
-                        print("per token logps", per_token_logps[:,44:64])
+
+                        print("per token logps", per_token_logps[:, 44:64])
                         batch["logprobs"] = per_token_logps.to("cpu")
 
                         del logits, per_token_logps
