@@ -295,8 +295,8 @@ def train(config: Config):
             clip_ratio_batch = torch.tensor(0.0, device="cuda")
             seq_lens_batch = torch.tensor(0.0, device="cuda")
 
-            rewards_sum = torch.tensor(0.0)
-            rewards_token_count = torch.tensor(0.0)
+            rewards_sum = torch.tensor(0.0, device="cuda")
+            rewards_token_count = torch.tensor(0.0, device="cuda")
 
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
