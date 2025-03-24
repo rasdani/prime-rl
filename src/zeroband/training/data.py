@@ -1,16 +1,19 @@
 from pathlib import Path
 import time
+import pickle
 from typing import Any, Generator, TypedDict
 
 from pydantic_config import BaseConfig
 
 
 import torch
-from torch.utils.data import IterableDataset, DataLoader
+from torch.utils.data import IterableDataset
 
 from jaxtyping import Float, Int
 
 from pyarrow import dataset as ds
+
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from zeroband.logger import get_logger
 from zeroband.training.data_prefetch import GCPPrefetcher
@@ -240,10 +243,6 @@ class ParquetDataset(IterableDataset):
                     # need to break out of a second time because of the nested for loop
                     break
 
-
-from torchdata.stateful_dataloader import StatefulDataLoader
-from torch.utils.data import IterableDataset
-import pickle
 
 class ParallelAwareDataloader(StatefulDataLoader):
     """Dataloader that is aware of distributed data parallelism.

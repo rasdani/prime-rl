@@ -5,8 +5,6 @@ import time
 from typing import TYPE_CHECKING, Literal
 
 import torch
-import torch.distributed as dist
-from torch.distributed.tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed._functional_collectives import all_reduce_inplace
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
@@ -16,9 +14,9 @@ import wandb
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
-    PrepareModuleInput,
     RowwiseParallel,
-    SequenceParallel,
+    # PrepareModuleInput, # TODO
+    # SequenceParallel,
 )
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
