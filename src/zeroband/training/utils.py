@@ -61,16 +61,7 @@ def clip_grad_norm_(
     """
     grads = [p.grad for p in parameters if p.grad is not None]
     grads = [g.full_tensor() if isinstance(g, DTensor) else g for g in grads] # Added this line, not present in torchtitan
-    # for p in parameters:
-    #     if p.grad is not None:
-    #         continue
-    #     g = p.grad
-    #     if not g.device_mesh == grads[0].device_mesh:
-    #         print(f"Got incompatible meshes: {g.device_mesh} and {grads[0].device_mesh}")
-    #         print("Original tensor shape:")
-    # exit()
 
-    # TODO: Figure out how they're sharded and try to reduce communication
     total_norm = _get_total_norm(
         grads, norm_type, error_if_nonfinite, foreach
     )
