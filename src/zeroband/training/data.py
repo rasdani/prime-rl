@@ -246,6 +246,7 @@ class BatchOutput(TypedDict):
     loss_mask: Int[torch.Tensor, "batch seq"]
     logprobs: Float[torch.Tensor, "batch seq"]
     seq_lens: Int[torch.Tensor, "batch"]
+    attention_mask: Int[torch.Tensor, "batch seq"]
 
 
 class PaddingColate:
@@ -264,6 +265,7 @@ class PaddingColate:
         loss_masks = []
         logprobs = []
         seq_lens = []
+        attention_masks = []
         for sample in samples:
             ids = sample["input_ids"]
             seq_len = len(ids)
@@ -273,6 +275,7 @@ class PaddingColate:
             rew = sample["rewards"]
             loss_mask = sample["loss_mask"]
             logprob = sample["logprobs"]
+            attention_mask = torch.ones(len(ids), dtype=torch.int)
 
             if len(ids) >= self._seq_len:
                 ids = ids[: self._seq_len]
@@ -280,12 +283,15 @@ class PaddingColate:
                 rew = rew[: self._seq_len]
                 loss_mask = loss_mask[: self._seq_len]
                 logprob = logprob[: self._seq_len]
+                attention_mask = attention_mask[: self._seq_len]
             else:
-                ids = torch.cat([ids, torch.full((self._seq_len - len(ids),), fill_value=self._pad_token_id, dtype=ids.dtype)])
-                adv = torch.cat([adv, torch.zeros(self._seq_len - len(adv), dtype=adv.dtype)])
-                rew = torch.cat([rew, torch.zeros(self._seq_len - len(rew), dtype=rew.dtype)])
-                loss_mask = torch.cat([loss_mask, torch.zeros(self._seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
-                logprob = torch.cat([logprob, torch.zeros(self._seq_len - len(logprob), dtype=logprob.dtype)])
+                padding_len = self._seq_len - len(ids)
+                ids = torch.cat([ids, torch.full((padding_len,), fill_value=self._pad_token_id, dtype=ids.dtype)])
+                adv = torch.cat([adv, torch.zeros(padding_len, dtype=adv.dtype)])
+                rew = torch.cat([rew, torch.zeros(padding_len, dtype=rew.dtype)])
+                loss_mask = torch.cat([loss_mask, torch.zeros(padding_len, dtype=loss_mask.dtype)]).int()
+                logprob = torch.cat([logprob, torch.zeros(padding_len, dtype=logprob.dtype)])
+                attention_mask = torch.cat([attention_mask, torch.zeros(padding_len, dtype=torch.int)])
 
             seq_lens.append(seq_len)
             inputs_ids.append(ids)
@@ -293,6 +299,7 @@ class PaddingColate:
             rewards.append(rew)
             loss_masks.append(loss_mask)
             logprobs.append(logprob)
+            attention_masks.append(attention_mask)
 
         return {
             "input_ids": torch.stack(inputs_ids, dim=0),
@@ -301,6 +308,7 @@ class PaddingColate:
             "loss_mask": torch.stack(loss_masks, dim=0).int(),
             "logprobs": torch.stack(logprobs, dim=0),
             "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
+            "attention_mask": torch.stack(attention_masks, dim=0).int(),
         }
 
 

@@ -218,8 +218,11 @@ def train(config: Config):
                     for grad_acc_step in range(gradient_accumulation_steps):
                         batch = next(train_dataloader_iterator)
                         input_ids = batch["input_ids"].to("cuda")
+                        attention_mask = batch["attention_mask"].to("cuda")
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                        logits: Float[torch.Tensor, "batch seq vocab"] = model(
+                            input_ids=input_ids, attention_mask=attention_mask
+                        ).logits.contiguous()
 
                         logits.div_(config.temperature)
                         response_length = logits.shape[1]
@@ -227,7 +230,7 @@ def train(config: Config):
                         per_token_logps = logprobs_from_logits(logits, input_ids)
                         batch["logprobs"] = per_token_logps.to("cpu")
 
-                        del logits, per_token_logps
+                        del logits, per_token_logps, input_ids, attention_mask
                         data.append(batch)
 
                 logprobs_aware_iterator = iter(data)
@@ -253,6 +256,7 @@ def train(config: Config):
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
+                attention_mask = batch["attention_mask"]
 
                 rewards = batch["rewards"][loss_mask.bool()]
                 rewards_sum += rewards.sum()
@@ -261,7 +265,9 @@ def train(config: Config):
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
                 # Forward
-                logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                logits: Float[torch.Tensor, "batch seq vocab"] = model(
+                    input_ids=input_ids, attention_mask=attention_mask
+                ).logits.contiguous()
 
                 # Gather args for grpo loss
                 advantages = batch["advantages"].to("cuda")
