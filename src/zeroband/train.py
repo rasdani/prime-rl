@@ -13,7 +13,7 @@ import shardcast
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
+from zeroband.training.loss import entropy_loss, grpo_loss, log_prob_from_logits
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -89,6 +89,8 @@ class Config(BaseConfig):
 
     on_policy_log_prob: bool = False
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
+
+    entropy_loss_coeff: float = 0.001
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -214,28 +216,22 @@ def train(config: Config):
 
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
-            if config.on_policy_log_prob:
-                data = []
+            data = []
 
-                for rollout_step in range(config.optim.step_per_rollout):
-                    for grad_acc_step in range(gradient_accumulation_steps):
-                        batch = next(train_dataloader_iterator)
-                        input_ids = batch["input_ids"].to("cuda")
+            for rollout_step in range(config.optim.step_per_rollout):
+                for grad_acc_step in range(gradient_accumulation_steps):
+                    batch = next(train_dataloader_iterator)
+                    input_ids = batch["input_ids"].to("cuda")
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                    logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                        input_ids = input_ids[:, 1:]
-                        logits = logits[:, :-1, :] / config.temperature
+                    log_probs = log_prob_from_logits(logits, input_ids, config.temperature)
+                    batch["logprobs"] = log_probs.to("cpu")
 
-                        per_token_logps = selective_log_softmax(logits, input_ids)
-                        batch["logprobs"] = per_token_logps.to("cpu")
+                    del logits, log_probs
+                    data.append(batch)
 
-                        del logits, per_token_logps
-                        data.append(batch)
-
-                logprobs_aware_iterator = iter(data)
-            else:
-                logprobs_aware_iterator = train_dataloader_iterator
+            logprobs_aware_iterator = iter(data)
 
         for rollout_step in range(config.optim.step_per_rollout):
             loss_batch = 0
@@ -272,8 +268,6 @@ def train(config: Config):
                 advantages = batch["advantages"].to("cuda")
                 loss_mask = loss_mask.to("cuda")
                 original_logprobs = batch["logprobs"].to("cuda")
-                if not config.on_policy_log_prob:
-                    original_logprobs = original_logprobs[:, 1:]
 
                 # Loss
                 pg_loss, clip_ratio = grpo_loss(
@@ -283,17 +277,20 @@ def train(config: Config):
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / gradient_accumulation_steps
+
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
-                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
-
-                # Backward
-                loss.backward()
-                loss_batch += loss.detach().clone()
                 pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
                 entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
                 clip_ratio_batch += clip_ratio.detach().clone()
-                del loss, clip_ratio, pg_loss, entropy
+
+                del batch, logits, input_ids, advantages, loss_mask, original_logprobs, pg_loss, entropy, clip_ratio
+
+                # Backward
+            loss.backward()
+            loss_batch += loss.detach().clone()
+
+            del loss, clip_ratio, pg_loss, entropy
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)

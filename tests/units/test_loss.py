@@ -1,4 +1,4 @@
-from zeroband.training.loss import grpo_loss
+from zeroband.training.loss import grpo_loss, log_prob_from_logits
 import torch
 import pytest
 
@@ -16,3 +16,11 @@ def test_grpo_loss(dtype):
     assert loss.item() is not None
     assert clip_ratio.shape == ()
     assert clip_ratio.item() is not None
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_log_prob_from_logits(dtype):
+    logits = torch.randn(10, 10, 10, dtype=dtype).cuda()
+    input_ids = torch.randint(0, 10, (10, 10)).cuda()
+    log_probs = log_prob_from_logits(logits, input_ids, temperature=0.6)
+    assert log_probs.shape == (10, 9)
