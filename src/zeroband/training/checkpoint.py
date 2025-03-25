@@ -92,7 +92,7 @@ def load_checkpoint_fsdp_state(
     scheduler.load_state_dict(state["scheduler"])
 
 
-def save_ckpt_for_rollout(model: ModelType, path: Path) -> Path:
+def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16) -> Path:
     """
     Save the checkpoint for rollout as one unified safetensors file.
 
@@ -112,7 +112,9 @@ def save_ckpt_for_rollout(model: ModelType, path: Path) -> Path:
 
     # Only save on rank 0
     if torch.distributed.get_rank() == 0:
-        save_file(state, path_file)
+        for key, value in state.items():
+            state[key] = value.to(dtype)
+        save_file(state, path_file, {}, metadata={"format": "pt"})
 
         stable_file = path / "stable"
         stable_file.touch()
