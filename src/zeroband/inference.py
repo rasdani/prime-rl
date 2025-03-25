@@ -295,7 +295,7 @@ def inference(config: Config):
                         stable_file = last_step / "stable"
                         if stable_file.exists():
                             logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
-                            llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
+                            llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.safetensors")
                             ckpt_step = maybe_new_step
                             total_problems = 0
                             total_tokens = 0
