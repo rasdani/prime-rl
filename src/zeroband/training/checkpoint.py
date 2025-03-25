@@ -114,7 +114,7 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
     if torch.distributed.get_rank() == 0:
         for key, value in state.items():
             state[key] = value.to(dtype)
-        save_file(state, path_file, {}, metadata={"format": "pt"})
+        save_file(state, path_file, metadata={"format": "pt"})
 
         stable_file = path / "stable"
         stable_file.touch()
