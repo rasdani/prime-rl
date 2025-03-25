@@ -22,7 +22,8 @@ STABLE_FILE = "stable"
 
 class DataConfig(BaseConfig):
     path: str = "datasets/fineweb-edu"
-    seq_length: int = 1024
+    response_length: int = 1024
+    prompt_length: int = 1024
     fake: bool = False
     num_workers: int = 2
     timeout: float = 360
@@ -33,8 +34,9 @@ class DataConfig(BaseConfig):
 class FakeTokenizedDataset(IterableDataset):
     """This is a dummy dataset that generates random sequences of length seq_len and vocab_size"""
 
-    def __init__(self, seq_len: int, vocab_size: int):
-        self.seq_len = seq_len
+    def __init__(self, response_length: int, prompt_length: int, vocab_size: int):
+        self._response_length = response_length
+        self.prompt_length = prompt_length
         self.vocab_size = vocab_size
         assert vocab_size > 3, "Vocab size must be greater than 3"
         self.step = 0
@@ -42,17 +44,23 @@ class FakeTokenizedDataset(IterableDataset):
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
         while True:
             # Generate a random length between 1 and self.seq_len
-            len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
-            input_ids = torch.randint(3, self.vocab_size, (len_,))
-            advantages = torch.randn(len_)
-            rewards = torch.clamp(torch.randn(len_), min=0.0, max=1.0)
+
+            prompt_length = torch.randint(1, self.prompt_length + 1, (1,)).item()
+            response_length = torch.randint(1, self._response_length + 1, (1,)).item()
+
+            prompt_ids = torch.randint(3, self.vocab_size, (prompt_length,))
+            response_ids = torch.randint(3, self.vocab_size, (response_length,))
+
+            advantages = torch.randn(response_length)
+            rewards = torch.clamp(torch.randn(response_length), min=0.0, max=1.0)
             self.step += 1
             yield {
-                "input_ids": input_ids,
+                "prompt_ids": prompt_ids,
+                "response_ids": response_ids,
                 "advantages": advantages,
                 "rewards": rewards,
-                "loss_mask": torch.ones(len_).int(),
-                "logprobs": torch.randn(len_),
+                "loss_mask": torch.ones(response_length).int(),
+                "logprobs": torch.randn(response_length),
             }
 
 
@@ -250,65 +258,86 @@ class BatchOutput(TypedDict):
 
 
 class PaddingColate:
-    def __init__(self, seq_len: int, pad_token_id: int) -> None:
-        self._seq_len = seq_len
+    def __init__(self, response_length: int, prompt_length: int, pad_token_id: int) -> None:
+        self._response_length = response_length
+        self._prompt_length = prompt_length
         self._pad_token_id = pad_token_id
 
     def __call__(self, samples: list[dict[str, torch.LongTensor]]) -> BatchOutput:
-        assert samples[0].keys() == {"input_ids", "advantages", "rewards", "loss_mask", "logprobs"}, (
-            f"samples[0].keys() == {samples[0].keys()}"
-        )
+        # assert samples[0].keys() == {"input_ids", "advantages", "rewards", "loss_mask", "logprobs"}, (
+        #     f"samples[0].keys() == {samples[0].keys()}"
+        # )
 
         inputs_ids = []
+        responses = []
         advantages = []
         rewards = []
         loss_masks = []
-        logprobs = []
-        seq_lens = []
+        response_seq_lens = []
         attention_masks = []
         for sample in samples:
-            ids = sample["input_ids"]
-            seq_len = len(ids)
-            # seq_len = self._seq_len
+            prompt_ids = sample["prompt_ids"]
+            response_ids = sample["response_ids"]
+            response_len = len(prompt_ids)
 
             adv = sample["advantages"]
             rew = sample["rewards"]
             loss_mask = sample["loss_mask"]
-            logprob = sample["logprobs"]
-            attention_mask = torch.ones(len(ids), dtype=torch.int)
 
-            if len(ids) >= self._seq_len:
-                ids = ids[: self._seq_len]
-                adv = adv[: self._seq_len]
-                rew = rew[: self._seq_len]
-                loss_mask = loss_mask[: self._seq_len]
-                logprob = logprob[: self._seq_len]
-                attention_mask = attention_mask[: self._seq_len]
+            if len(response_ids) >= self._response_length:
+                response_ids = response_ids[: self._response_length]
+                adv = adv[: self._response_length]
+                rew = rew[: self._response_length]
+                loss_mask = loss_mask[: self._response_length]
+                attention_mask_response = torch.ones(self._response_length, dtype=torch.int)
             else:
-                padding_len = self._seq_len - len(ids)
-                ids = torch.cat([ids, torch.full((padding_len,), fill_value=self._pad_token_id, dtype=ids.dtype)])
+                padding_len = self._response_length - len(response_ids)
+                attention_mask_response = torch.cat(
+                    tensors=[torch.ones(len(response_ids), dtype=torch.int), torch.zeros(padding_len, dtype=torch.int)], dim=0
+                )
+                response_ids = torch.cat(
+                    [response_ids, torch.full((padding_len,), fill_value=self._pad_token_id, dtype=response_ids.dtype)]
+                )
                 adv = torch.cat([adv, torch.zeros(padding_len, dtype=adv.dtype)])
                 rew = torch.cat([rew, torch.zeros(padding_len, dtype=rew.dtype)])
                 loss_mask = torch.cat([loss_mask, torch.zeros(padding_len, dtype=loss_mask.dtype)]).int()
-                logprob = torch.cat([logprob, torch.zeros(padding_len, dtype=logprob.dtype)])
-                attention_mask = torch.cat([attention_mask, torch.zeros(padding_len, dtype=torch.int)])
-
-            seq_lens.append(seq_len)
-            inputs_ids.append(ids)
+                
+                
+            response_seq_lens.append(response_len)
             advantages.append(adv)
             rewards.append(rew)
             loss_masks.append(loss_mask)
-            logprobs.append(logprob)
+            responses.append(response_ids)
+
+            if len(prompt_ids) > self._prompt_length:
+                raise ValueError(f"Prompt length is greater than the maximum length: {len(prompt_ids)} >= {self._prompt_length}")
+            else:
+                padding_len = self._prompt_length - len(prompt_ids)
+                attention_mask_prompt = torch.cat(
+                    [torch.ones(len(prompt_ids), dtype=torch.int), torch.zeros(padding_len, dtype=torch.int)], dim=0
+                )
+                prompt_ids = torch.cat([prompt_ids, torch.full((padding_len,), fill_value=self._pad_token_id, dtype=prompt_ids.dtype)])
+                
+
+            
+                assert len(attention_mask_prompt) == self._prompt_length, f"attention_mask_prompt: {len(attention_mask_prompt)}, prompt_length: {self._prompt_length}"
+            
+            attention_mask = torch.cat([attention_mask_prompt, attention_mask_response], dim=0)
+            assert len(attention_mask) == self._prompt_length + self._response_length, f"attention_mask: {len(attention_mask)}, prompt_length: {self._prompt_length}, response_length: {self._response_length}"
+            
+            ids = torch.cat([prompt_ids, response_ids], dim=0)
+            
+            inputs_ids.append(ids)
             attention_masks.append(attention_mask)
 
         return {
             "input_ids": torch.stack(inputs_ids, dim=0),
+            "attention_mask": torch.stack(attention_masks, dim=0).int(),
+            "responses": torch.stack(responses, dim=0),
             "advantages": torch.stack(advantages, dim=0),
             "rewards": torch.stack(rewards, dim=0),
             "loss_mask": torch.stack(loss_masks, dim=0).int(),
-            "logprobs": torch.stack(logprobs, dim=0),
-            "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
-            "attention_mask": torch.stack(attention_masks, dim=0).int(),
+            "seq_lens": torch.tensor(response_seq_lens, dtype=torch.int32),
         }
 
 
@@ -326,9 +355,11 @@ def get_dataloader(
         path = data_config.local_dir
 
     if data_config.fake:
-        train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
+        train_dataset = FakeTokenizedDataset(data_config.response_length, data_config.prompt_length, len(tokenizer))
     else:
         train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout)
 
-    collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
+    collate_fn = PaddingColate(
+        data_config.response_length, data_config.prompt_length, tokenizer.pad_token_id
+    )  # todo adjust padding token for qwen later
     return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn), prefetcher

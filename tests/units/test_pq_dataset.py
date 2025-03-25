@@ -35,17 +35,19 @@ def test_should_skip_index(rank, workers_id):
 
 
 def test_padding_collate():
-    dataset = FakeTokenizedDataset(seq_len=10, vocab_size=10)
+    dataset = FakeTokenizedDataset(response_length=20, prompt_length=10, vocab_size=10)
 
-    collate_fn = PaddingColate(seq_len=10, pad_token_id=0)
-    dataloader = DataLoader(dataset, batch_size=10, num_workers=2, collate_fn=collate_fn)
+    collate_fn = PaddingColate(response_length=20, prompt_length=10, pad_token_id=0)
+    dataloader = DataLoader(dataset, batch_size=8, num_workers=2, collate_fn=collate_fn)
 
     for i, batch in enumerate(dataloader):
-        assert batch["input_ids"].shape == (10, 10)
-        assert batch["advantages"].shape == (10, 10)
-        assert batch["rewards"].shape == (10, 10)
-        assert batch["loss_mask"].shape == (10, 10)
-        assert batch["logprobs"].shape == (10, 10)
+        assert batch["input_ids"].shape == (8, 30)
+        assert batch["advantages"].shape == (8, 20)
+        assert batch["rewards"].shape == (8, 20)
+        assert batch["loss_mask"].shape == (8, 20)
+
+        assert batch["responses"].shape == (8, 20)
+        assert batch["attention_mask"].shape == (8, 30)
 
         if i > 10:
             break
