@@ -224,9 +224,12 @@ def train(config: Config):
                             input_ids=input_ids, attention_mask=attention_mask
                         ).logits.contiguous()
 
+                        input_ids = input_ids[:, 1:]
+
                         logits.div_(config.temperature)
                         response_length = logits.shape[1]
                         logits = logits[:, -response_length - 1 : -1]  # (bsz, response_length)
+
                         per_token_logps = logprobs_from_logits(logits, input_ids)
                         batch["logprobs"] = per_token_logps.to("cpu")
 
