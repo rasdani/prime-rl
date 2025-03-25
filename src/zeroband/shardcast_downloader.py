@@ -3,6 +3,7 @@ from shardcast import ClientNode
 import time
 import logging
 from pathlib import Path
+import multiprocessing as mp
 
 POLL_INTERVAL = 10
 logger = logging.getLogger(__name__)
@@ -62,6 +63,24 @@ def main(servers: list[str], output_dir: Path, versions_to_keep: int = -1, backl
                     logger.warning(f"Expired version {version - versions_to_keep} not found")
                 except Exception as e:
                     logger.warning(f"Error deleting expired version {version - versions_to_keep}: {e}")
+
+
+def run_main_bg(servers: list[str], output_dir: Path, versions_to_keep: int = -1, backlog_version: int = -1) -> mp.Process:
+    """
+    Run the main function in a background process.
+
+    Args:
+        servers: list of servers to download from
+        output_dir: directory to save the downloaded files
+        versions_to_keep: number of versions to keep
+        backlog_version: version to attempt to get first
+
+    Returns:
+        mp.Process: The created process running the main function
+    """
+    process = mp.Process(target=main, args=(servers, output_dir, versions_to_keep, backlog_version))
+    process.start()
+    return process
 
 
 if __name__ == "__main__":
