@@ -22,7 +22,7 @@ import torch.nn.functional as F
 try:
     from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
-    FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE = False
+    FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE = True
 except ImportError:
     FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE = False
 
