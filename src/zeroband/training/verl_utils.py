@@ -59,7 +59,6 @@ def logprobs_from_logits(logits, labels):
 
 
 def logprobs_from_logits_flash_attn(logits, labels):
-    print(f"logits: {logits.shape}, labels: {labels.shape}")
     output = -cross_entropy_loss(logits, labels)[0]
     return output
 
