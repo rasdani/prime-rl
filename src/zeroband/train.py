@@ -285,9 +285,7 @@ def train(config: Config):
                 loss = loss / gradient_accumulation_steps
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
-                advantages_cpu = advantages.to("cpu")  # needed for logging
-                rewards_cpu = rewards.to("cpu")  # needed for logging
-                del batch, logits, loss_mask, original_logprobs, advantages, rewards
+                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
                 loss.backward()
@@ -327,10 +325,6 @@ def train(config: Config):
 
             padding_proportion = (config.data.seq_length - seq_lens_batch.item() - 1) / config.data.seq_length
 
-            table = wandb.Table(columns=["generated_text", "rewards", "advantages"])
-            for i in range(min(4, len(input_ids))):
-                table.add_data(tokenizer.decode(input_ids[i].to("cpu")), rewards_cpu[i].item(), advantages_cpu[i][0].item())
-
             metrics = {
                 "Loss": loss_batch.item(),
                 "pg_loss": pg_loss_batch.item(),
@@ -346,7 +340,6 @@ def train(config: Config):
                 "average_rewards": average_rewards.item(),
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
-                f"output_samples/step_{training_progress.step}": table,
             }
 
             log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
