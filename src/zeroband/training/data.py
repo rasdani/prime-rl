@@ -183,7 +183,10 @@ class ParquetDataset(IterableDataset):
             required_columns = ["input_tokens", "output_tokens", "advantages", "rewards", "input_logprobs", "output_logprobs"]
 
             scanner = dataset.scanner(columns=required_columns, batch_size=self._pq_read_bs)
-
+            
+            print("dataset", dataset)
+            print("dataset len", len(dataset))
+            
             counter = 0
 
             for j, batch in enumerate(scanner.to_batches()):

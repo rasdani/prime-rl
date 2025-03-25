@@ -207,27 +207,24 @@ def train(config: Config):
     perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
 
     previous_ckpt_rollout = []
+    
+    exit()
 
     while True:
         time_start = time.time()
 
-        with open("grouped_metrics.json", "r") as f:
-            group_data = json.load(f)
-
-        for k in group_data.keys():
-            local = group_data[k][0]
-
-        batch, target_logp = get_batch()
-        for k in batch.keys():
-            print(batch[k].shape)
+        data_loader = iter(get_batch_2())
+        
+        
 
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             if config.on_policy_log_prob:
                 data = []
 
-                for rollout_step in range(2):
-                    for grad_acc_step in range(2):
+                for rollout_step in range(1):
+                    for grad_acc_step in range(6):
+                        batch = next(data_loader)
                         # batch = next(train_dataloader_iterator)
                         # for k in batch.keys():
                         #    print(batch[k].shape)
@@ -244,15 +241,19 @@ def train(config: Config):
 
                         per_token_logps = selective_log_softmax(logits, input_ids)
 
-                        print("per token logps", per_token_logps[:, 44:64])
                         batch["logprobs"] = per_token_logps.to("cpu")
 
                         del logits, per_token_logps
                         data.append(batch)
 
-                # logprobs_aware_iterator = iter(data)
+                logprobs_aware_iterator = iter(data)
             else:
                 logprobs_aware_iterator = train_dataloader_iterator
+        
+                
+        print("LEN BATCH", len(batch["input_ids"]))
+                
+        print("gradient accumulation", gradient_accumulation_steps)
 
         for rollout_step in range(config.optim.step_per_rollout):
             loss_batch = 0
@@ -267,7 +268,9 @@ def train(config: Config):
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            for grad_acc_step in range(gradient_accumulation_steps):
+            for grad_acc_step in range(6):
+                batch = next(logprobs_aware_iterator)
+                
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
 
@@ -293,11 +296,11 @@ def train(config: Config):
                     original_logprobs = original_logprobs[:, 1:]
 
                 # Loss
-                print("target logprob", target_logp[:20])
+                #print("target logprob", target_logp[:20])
                 # diff = (target_logp-original_logprobs[:,79:]).abs()
                 # print("diff mean", diff.mean())
                 # print("diff max", diff.max())
-                print("all close???", torch.allclose(target_logp, original_logprobs[:, 44:]))
+                #print("all close???", torch.allclose(target_logp, original_logprobs[:, 44:]))
 
                 pg_loss, clip_ratio = grpo_loss(
                     logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
@@ -311,14 +314,15 @@ def train(config: Config):
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
-                print("loss", loss)
+                print("pg loss", pg_loss)
+                print("gradient accumulation steps", gradient_accumulation_steps)
+                print("loss a", loss*gradient_accumulation_steps)
                 loss.backward()
                 loss_batch += loss.detach().clone()
                 pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
                 entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
                 clip_ratio_batch += clip_ratio.detach().clone()
                 del loss, clip_ratio, pg_loss, entropy
-                break
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
@@ -332,7 +336,7 @@ def train(config: Config):
             # dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
             # average_rewards = rewards_sum / rewards_token_count
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
 
             print("grad_norm", grad_norm)
 
@@ -407,8 +411,6 @@ def train(config: Config):
                         logger.info(f"Removing past rollout ckpt at {path_to_delete}")
                         shutil.rmtree(path_to_delete, ignore_errors=True)
 
-            print("EXITING")
-            exit()
 
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
@@ -482,19 +484,246 @@ def get_batch():
             print("key", key)
             print(torch.BFloat16Tensor(data[k][4][key]))
             print("\n- - - - - - - - - -\n")
+            
+        print("key loss", k)
 
         # batch["returns"] = [data[k][4]["returns"][513]]*len(input_ids)
         # batch["rewards"] = [batch["rewards"][0]]*len(input_ids)
 
         logp = torch.BFloat16Tensor(data[k][4]["old_log_probs"]).cuda()
+        
+        exit()
 
         return batch, logp
+    
+    
+def get_batch():
+    KEYS = ["old_log_prob", "log_prob", "advantages", "pg_losses", "pg_losses2", "old_log_probs"]
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    with open("grouped_metrics_2.json", "r") as f:
+        data = json.load(f)
+
+    for k in data.keys():
+        batch = dict()
+        for key in data[k][4].keys():
+            print("key", key)
+            try:
+                print(torch.Tensor(data[k][4][key]).shape)
+            except Exception:
+                pass
+            
+        input_ids = torch.LongTensor(data[k][4]["input_ids"])
+        advantages = torch.LongTensor([])
+        non_eos_idx = get_num_leading_eos(input_ids)
+        batch["input_ids"] = input_ids[non_eos_idx:].unsqueeze(0)
+        batch["advantages"] = torch.Tensor([data[k][4]["advantages"][513]] * batch["input_ids"].shape[1]).unsqueeze(0)
+        batch["loss_mask"] = torch.LongTensor(data[k][4]["attention_mask"][non_eos_idx:]).unsqueeze(0)
+        batch["seq_lens"] = torch.LongTensor(data[k][4]["attention_mask"]).sum().unsqueeze(0)
+        batch["full_input_ids"] = torch.LongTensor(input_ids.unsqueeze(0))
+        batch["full_attention_mask"] = torch.LongTensor(data[k][4]["attention_mask"]).unsqueeze(0)
+        batch["full_position_ids"] = torch.LongTensor(data[k][4]["position_ids"]).unsqueeze(0)
+
+        print("full attention mask", batch["full_attention_mask"][:, :20])
+        print("full attention mask", batch["full_attention_mask"][:, 350:500])
+        print("full attention mask", batch["full_attention_mask"][:, 2980:3000])
+
+        print("INPUT IDS SHAPE", batch["full_input_ids"].shape)
+        print("LOG PROB SHAPE", torch.Tensor(data[k][4]["log_prob"]).shape)
+
+        print("decoded", tokenizer.decode(batch["full_input_ids"][0, 512:550]))
+        print("\n\n")
+        print("text", tokenizer.decode(batch["input_ids"][0, 44:600]))
+
+        print(batch)
+
+        print("Losses:")
+        for key in KEYS:
+            print("key", key)
+            print(torch.BFloat16Tensor(data[k][4][key]))
+            print("\n- - - - - - - - - -\n")
+            
+        print("key loss", k)
+
+        # batch["returns"] = [data[k][4]["returns"][513]]*len(input_ids)
+        # batch["rewards"] = [batch["rewards"][0]]*len(input_ids)
+
+        logp = torch.BFloat16Tensor(data[k][4]["old_log_probs"]).cuda()
+        
+        exit()
+
+        return batch, logp
+
+
+
+def get_batch_2(json_path="grouped_metrics_2.json"):
+    from transformers import AutoTokenizer
+    """
+    This function builds a single batch from *all* entries
+    in the JSON file, rather than just the entry at index [4].
+    """
+
+    KEYS = ["old_log_prob", "log_prob", "advantages", "pg_losses", "pg_losses2", "old_log_probs"]
+    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    # Prepare python lists to collect tensors for each field
+    all_input_ids = []
+    all_advantages = []
+    all_loss_masks = []
+    all_seq_lens = []
+    all_full_input_ids = []
+    all_full_attention_masks = []
+    all_full_position_ids = []
+    
+    # (Optional) also collect any of the "log_prob" fields you might want to batch
+    all_log_probs = []
+
+    # If you want to look at all (k, i) pairs in data
+    # data[k] is presumably a list; we iterate over each element
+    for k in data.keys():
+        for i, item in enumerate(data[k]):
+            # item should be the dictionary that used to be data[k][i]
+            # Check if the necessary fields exist
+            if not isinstance(item, dict):
+                # If item is not a dict, you may want to skip or handle differently
+                continue
+            
+            print("ACTUAL LOSS", k)
+            print("pg_losses", item["pg_losses"][600:610])
+            print("pg losses 2", item["pg_losses2"][600:610])
+
+            # Make sure your item has the fields you need
+            if "input_ids" not in item:
+                continue  # skip if missing required data
+
+            # Extract input_ids, attention_mask, etc.
+            input_ids = torch.LongTensor(item["input_ids"])
+
+            # Optionally compute how many leading EOS tokens to skip
+            non_eos_idx = get_num_leading_eos(input_ids)
+            print("NUM EOS", non_eos_idx)
+
+            # Crop input_ids and attention_mask to skip leading EOS
+            cropped_input_ids = input_ids[non_eos_idx:]
+            cropped_attn_mask = torch.LongTensor(item["attention_mask"][non_eos_idx:])
+            
+            prefix_zero_count = 512 - non_eos_idx
+            if prefix_zero_count > 0 and prefix_zero_count < cropped_attn_mask.shape[0]:
+                cropped_attn_mask[:prefix_zero_count] = 0
+
+            # Here you used the 513th advantage previously. 
+            # Make sure that your sequence is long enough for index 513
+            # or adapt to the actual length you need. 
+            # For example, you can clamp the index or skip if too short:
+            adv_index = min(513, len(item["advantages"]) - 1)
+            advantage_val = item["advantages"][adv_index]
+            
+            # For the entire sequence, we replicate that advantage across all tokens:
+            advantages = torch.full(
+                (cropped_input_ids.shape[0],),  # shape across seq_len
+                fill_value=advantage_val,
+                dtype=torch.float
+            )
+
+            # We can store these in lists to stack later
+            all_input_ids.append(cropped_input_ids)
+            all_advantages.append(advantages)
+            all_loss_masks.append(cropped_attn_mask)
+            all_seq_lens.append(torch.LongTensor([torch.LongTensor(item["attention_mask"]).sum()]))
+
+            # full versions (no cropping)
+            full_input_ids = torch.LongTensor(item["input_ids"])
+            full_attention_mask = torch.LongTensor(item["attention_mask"])
+            full_position_ids = torch.LongTensor(item["position_ids"])
+
+            all_full_input_ids.append(full_input_ids)
+            all_full_attention_masks.append(full_attention_mask)
+            all_full_position_ids.append(full_position_ids)
+
+            # If you need to track log probabilities or other fields in a batch:
+            if "log_prob" in item:
+                all_log_probs.append(torch.Tensor(item["log_prob"]))
+            else:
+                # Or append a placeholder if missing
+                all_log_probs.append(torch.zeros_like(cropped_input_ids, dtype=torch.float))
+
+        # Now we have lists of tensors, one per (k, i). We can stack or pad them.
+        # If all sequences are the *same* length, you can do a simple stack:
+        #   stacked_input_ids = torch.stack(all_input_ids, dim=0)
+        #
+        # If sequences differ in length, you may want to pad them:
+        #   stacked_input_ids = pad_sequence(all_input_ids, batch_first=True, padding_value=0)
+        #
+        # For demonstration, let's assume they are the same length or we want to pad.
+
+        # from torch.nn.utils.rnn import pad_sequence  # Make sure to import at the top if needed.
+        
+
+        
+        eos_id = 151643
+        stacked_input_ids = torch.nn.utils.rnn.pad_sequence(all_input_ids, batch_first=True, padding_value=eos_id)
+        stacked_advantages = torch.nn.utils.rnn.pad_sequence(all_advantages, batch_first=True, padding_value=0)
+        stacked_loss_masks = torch.nn.utils.rnn.pad_sequence(all_loss_masks, batch_first=True, padding_value=0)
+        stacked_seq_lens = torch.cat(all_seq_lens, dim=0)
+
+        # For full input_ids, we do the same:
+        stacked_full_input_ids = torch.nn.utils.rnn.pad_sequence(all_full_input_ids, batch_first=True, padding_value=eos_id)
+        stacked_full_attention_masks = torch.nn.utils.rnn.pad_sequence(all_full_attention_masks, batch_first=True, padding_value=eos_id)
+        stacked_full_position_ids = torch.nn.utils.rnn.pad_sequence(all_full_position_ids, batch_first=True, padding_value=eos_id)
+
+        # Similarly for log_probs if you want to store them:
+        # (They may also require padding if their lengths differ.)
+        stacked_log_probs = torch.nn.utils.rnn.pad_sequence(all_log_probs, batch_first=True, padding_value=eos_id)
+
+        # Build final batch dict
+        batch = {
+            "input_ids": stacked_input_ids,
+            "advantages": stacked_advantages,
+            "loss_mask": stacked_loss_masks,
+            "seq_lens": stacked_seq_lens,
+            "full_input_ids": stacked_full_input_ids,
+            "full_attention_mask": stacked_full_attention_masks,
+            "full_position_ids": stacked_full_position_ids,
+            "log_prob": stacked_log_probs,  # optional
+        }
+        
+        
+        all_data_batch = []
+        for i in range(batch["input_ids"].shape[0]):
+            w = dict()
+            for key in batch.keys():
+                
+                if key == "seq_lens":
+                    w[key] = batch[key][i]
+                    continue
+                
+                w[key] = batch[key][i:i+1,:]
+            
+            all_data_batch.append(w)
+        
+        print("actual batch loss", k)
+
+
+                        
+            
+        for k, v in batch.items():
+            print(k, v.shape if isinstance(v, torch.Tensor) else type(v))
+            if "loss" in k:
+                print(v)
+                
+        # Return the entire batch (and anything else you might need)
+        return all_data_batch
+
 
 
 # batch dict_keys(['input_ids', 'advantages', 'rewards', 'loss_mask', 'logprobs', 'seq_lens'])
 
 if __name__ == "__main__":
-    # get_batch()
+    #get_batch_2()
 
     """
     import json

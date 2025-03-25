@@ -99,17 +99,38 @@ def _compile_grpo_loss(
     logits = logits / temperature
     per_token_logps = selective_log_softmax(logits, input_ids)
 
-    print("original logprobs", original_logprobs[:, 44:64])
-    print("logprobs", per_token_logps[:, 44:64])
-
     coef_1 = torch.exp(per_token_logps - original_logprobs)
     coef_2 = torch.clamp(coef_1, 1 - epsilon, 1 + epsilon)
+        
+    
     per_token_loss1 = -coef_1 * advantages
     per_token_loss2 = -coef_2 * advantages
     per_token_loss = torch.max(per_token_loss1, per_token_loss2)
 
-    print("pg losses", per_token_loss1)
-    print("pg losses2", per_token_loss2)
+    loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
+
+    is_clipped = (per_token_loss1 < per_token_loss2).float()
+    clip_ratio = (is_clipped * loss_mask).sum() / loss_mask.sum()
+    return loss, clip_ratio
+
+
+
+# @torch.compile
+def co_grpo(
+) -> tuple[Tensor, Tensor]:
+    
+    
+    coef_1 = torch.ones((2, 3))
+    coef_2 = torch.ones((2, 3))
+    loss_mask = torch.ones((2, 3))
+    advantages = torch.FloatTensor([[-0.35, -0.35, -0.35], [0.2,0.2,0.2]])
+    
+    
+    
+    
+    per_token_loss1 = -coef_1 * advantages
+    per_token_loss2 = -coef_2 * advantages
+    per_token_loss = torch.max(per_token_loss1, per_token_loss2)
 
     loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
 
@@ -134,3 +155,9 @@ def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, tempera
     masked_entropy = entropy * loss_mask
 
     return masked_entropy.sum() / loss_mask.sum()
+
+
+if __name__ == '__main__':
+    result = co_grpo()
+    print(result)
+    
