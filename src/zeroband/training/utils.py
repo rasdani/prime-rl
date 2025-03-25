@@ -161,7 +161,7 @@ class PerfCounter:
     we use a rollowing window because time perf counter is not precise enough in some case
     """
 
-    def __init__(self, window_size: int, model: LlamaForCausalLM, seq_len: int):
+    def __init__(self, window_size: int, model: LlamaForCausalLM, seq_len: int, tp_world_size: int):
         self.window_size = window_size
         self.tokens = []
         self.times = []
@@ -170,6 +170,7 @@ class PerfCounter:
         self.gpu_peak_flops = get_peak_flops(torch.cuda.get_device_name(torch.device("cuda")))
         self.num_params = get_num_params(model, exclude_embedding=True)
         self.num_flop_per_token = get_num_flop_per_token(self.num_params, model.config, seq_len=seq_len)
+        self.tp_world_size = tp_world_size
 
         self._world_info = get_world_info()
 
@@ -189,7 +190,7 @@ class PerfCounter:
         tokens_per_second = self.get_tokens_per_second()
         if tokens_per_second is None:
             return None
-        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops / self._world_info.world_size
+        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops / self._world_info.world_size / self.tp_world_size
 
 
 def get_random_available_port_list(num_port):

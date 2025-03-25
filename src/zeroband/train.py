@@ -256,7 +256,7 @@ def train(config: Config):
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
 
-    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
+    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length, tp_world_size=config.train.tp)
 
     previous_ckpt_rollout = []
 
