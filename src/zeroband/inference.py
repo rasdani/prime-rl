@@ -14,6 +14,7 @@ import vllm
 import concurrent.futures
 import time
 from toploc.utils import sha256sum
+from safetensors import safe_open
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
@@ -173,7 +174,10 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     # Access the internal model from vLLM
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     # Load state dict
-    state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    state_dict = {}
+    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            state_dict[key] = f.get_tensor(key)
 
     # Create a better weight iterator that filters out empty keys and handles prefixes
     def weights_iterator():
