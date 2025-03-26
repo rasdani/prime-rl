@@ -72,6 +72,7 @@ class TrainConfig(BaseConfig):
 
     dp: int = -1 # World size by default, otherwise specifiy with tp
     tp: int = 1
+    more_tp: bool = True
 
 
 class CkptConfig(BaseConfig):
@@ -125,8 +126,32 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_tp(model: ModelType, device_mesh: DeviceMesh):
+def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
     # TODO: Qwen2 only, can also split on sequence parallel on dim one and shard lm_head and embeddings.
+
+    if config.more_tp:
+        parallelize_module(
+            model.model,
+            device_mesh,
+            {
+                "embed_tokens": RowwiseParallel(
+                    input_layouts=Replicate(),
+                    use_local_output=True,
+                ),
+            }
+        )
+
+        parallelize_module(
+            model,
+            device_mesh,
+            {
+                "lm_head": ColwiseParallel(
+                    output_layouts=Replicate(),
+                    use_local_output=True,
+                ),
+            },
+        )
+
     for _, transformer_block in enumerate(model.model.layers):
         parallelize_module(
             transformer_block,
@@ -220,7 +245,7 @@ def train(config: Config):
     tp_rank = tp_mesh.get_local_rank() if config.train.tp > 1 else 0  # type: ignore
     logger.info(f"tp_rank: {tp_rank}, tp_mesh: {tp_mesh}")
     if config.train.tp > 1:
-        apply_tp(model, device_mesh=world_mesh["tp"])
+        apply_tp(model, config.train, device_mesh=world_mesh["tp"])
     
     dp_mesh = world_mesh["fsdp"]
     dp_rank = dp_mesh.get_local_rank() if config.train.dp > 1 else 0
