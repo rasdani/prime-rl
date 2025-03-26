@@ -226,7 +226,7 @@ def train(config: Config):
                     per_token_logps = grpo_logprobs(logits, input_ids, config.temperature, config.grpo_epsilon)
                     batch["logprobs"] = per_token_logps.to("cpu")
 
-                    del logits, per_token_logps
+                    del logits, per_token_logps, input_ids
                     data.append(batch)
 
                 logprobs_aware_iterator = iter(data)
