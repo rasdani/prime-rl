@@ -14,6 +14,7 @@ import vllm
 import concurrent.futures
 import time
 from toploc.utils import sha256sum
+from safetensors import safe_open
 
 # from vllm.model_executor.model_loader
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
@@ -173,7 +174,10 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     # Access the internal model from vLLM
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     # Load state dict
-    state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    state_dict = {}
+    with safe_open(ckpt_path, framework="pt", device="cpu") as f:
+        for key in f.keys():
+            state_dict[key] = f.get_tensor(key)
 
     # Create a better weight iterator that filters out empty keys and handles prefixes
     def weights_iterator():
@@ -291,7 +295,7 @@ def inference(config: Config):
                         stable_file = last_step / "stable"
                         if stable_file.exists():
                             logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
-                            llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.pt")
+                            llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.safetensors")
                             ckpt_step = maybe_new_step
                             total_problems = 0
                             total_tokens = 0
@@ -308,6 +312,8 @@ def inference(config: Config):
 
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
+            for i, p in enumerate(prompts):
+                prompts[i] = p.replace("<｜begin▁of▁sentence｜>", "")
         else:
             prompts = fake_chat_template(messages)
 

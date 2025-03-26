@@ -5,6 +5,7 @@ import time
 import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
+from safetensors.torch import save_file
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelType
@@ -91,16 +92,19 @@ def load_checkpoint_fsdp_state(
     scheduler.load_state_dict(state["scheduler"])
 
 
-def save_ckpt_for_rollout(model: ModelType, path: Path):
+def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16) -> Path:
     """
-    Save the checkpoint for rollout as one unified checkpoint.
+    Save the checkpoint for rollout as one unified safetensors file.
+
+    Return:
+        Path to the saved checkpoint safetensor
     """
     logger = get_logger()
 
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
 
-    path_file = path / "model.pt"
+    path_file = path / "model.safetensors"
 
     start_time = time.time()
     logger.info(f"Saving rollout ckpt at {path}")
@@ -108,9 +112,12 @@ def save_ckpt_for_rollout(model: ModelType, path: Path):
 
     # Only save on rank 0
     if torch.distributed.get_rank() == 0:
-        torch.save(state, path_file)
+        for key, value in state.items():
+            state[key] = value.to(dtype)
+        save_file(state, path_file, metadata={"format": "pt"})
 
         stable_file = path / "stable"
         stable_file.touch()
 
     logger.info(f"Rollout ckpt saved at {path} in {time.time() - start_time:.2f} seconds")
+    return path_file
