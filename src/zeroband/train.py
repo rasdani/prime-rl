@@ -88,7 +88,7 @@ class Config(BaseConfig):
     entropy_loss_coeff: float = 0.001
 
     on_policy_log_prob: bool = False
-    max_async_level: int = 2  # the amount of rollout checkpoints to keep
+    max_async_level: int = 1  # the amount of rollout checkpoints to keep
 
     @model_validator(mode="after")
     def check_liger(self):

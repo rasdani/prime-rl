@@ -46,10 +46,10 @@ class SamplingParamConfig(BaseConfig):
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
-    dataset: str = "justus27/deepscaler-math-genesys-format"
+    dataset: str = "justus27/deepscaler-math-genesys-format-fixed"
     batch_size: int = 32
     max_samples: int | None = None
-    output_path: str = "outputs"
+    output_path: str = "outputs_2"
     total_step: int | None = None
     step_batch_size: int = 64  # will be used to create stable file
     rollout_path: str | None = None
@@ -60,7 +60,7 @@ class Config(BaseConfig):
     enforce_eager: bool = False
     max_model_len: int | None = None
 
-    max_async_level: int = 2  # the amount of step for which we can be in advance
+    max_async_level: int = 1  # the amount of step for which we can be in advance
 
     # mutli gpu
     tp: int = 1
@@ -428,10 +428,59 @@ def main(config: Config) -> list[mp.Process]:
     processes = inference_run(config)
     for process in processes:
         process.join()
+        
+
+def get_num_leading_eos(input_ids, eos_id=151643):
+    # Find the index of the first token that is not the eos token.
+    non_eos = (input_ids != eos_id).nonzero(as_tuple=True)[0]
+    if non_eos.numel() == 0:
+        # In case all tokens are eos_id, return an empty tensor.
+        return input_ids[:0]
+    first_non_eos_idx = non_eos[0].item()
+    return first_non_eos_idx
 
 
 if __name__ == "__main__":
+    from transformers import AutoTokenizer
+    import json
+    
+    joo = load_dataset("justus27/deepscaler-math-genesys-format")["train"]
+    
+    tok = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    
+    prompts = []
+    rewards = []
+    
+    with open("grouped_metrics_2.json", "r") as f:
+        data = json.load(f)
+        
+    count = 0
+    for k in list(data.keys()):
+        for d in data[k]:
+            print(d.keys())
+            count += 1
+            print(count)
+            input_ids = torch.LongTensor(d["input_ids"])
+            non_eos = get_num_leading_eos(input_ids)
+            prompt = tok.decode(input_ids[non_eos+2:509])
+            response = tok.decode(input_ids[510:]).replace("<｜end▁of▁sentence｜>", "")
+            reward = int(1 in d["token_level_rewards"])
+            
+            for j in joo["prompt"]:
+                if j == prompt:
+                    print("JAAAA")
+                    print(j)
+                    print(prompt)
+            
+            print("next")
+            
+            
+            
+    
+    
+    """
     # Set spawn method before any other multiprocessing code
     mp.set_start_method("spawn")
     config = Config(**parse_argv())  # type: ignore
     main(config)
+    """
