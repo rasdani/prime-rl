@@ -9,7 +9,7 @@ import numpy as np
 from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
-from pydantic_config import BaseConfig, parse_argv
+from pydantic_config import BaseConfig
 import vllm
 import concurrent.futures
 import time
@@ -428,7 +428,7 @@ def main(config: Config) -> list[mp.Process]:
     processes = inference_run(config)
     for process in processes:
         process.join()
-        
+
 
 def get_num_leading_eos(input_ids, eos_id=151643):
     # Find the index of the first token that is not the eos token.
@@ -443,17 +443,17 @@ def get_num_leading_eos(input_ids, eos_id=151643):
 if __name__ == "__main__":
     from transformers import AutoTokenizer
     import json
-    
+
     joo = load_dataset("justus27/deepscaler-math-genesys-format")["train"]
-    
+
     tok = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
-    
+
     prompts = []
     rewards = []
-    
+
     with open("grouped_metrics_2.json", "r") as f:
         data = json.load(f)
-        
+
     count = 0
     for k in list(data.keys()):
         for d in data[k]:
@@ -462,22 +462,18 @@ if __name__ == "__main__":
             print(count)
             input_ids = torch.LongTensor(d["input_ids"])
             non_eos = get_num_leading_eos(input_ids)
-            prompt = tok.decode(input_ids[non_eos+2:509])
+            prompt = tok.decode(input_ids[non_eos + 2 : 509])
             response = tok.decode(input_ids[510:]).replace("<｜end▁of▁sentence｜>", "")
             reward = int(1 in d["token_level_rewards"])
-            
+
             for j in joo["prompt"]:
                 if j == prompt:
                     print("JAAAA")
                     print(j)
                     print(prompt)
-            
+
             print("next")
-            
-            
-            
-    
-    
+
     """
     # Set spawn method before any other multiprocessing code
     mp.set_start_method("spawn")
