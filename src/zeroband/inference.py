@@ -374,8 +374,6 @@ def inference(config: Config):
 
         if total_problems % config.step_batch_size == 0:
             logger.info(f"Generated {total_problems} problems for step {real_step}")
-            stable_file = step_path / "stable"
-            stable_file.touch()
             real_step += 1
 
         if config.total_step is not None and real_step >= config.total_step:
