@@ -250,10 +250,7 @@ def train(config: Config):
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            for grad_acc_step in range(gradient_accumulation_steps):
-                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
-
+            for _grad_acc_step in range(gradient_accumulation_steps):
                 # Load args
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
