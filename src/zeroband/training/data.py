@@ -25,7 +25,7 @@ class DataConfig(BaseConfig):
     seq_length: int = 1024
     fake: bool = False
     num_workers: int = 2
-    timeout: float = 360
+    timeout: float = 3600
 
     local_dir: str = "/dev/shm/zeroband/data"  # only used if path is gcp
 
