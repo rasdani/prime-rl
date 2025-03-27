@@ -60,7 +60,7 @@ class Config(BaseConfig):
     enforce_eager: bool = False
     max_model_len: int | None = None
 
-    max_async_level: int = 2  # the amount of step for which we can be in advance
+    async_level: int = 2  # the amount of step for which we can be in advance
 
     # mutli gpu
     tp: int = 1
@@ -283,24 +283,19 @@ def inference(config: Config):
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         logger.info(
-            f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.max_async_level: {config.max_async_level}"
+            f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.async_level: {config.async_level}"
         )
-        if config.rollout_path is not None and real_step - ckpt_step > config.max_async_level:
+        if config.rollout_path is not None and real_step - ckpt_step >= config.async_level:
             while True:
-                last_step = list(Path(config.rollout_path).glob("step_*"))
-                if last_step:
-                    last_step = max(last_step, key=lambda x: int(x.stem.split("_")[-1]))
-                    maybe_new_step = int(last_step.stem.split("_")[-1])
-                    if ckpt_step < maybe_new_step:
-                        stable_file = last_step / "stable"
-                        if stable_file.exists():
-                            logger.info(f"Reloading model weights from {config.rollout_path} step {maybe_new_step}")
-                            llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{maybe_new_step}/model.safetensors")
-                            ckpt_step = maybe_new_step
-                            total_problems = 0
-                            total_tokens = 0
-                            logger.info(f"Reloaded model weights from {config.rollout_path} step {maybe_new_step}")
-                            break
+                ckpt_step += 1
+                stable_file = Path(config.rollout_path) / f"step_{ckpt_step}/stable"
+                if stable_file.exists():
+                    logger.info(f"Reloading model weights from {config.rollout_path} ckpt {ckpt_step}")
+                    llm = reload_model_weights(llm, Path(config.rollout_path) / f"step_{ckpt_step}/model.safetensors")
+                    total_problems = 0
+                    total_tokens = 0
+                    logger.info(f"Reloaded model weights from {config.rollout_path} ckpt {ckpt_step}")
+                    break
                 logger.info(f"No checkpoint found at {config.rollout_path}, waiting for new checkpoint")
                 time.sleep(1)
 
