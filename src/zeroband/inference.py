@@ -285,9 +285,9 @@ def inference(config: Config):
         logger.info(
             f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.async_level: {config.async_level}"
         )
-        if config.rollout_path is not None and real_step - ckpt_step >= config.async_level:
+        if config.rollout_path is not None and real_step - ckpt_step > config.async_level:
+            ckpt_step += 1
             while True:
-                ckpt_step += 1
                 stable_file = Path(config.rollout_path) / f"step_{ckpt_step}/stable"
                 if stable_file.exists():
                     logger.info(f"Reloading model weights from {config.rollout_path} ckpt {ckpt_step}")
@@ -296,7 +296,7 @@ def inference(config: Config):
                     total_tokens = 0
                     logger.info(f"Reloaded model weights from {config.rollout_path} ckpt {ckpt_step}")
                     break
-                logger.info(f"No checkpoint found at {config.rollout_path}, waiting for new checkpoint")
+                logger.info(f"No stable file found at {stable_file}, waiting for new checkpoint")
                 time.sleep(1)
 
         # Get batch
