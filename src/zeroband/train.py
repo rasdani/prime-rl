@@ -424,9 +424,7 @@ def train(config: Config):
                     g.mul_(clip_coef)
                 return grad_norm
 
-            #grad_norm = clip_grad_norm_()
-            grad_norm = torch.tensor(0)
-                
+            grad_norm = clip_grad_norm_()
 
             optimizer.step()
             scheduler.step()
