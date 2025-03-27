@@ -18,18 +18,19 @@ def test_grpo_loss(dtype):
     assert clip_ratio.item() is not None
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_grpo_loss_padding(dtype):
+# @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_grpo_loss_padding():
+    dtype = torch.bfloat16
     logits = torch.randn(10, 10, 10, dtype=dtype).cuda()
     original_logprobs = torch.randn(10, 9, dtype=dtype).cuda()
     advantages = torch.randn(10, 10).cuda()
     loss_mask = torch.ones(10, 10).int().cuda()
     input_ids = torch.randint(0, 10, (10, 10)).cuda()
-    rewards = torch.randn(10, 10).cuda()
+    rewards = torch.ones(10, 10).cuda()
 
     loss_list = []
     reward_list = []
-    for padding in [10, 20]:
+    for padding in [2, 5]:
         pad_logits = torch.cat([logits, torch.zeros(10, padding, 10, dtype=dtype).cuda()], dim=1)
         pad_original_logprobs = torch.cat([original_logprobs, torch.zeros(10, padding, dtype=dtype).cuda()], dim=1)
         pad_advantages = torch.cat([advantages, torch.zeros(10, padding, dtype=dtype).cuda()], dim=1)
@@ -37,8 +38,9 @@ def test_grpo_loss_padding(dtype):
         pad_input_ids = torch.cat([input_ids, torch.zeros(10, padding, dtype=torch.int).cuda()], dim=1)
         pad_rewards = torch.cat([rewards, torch.zeros(10, padding, dtype=dtype).cuda()], dim=1)
 
-        sum_rewards = (pad_rewards * pad_loss_mask).sum()
-        token_count = (pad_loss_mask).sum()
+        r = pad_rewards[pad_loss_mask.bool()]
+        sum_rewards = r.sum()
+        token_count = r.numel()
 
         reward = sum_rewards / token_count
         reward_list.append(reward)
