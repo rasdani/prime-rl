@@ -367,7 +367,7 @@ def inference(config: Config):
             logger.info(f"Generated {total_problems} problems for step {real_step}")
             real_step += 1
 
-        if config.total_step is not None and real_step >= config.total_step:
+        if config.total_step is not None and real_step > config.total_step:
             logger.info(f"Reached total step {config.total_step}, stopping inference")
             break
 

@@ -243,6 +243,7 @@ def train(config: Config):
             entropy_loss_batch = 0
             clip_ratio_batch = 0
             seq_lens_batch = 0
+            sample_reward_batch = 0
 
             rewards_sum = torch.tensor(0.0)
             rewards_token_count = torch.tensor(0.0)
@@ -250,10 +251,7 @@ def train(config: Config):
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            for grad_acc_step in range(gradient_accumulation_steps):
-                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
-
+            for _grad_acc_step in range(gradient_accumulation_steps):
                 # Load args
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
@@ -285,6 +283,8 @@ def train(config: Config):
                 loss = loss / gradient_accumulation_steps
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
+                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
+
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
@@ -302,6 +302,9 @@ def train(config: Config):
 
             seq_lens_batch = seq_lens_batch / world_info.world_size
             dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
+
+            sample_reward_batch = sample_reward_batch / world_info.world_size
+            dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
 
             dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
             dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
@@ -340,6 +343,7 @@ def train(config: Config):
                 "average_rewards": average_rewards.item(),
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
+                "sample_reward": sample_reward_batch.item(),
             }
 
             log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
