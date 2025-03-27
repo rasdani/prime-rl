@@ -60,7 +60,7 @@ class Config(BaseConfig):
     enforce_eager: bool = False
     max_model_len: int | None = None
 
-    max_async_level: int = 2  # the amount of step for which we can be in advance
+    async_level: int = 2  # the amount of step for which we can be in advance
 
     # mutli gpu
     tp: int = 1
@@ -283,9 +283,9 @@ def inference(config: Config):
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         logger.info(
-            f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.max_async_level: {config.max_async_level}"
+            f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.max_async_level: {config.async_level}"
         )
-        if config.rollout_path is not None and real_step - ckpt_step > config.max_async_level:
+        if config.rollout_path is not None and real_step - ckpt_step > config.async_level:
             while True:
                 last_step = list(Path(config.rollout_path).glob("step_*"))
                 if last_step:
@@ -378,7 +378,7 @@ def inference(config: Config):
             stable_file.touch()
             real_step += 1
 
-        if config.total_step is not None and real_step >= config.total_step:
+        if config.total_step is not None and real_step > config.total_step:
             logger.info(f"Reached total step {config.total_step}, stopping inference")
             break
 
