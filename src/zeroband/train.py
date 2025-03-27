@@ -8,7 +8,10 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed._functional_collectives import all_reduce_inplace
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
-import torch.distributed.tensor
+from torch.distributed.tensor import DTensor
+import torch.distributed as dist
+from torch.distributed import Work
+
 import wandb
 import shardcast
 
@@ -331,12 +334,7 @@ def train(config: Config):
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            for grad_acc_step in range(gradient_accumulation_steps):
-                is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
-                if config.train.dp > 1: # If FSDP enabled
-                    model.set_requires_gradient_sync(not is_accumulating)  # no sync if we are accumulating gradients
-
-
+            for _ in range(gradient_accumulation_steps):
                 # Load args
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
@@ -390,9 +388,45 @@ def train(config: Config):
             all_reduce_inplace(rewards_token_count, op="sum", group=dp_mesh)
             average_rewards = rewards_sum / rewards_token_count
 
-            grad_norm = clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
-            if isinstance(grad_norm, torch.distributed.tensor.DTensor):
-                grad_norm = grad_norm.full_tensor()
+            @torch.no_grad()
+            def clip_grad_norm_():
+                tp_group = tp_mesh.get_group("tp")
+                allreduce_work = []
+                local_grads = []
+                squared_sum = torch.tensor(0, device="cuda", dtype=torch.float32)
+                for p in model.parameters():
+                    if p.grad is None:
+                        continue
+                    
+                    p = p.grad
+                    local_grads.append(p.to_local() if isinstance(p, DTensor) else p)
+
+                    tp_sharded = False
+                    if isinstance(p, DTensor):
+                        tp_sharded = p.device_mesh.mesh_dim_names and "tp" in p.device_mesh.mesh_dim_names
+                        p = p.to_local()
+
+                    sum_sq: torch.Tensor | Work = torch.sum(p.data ** 2)
+                    if tp_sharded: # Must reduce on tp rank (same data), so do other stuff until summed.
+                        allreduce_work.append(dist.all_reduce(sum_sq, op=dist.ReduceOp.SUM, group=tp_group, async_op=True))
+                    else: # FSDP ranks should not be summed, as they're different data.
+                        squared_sum += sum_sq
+
+                for s in allreduce_work:
+                    squared_sum += s.result()[0]
+                
+                grad_norm = torch.sqrt(squared_sum)
+                if isinstance(grad_norm, DTensor):
+                    grad_norm = grad_norm.full_tensor()
+
+                clip_coef = torch.clamp(1.0 / (grad_norm + 1e-6), max=1.0)
+                for g in local_grads:
+                    g.mul_(clip_coef)
+                return grad_norm
+
+            #grad_norm = clip_grad_norm_()
+            grad_norm = torch.tensor(0)
+                
 
             optimizer.step()
             scheduler.step()
