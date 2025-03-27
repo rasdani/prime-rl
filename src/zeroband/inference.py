@@ -174,21 +174,17 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     # Access the internal model from vLLM
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
     # Load state dict
-    state_dict = {}
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
-        for key in f.keys():
-            state_dict[key] = f.get_tensor(key)
+        # Create a better weight iterator that filters out empty keys and handles prefixes
+        def weights_iterator():
+            for key in f.keys():
+                # Skip empty keys
+                if not key:
+                    continue
+                yield key, f.get_tensor(key)
 
-    # Create a better weight iterator that filters out empty keys and handles prefixes
-    def weights_iterator():
-        for name, tensor in state_dict.items():
-            # Skip empty keys
-            if not name:
-                continue
-            yield name, tensor
-
-    # Load weights
-    model.load_weights(weights_iterator())
+        # Load weights
+        model.load_weights(weights_iterator())
 
     # Process weights after loading (important for some models)
     model_config = llm.llm_engine.model_config
