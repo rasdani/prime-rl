@@ -323,6 +323,7 @@ def train(config: Config):
             seq_lens_batch = 0
             clip_seq_lens = 0
             sample_reward_batch = 0
+            kl_loss_batch = 0
 
             rewards_sum = torch.tensor(0.0)
             rewards_token_count = torch.tensor(0.0)
@@ -360,14 +361,16 @@ def train(config: Config):
                 entropy = entropy_loss(logits, loss_mask, config.temperature)
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
-                loss = loss / gradient_accumulation_steps
-                clip_ratio = clip_ratio / gradient_accumulation_steps
-
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
                 if config.kl_coef is not None:
                     kl = kl_penalty(original_logprobs, batch["ref_logprobs"].to("cuda"), loss_mask)
                     loss = loss + config.kl_coef * kl
+
+                loss = loss / gradient_accumulation_steps
+
+                clip_ratio = clip_ratio / gradient_accumulation_steps
+
+                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
@@ -376,13 +379,15 @@ def train(config: Config):
                 loss_batch += loss.detach().clone()
                 pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
                 entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
+                kl_loss_batch += (kl / gradient_accumulation_steps).detach().clone()
                 clip_ratio_batch += clip_ratio.detach().clone()
-                del loss, clip_ratio, pg_loss, entropy
+                del loss, clip_ratio, pg_loss, entropy, kl
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=entropy_loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
+            dist.all_reduce(tensor=kl_loss_batch, op=dist.ReduceOp.AVG)
 
             seq_lens_batch = seq_lens_batch / world_info.world_size
             dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
@@ -435,7 +440,7 @@ def train(config: Config):
             }
 
             if config.kl_coef is not None:
-                metrics["kl_loss"] = kl.item()
+                metrics["kl_loss"] = kl_loss_batch.item()
 
             log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
