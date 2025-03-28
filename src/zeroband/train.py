@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, FSDPModule
 import wandb
 import shardcast
 
@@ -138,6 +138,14 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
     return gpus_ids[world_info.local_rank]
 
 
+def reshard_full_model(model: ModelType):
+    """
+    This function is used to reshard the full model.
+    """
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.reshard()
+
 def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
         torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
@@ -214,29 +222,33 @@ def train(config: Config):
         time_start = time.time()
 
         # here we want to pre-compute the logprobs with the model before update
-        with torch.no_grad():
-            if config.on_policy_log_prob:
-                data = []
+        if config.on_policy_log_prob:
+            data = []
 
-                for rollout_step in range(config.optim.step_per_rollout):
-                    for grad_acc_step in range(gradient_accumulation_steps):
-                        batch = next(train_dataloader_iterator)
-                        input_ids = batch["input_ids"].to("cuda")
+            for rollout_step in range(config.optim.step_per_rollout):
+                for grad_acc_step in range(gradient_accumulation_steps):
+                    batch = next(train_dataloader_iterator)
+                    input_ids = batch["input_ids"].to("cuda")
+                    with torch.inference_mode():
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                        input_ids = input_ids[:, 1:]
-                        logits = logits[:, :-1, :] / config.temperature
+                    input_ids = input_ids[:, 1:]
+                    logits = logits[:, :-1, :] / config.temperature
 
-                        per_token_logps = selective_log_softmax(logits, input_ids)
-                        batch["logprobs"] = per_token_logps.to("cpu")
+                    per_token_logps = selective_log_softmax(logits, input_ids)
+                    batch["logprobs"] = per_token_logps.to("cpu")
 
-                        del logits, per_token_logps
-                        data.append(batch)
+                    del logits, per_token_logps
+                    data.append(batch)
 
-                logprobs_aware_iterator = iter(data)
-            else:
-                logprobs_aware_iterator = train_dataloader_iterator
+            logprobs_aware_iterator = iter(data)
+            
+            # see here https://github.com/pytorch/pytorch/issues/144289
+            # tl:dr lm head and embed are not sharded even if we put reshard_after_forward to True for the model
+            reshard_full_model(model)
+        else:
+            logprobs_aware_iterator = train_dataloader_iterator
 
         for rollout_step in range(config.optim.step_per_rollout):
             loss_batch = 0
