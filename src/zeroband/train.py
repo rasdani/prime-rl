@@ -358,15 +358,14 @@ def train(config: Config):
                 pg_loss, clip_ratio = grpo_loss(
                     logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
                 )
-                entropy = entropy_loss(logits, loss_mask, config.temperature)
+                pg_loss = pg_loss / gradient_accumulation_steps
+                entropy = entropy_loss(logits, loss_mask, config.temperature) / gradient_accumulation_steps
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
 
                 if config.kl_coef is not None:
-                    kl = kl_penalty(original_logprobs, batch["ref_logprobs"].to("cuda"), loss_mask)
+                    kl = kl_penalty(original_logprobs, batch["ref_logprobs"].to("cuda"), loss_mask) / gradient_accumulation_steps
                     loss = loss + config.kl_coef * kl
-
-                loss = loss / gradient_accumulation_steps
 
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
@@ -377,10 +376,10 @@ def train(config: Config):
                 # Backward
                 loss.backward()
                 loss_batch += loss.detach().clone()
-                pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
-                entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
-                kl_loss_batch += (kl / gradient_accumulation_steps).detach().clone()
-                clip_ratio_batch += clip_ratio.detach().clone()
+                pg_loss_batch += pg_loss
+                entropy_loss_batch += entropy
+                kl_loss_batch += kl
+                clip_ratio_batch += clip_ratio
                 del loss, clip_ratio, pg_loss, entropy, kl
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
