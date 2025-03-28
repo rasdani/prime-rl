@@ -243,11 +243,10 @@ def train(config: Config):
             pg_loss_batch = 0
             entropy_loss_batch = 0
             clip_ratio_batch = 0
-            seq_lens_batch = 0
-            sample_reward_batch = 0
-
-            rewards_sum = torch.tensor(0.0)
-            rewards_token_count = torch.tensor(0.0)
+            seq_lens_batch = torch.tensor(0.0, device="cuda")
+            sample_reward_batch = torch.tensor(0.0, device="cuda")
+            rewards_sum = torch.tensor(0.0, device="cuda")
+            rewards_token_count = torch.tensor(0.0, device="cuda")
 
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
@@ -286,7 +285,7 @@ def train(config: Config):
 
                 sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
-                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
+                del batch, logits, advantages, loss_mask, original_logprobs
 
                 # Backward
                 loss.backward()
@@ -296,20 +295,24 @@ def train(config: Config):
                 clip_ratio_batch += clip_ratio.detach().clone()
                 del loss, clip_ratio, pg_loss, entropy
 
+            print(f"\n\nBatch sequence lengths: {seq_lens_batch}\n\n")
+
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=entropy_loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
 
-            seq_lens_batch = seq_lens_batch / world_info.world_size
             dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
-
-            sample_reward_batch = sample_reward_batch / world_info.world_size
             dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
+            dist.all_reduce(tensor=rewards_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(tensor=rewards_token_count, op=dist.ReduceOp.SUM)
 
-            dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
+            seq_lens_batch = seq_lens_batch / world_info.world_size
+            sample_reward_batch = sample_reward_batch / world_info.world_size
             average_rewards = rewards_sum / rewards_token_count
+
+            print(f"\n\nallreduced: {seq_lens_batch}\ninput_ids: {input_ids}\n\n")
+            exit()
 
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
