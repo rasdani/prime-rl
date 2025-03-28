@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, FSDPModule
 import wandb
 import shardcast
 
@@ -92,9 +92,9 @@ class Config(BaseConfig):
     temperature: float = 0.6  # todo remove this and add this to the data
     grpo_epsilon: float = 0.2
     entropy_loss_coeff: float = 0.001
-
-    on_policy_log_prob: bool = False
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
+
+    kl_coef: float | None = None
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -150,6 +150,22 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
     return gpus_ids[world_info.local_rank]
 
 
+def offload_model_to_cpu(model: ModelType):
+    for param in model.parameters():
+        param.data = param.data.to("cpu")
+
+
+def wake_up_model_from_cpu(model: ModelType):
+    for param in model.parameters():
+        param.data = param.data.to("cuda")
+
+
+def reshard_module(model: torch.nn.Module):
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.reshard()
+
+
 def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
         torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
@@ -180,6 +196,18 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
+    if config.kl_coef is not None:
+        model_reference, _ = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
+
+    train_dataloader, prefetcher = get_dataloader(
+        tokenizer=tokenizer,
+        micro_batch_size=config.train.micro_bs,
+        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
+        data_config=config.data,
+    )
+
+    train_dataloader_iterator = iter(train_dataloader)
+
     if config.train.liger_qwen:
         apply_liger_kernel_to_qwen2(
             rope=True,
@@ -193,6 +221,8 @@ def train(config: Config):
         apply_ac_ckpt(model, num)
 
     apply_fsdp(model, config.train.reshard_after_forward)
+    if config.kl_coef is not None:
+        apply_fsdp(model_reference, config.train.reshard_after_forward)
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
@@ -205,6 +235,12 @@ def train(config: Config):
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
+
+        if config.kl_coef is not None:
+            model_reference = torch.compile(model_reference) if not TYPE_CHECKING else model_reference
+
+    if config.kl_coef is not None:
+        offload_model_to_cpu(model_reference)
 
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.resume)
@@ -232,30 +268,53 @@ def train(config: Config):
         time_start = time.time()
 
         # here we want to pre-compute the logprobs with the model before update
+
+        # so here we want to compute both on_policy log probs ands reference log probs
+        # we do both forward at the same time
+        # the reference model is loaded from cpu to gpu and offloaded after
+        # the memory peak should still be lower than training because we don't keep activation here
+
         with torch.no_grad():
-            if config.on_policy_log_prob:
-                data = []
+            if config.kl_coef is not None:
+                wake_up_model_from_cpu(model_reference)
 
-                for rollout_step in range(config.optim.step_per_rollout):
-                    for grad_acc_step in range(gradient_accumulation_steps):
-                        batch = next(train_dataloader_iterator)
-                        input_ids = batch["input_ids"].to("cuda")
+            data = []
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+            for rollout_step in range(config.optim.step_per_rollout):
+                for grad_acc_step in range(gradient_accumulation_steps):
+                    batch = next(train_dataloader_iterator)
+                    input_ids = batch["input_ids"].to("cuda")
 
-                        input_ids = input_ids[:, 1:]
+                    logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+
+                    input_ids_shifted = input_ids[:, 1:]
+                    logits = logits[:, :-1, :] / config.temperature
+
+                    per_token_logps = selective_log_softmax(logits, input_ids_shifted)
+                    batch["logprobs"] = per_token_logps.to("cpu")
+                    del logits, per_token_logps, input_ids_shifted
+
+                    if config.kl_coef is not None:
+                        logits = model_reference(input_ids=input_ids).logits.contiguous()
+
+                        input_ids_shifted = input_ids[:, 1:]
                         logits = logits[:, :-1, :] / config.temperature
 
-                        per_token_logps = selective_log_softmax(logits, input_ids)
-                        batch["logprobs"] = per_token_logps.to("cpu")
+                        per_token_logps = selective_log_softmax(logits, input_ids_shifted)
+                        batch["ref_logprobs"] = per_token_logps.to("cpu")
 
-                        del logits, per_token_logps
-                        data.append(batch)
+                        del logits, per_token_logps, input_ids_shifted
 
-                logprobs_aware_iterator = iter(data)
-            else:
-                logprobs_aware_iterator = train_dataloader_iterator
+                    del input_ids
 
+                    data.append(batch)
+
+            if config.kl_coef is not None:
+                # if we don't manually reshard the the embed and lm head will conflict with the offloading because they will stay unshard until backward which we never call
+                reshard_module(model_reference)
+                offload_model_to_cpu(model_reference)
+
+            logprobs_aware_iterator = iter(data)
         for rollout_step in range(config.optim.step_per_rollout):
             loss_batch = 0
             pg_loss_batch = 0
@@ -293,8 +352,6 @@ def train(config: Config):
                 advantages = batch["advantages"].to("cuda")
                 loss_mask = loss_mask.to("cuda")
                 original_logprobs = batch["logprobs"].to("cuda")
-                if not config.on_policy_log_prob:
-                    original_logprobs = original_logprobs[:, 1:]
 
                 # Loss
                 pg_loss, clip_ratio = grpo_loss(

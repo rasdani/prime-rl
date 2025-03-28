@@ -1,12 +1,15 @@
+import hashlib
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
 from zeroband.logger import get_logger
 import socket
 import time
 import torch
+from torch.distributed.tensor import DTensor
 from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
 )
+
 
 from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
@@ -141,3 +144,34 @@ class FakeTokenizer(object):
 
     def __len__(self):
         return self.vocab_size
+
+
+TENSOR_SIG_SAMPLE_SIZE = 100
+
+
+def get_tensor_signature(a: torch.Tensor | torch.nn.Parameter) -> str:
+    """
+    Get the tensor signature
+    """
+    while isinstance(a, torch.nn.Parameter):
+        a = a.data
+
+    if isinstance(a, DTensor):
+        a = a.full_tensor()
+
+    if a.numel() < TENSOR_SIG_SAMPLE_SIZE:
+        b = a.as_strided(size=(a.numel(),), stride=(1,))
+    else:
+        step_size = a.numel() // TENSOR_SIG_SAMPLE_SIZE
+        b = a.as_strided(size=(TENSOR_SIG_SAMPLE_SIZE,), stride=(step_size,))
+    element_str = "".join([f"{x:.3e}" for x in b])
+    element_hash = hashlib.md5(element_str.encode("utf-8")).hexdigest()
+    return f"{a.dtype}{a.shape}{a.stride()}<{element_hash}>"
+
+
+def model_hash(module: torch.nn.Module) -> str:
+    """
+    Get the model hash
+    """
+    state_dict_sig = {name: get_tensor_signature(param) for name, param in module.named_parameters()}
+    return hashlib.md5(str(state_dict_sig).encode("utf-8")).hexdigest()
