@@ -13,7 +13,7 @@ import shardcast
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
+from zeroband.training.loss import grpo_loss, kl_penalty, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
 
@@ -365,6 +365,10 @@ def train(config: Config):
 
                 sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
+                if config.kl_coef is not None:
+                    kl = kl_penalty(original_logprobs, batch["ref_logprobs"].to("cuda"), loss_mask)
+                    loss = loss + config.kl_coef * kl
+
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
@@ -429,6 +433,9 @@ def train(config: Config):
                 "sample_reward": sample_reward_batch.item(),
                 "clip_seq_lens": clip_seq_lens.item(),
             }
+
+            if config.kl_coef is not None:
+                metrics["kl_loss"] = kl.item()
 
             log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
