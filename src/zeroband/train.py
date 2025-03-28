@@ -262,7 +262,8 @@ def train(config: Config):
                 rewards_sum += rewards.sum()
                 rewards_token_count += rewards.numel()
 
-                seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
+                seq_lens = batch["seq_lens"].float().mean()
+                seq_lens_batch += seq_lens
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -280,9 +281,15 @@ def train(config: Config):
                 )
                 entropy = entropy_loss(logits, loss_mask, config.temperature)
 
+                prop_seq_len = seq_lens / seq_lens_batch
+                scaling_factor = gradient_accumulation_steps * prop_seq_len
+
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / gradient_accumulation_steps
                 clip_ratio = clip_ratio / gradient_accumulation_steps
+
+                loss = loss * scaling_factor
+                clip_ratio = clip_ratio * scaling_factor
 
                 sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
@@ -295,6 +302,8 @@ def train(config: Config):
                 entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
                 clip_ratio_batch += clip_ratio.detach().clone()
                 del loss, clip_ratio, pg_loss, entropy
+
+            seq_lens_batch = seq_lens_batch / gradient_accumulation_steps
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
