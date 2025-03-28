@@ -130,7 +130,7 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
-    # TODO: Qwen2 only, can also split on sequence parallel on dim one and shard lm_head and embeddings.
+    # Qwen2 only, no sequence parallel
 
     if config.more_tp:
         parallelize_module(
@@ -340,6 +340,12 @@ def train(config: Config):
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
+
+                print(f"\n[{dp_rank}][{tp_rank}]: {input_ids[:5]}\n")
+                dist.barrier()
+                print("-" * 20, end="")
+                dist.barrier()
+                print("")
 
                 rewards = batch["rewards"][loss_mask.bool()]
                 rewards_sum += rewards.sum().to("cuda")

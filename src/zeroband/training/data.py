@@ -37,11 +37,12 @@ class DataConfig(BaseConfig):
 class FakeTokenizedDataset(IterableDataset):
     """This is a dummy dataset that generates random sequences of length seq_len and vocab_size"""
 
-    def __init__(self, seq_len: int, vocab_size: int):
+    def __init__(self, seq_len: int, vocab_size: int, dp_rank: int):
         self.seq_len = seq_len
         self.vocab_size = vocab_size
         assert vocab_size > 3, "Vocab size must be greater than 3"
         self.step = 0
+        torch.manual_seed(dp_rank)
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
         while True:
@@ -389,7 +390,7 @@ def get_dataloader(
         path = data_config.local_dir
 
     if data_config.fake:
-        train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
+        train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer), dp_rank)
     else:
         train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout)
 
