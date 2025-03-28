@@ -302,13 +302,14 @@ def train(config: Config):
             dist.all_reduce(tensor=entropy_loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
 
-            dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
-            dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
-            dist.all_reduce(tensor=rewards_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(tensor=rewards_token_count, op=dist.ReduceOp.SUM)
-
             seq_lens_batch = seq_lens_batch / world_info.world_size
+            dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
+
             sample_reward_batch = sample_reward_batch / world_info.world_size
+            dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
+
+            dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
             average_rewards = rewards_sum / rewards_token_count
 
             print(f"\n\nallreduced: {seq_lens_batch}\ninput_ids: {input_ids}\n\n")
