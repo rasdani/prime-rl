@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING, Literal
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed._functional_collectives import all_reduce_inplace
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
@@ -222,7 +223,8 @@ def train(config: Config):
     )
 
     if config.ckpt.rollout_path is not None and world_info.rank == 0:
-        shardcast.initialize("./origin_data", max_distribution_folders=config.max_async_level)
+        origin_data_dir = os.environ.get("SHARDCAST_OUTPUT_DIR", "./origin_data")
+        shardcast.initialize(origin_data_dir, max_distribution_folders=config.max_async_level)
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
@@ -241,8 +243,10 @@ def train(config: Config):
     if config.train.dp == -1:
         assert world_info.world_size % config.train.tp == 0, "world size must be divisible by tp"
         config.train.dp = world_info.world_size // config.train.tp
-    #assert config.train.dp != 1, "Must apply fsdp for mixed precision model, and cannot build the device mesh without at least 2 fsdp dims. Set config.train.dp >= 2 or config.train.tp to half the world size or less."
-    
+
+    assert config.train.dp * config.train.tp == world_info.world_size, \
+        f"world size {world_info.world_size} must be equal to dp * tp, but got: dp={config.train.dp}, tp={config.train.tp}."
+
     world_mesh: DeviceMesh = init_device_mesh("cuda", mesh_shape=(config.train.dp, config.train.tp), mesh_dim_names=("fsdp", "tp"))
     logger.info(f"World device mesh: {world_mesh}")
 
@@ -319,28 +323,28 @@ def train(config: Config):
                 logprobs_aware_iterator = train_dataloader_iterator
 
         for rollout_step in range(config.optim.step_per_rollout):
-            loss_batch = torch.tensor(0.0, device="cuda")
-            pg_loss_batch = torch.tensor(0.0, device="cuda")
-            entropy_loss_batch = torch.tensor(0.0, device="cuda")
-            clip_ratio_batch = torch.tensor(0.0, device="cuda")
-            seq_lens_batch = torch.tensor(0.0, device="cuda")
-
+            loss_batch = 0
+            pg_loss_batch = 0
+            entropy_loss_batch = 0
+            clip_ratio_batch = 0
+            seq_lens_batch = torch.tensor(0.0, device="cuda") # On GPU for allreduce sum
+            sample_reward_batch = torch.tensor(0.0, device="cuda")
             rewards_sum = torch.tensor(0.0, device="cuda")
             rewards_token_count = torch.tensor(0.0, device="cuda")
 
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            for _ in range(gradient_accumulation_steps):
+            for _grad_acc_step in range(gradient_accumulation_steps):
                 # Load args
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
                 rewards = batch["rewards"][loss_mask.bool()]
-                rewards_sum += rewards.sum()
-                rewards_token_count += rewards.numel()
+                rewards_sum += rewards.sum().to("cuda")
 
+                rewards_token_count += rewards.numel()
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
                 # Forward
@@ -363,7 +367,10 @@ def train(config: Config):
                 loss = loss / gradient_accumulation_steps
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
-                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
+                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
+
+                del batch, logits, advantages, loss_mask, original_logprobs
+                # del input_ids
 
                 # Backward
                 loss.backward()
@@ -373,16 +380,19 @@ def train(config: Config):
                 clip_ratio_batch += clip_ratio.detach().clone()
                 del loss, clip_ratio, pg_loss, entropy
 
-            all_reduce_inplace(tensor=loss_batch, op="avg", group=dp_mesh)
-            all_reduce_inplace(tensor=pg_loss_batch, op="avg", group=dp_mesh)
-            all_reduce_inplace(tensor=entropy_loss_batch, op="avg", group=dp_mesh)
-            all_reduce_inplace(tensor=clip_ratio_batch, op="avg", group=dp_mesh)
+            dp_group = dp_mesh.get_group("fsdp") if config.train.dp > 1 else None
+            if dp_group is not None:
+                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=dp_group)
+                dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG, group=dp_group)
+                dist.all_reduce(tensor=entropy_loss_batch, op=dist.ReduceOp.AVG, group=dp_group)
+                dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG, group=dp_group)
 
-            seq_lens_batch = seq_lens_batch / world_info.world_size
-            all_reduce_inplace(tensor=seq_lens_batch, op="sum", group=dp_mesh)
-
-            all_reduce_inplace(rewards_sum, op="sum", group=dp_mesh)
-            all_reduce_inplace(rewards_token_count, op="sum", group=dp_mesh)
+                dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM, group=dp_group)
+                dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM, group=dp_group)
+                dist.all_reduce(tensor=rewards_sum, op=dist.ReduceOp.SUM, group=dp_group)
+                dist.all_reduce(tensor=rewards_token_count, op=dist.ReduceOp.SUM, group=dp_group)
+            seq_lens_batch = seq_lens_batch / config.train.dp
+            sample_reward_batch = sample_reward_batch / config.train.dp
             average_rewards = rewards_sum / rewards_token_count
 
             grad_norm = clip_grad_norm_(model.parameters(), 1.0, dp_mesh=dp_mesh, tp_mesh=tp_mesh)
@@ -418,8 +428,8 @@ def train(config: Config):
                 "average_rewards": average_rewards.item(),
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
+                "sample_reward": sample_reward_batch.item(),
             }
-
             log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
             del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch

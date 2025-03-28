@@ -51,7 +51,7 @@ def clip_grad_norm_(parameters: Iterable[torch.Tensor], max_norm: float, dp_mesh
             total_squared_sums += local_sum_sq
 
     for w in dp_work:
-        total_squared_sums += w.result()[0]
+        total_squared_sums += w.get_future().wait()[0]
 
     total_norm = torch.sqrt(total_squared_sums)
     if isinstance(total_norm, DTensor):

@@ -18,6 +18,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from zeroband.logger import get_logger
 from zeroband.training.data_prefetch import GCPPrefetcher
 from zeroband.training.world_info import get_world_info
+from zeroband.training import envs
 
 
 STABLE_FILE = "stable"
@@ -28,7 +29,7 @@ class DataConfig(BaseConfig):
     seq_length: int = 1024
     fake: bool = False
     num_workers: int = 2
-    timeout: float = 360
+    timeout: float = 3600
 
     local_dir: str = "/dev/shm/zeroband/data"  # only used if path is gcp
 
@@ -75,6 +76,9 @@ def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, ba
 
     while True:
         files = list(step_path.glob("*.parquet"))
+        if envs.TRAINING_ENABLE_ACCEPTED_CHECK:
+            accepted_flags = set(i.stem for i in step_path.glob("accepted/*.parquet"))
+            files = [i for i in files if i.stem in accepted_flags]
 
         rows = 0
         if len(files) > 0:

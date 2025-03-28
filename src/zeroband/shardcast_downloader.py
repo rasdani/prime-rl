@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import multiprocessing as mp
 
-POLL_INTERVAL = 10
+POLL_INTERVAL = 5
 logger = logging.getLogger(__name__)
 
 
@@ -25,6 +25,10 @@ def main(servers: list[str], output_dir: Path, versions_to_keep: int = -1, backl
     while True:
         # 1. Pick the version to download
         available_versions = sorted([int(x[1:]) for x in client.list_available_versions().keys()])
+        if not available_versions:
+            logger.warning("No versions available")
+            time.sleep(POLL_INTERVAL)
+            continue
         version = available_versions[-1]
         if version <= backlog_version:
             backlog_version = -1
