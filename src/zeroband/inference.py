@@ -23,7 +23,7 @@ from vllm.model_executor import SamplingMetadata
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName, name_to_hf_model
-from zeroband.rewards.math import compute_math_reward
+from zeroband.rewards.math import compute_math_reward, compute_tldr_reward
 
 from datasets import load_dataset
 import pyarrow as pa
@@ -44,9 +44,12 @@ class SamplingParamConfig(BaseConfig):
     logprobs: int = 0  # 0 mean 1 logprob here
 
 
+TypDataset = Literal["justus27/deepscaler-math-genesys-format", "trl-lib/tldr"]
+
+
 class Config(BaseConfig):
     name_model: ModelName = "150M"
-    dataset: str = "justus27/deepscaler-math-genesys-format"
+    dataset: TypDataset = "justus27/deepscaler-math-genesys-format"
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
@@ -194,20 +197,36 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     return llm
 
 
-async def compute_reward_for_output(output, verification_info):
+dataset_to_dataset = {
+    "justus27/deepscaler-math-genesys-format": compute_math_reward,
+    "trl-lib/tldr": compute_tldr_reward,
+}
+
+
+async def compute_reward_for_output(output, verification_info, fn_reward):
     loop = asyncio.get_running_loop()
     # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
-    return await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
+    return await loop.run_in_executor(get_process_executor(), fn_reward, output.text, verification_info)
 
 
-async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput], verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
-    parsed_infos = [json.loads(ver) for ver in verification_infos]
+async def compute_rewards_async(
+    generated_tokens: list[vllm.RequestOutput], verification_infos: list[str], dataset: TypDataset
+) -> dict[int, torch.FloatTensor]:
+    if dataset == "justus27/deepscaler-math-genesys-format":
+        parsed_infos = [json.loads(ver) for ver in verification_infos]
+    elif dataset == "trl-lib/tldr":
+        parsed_infos = verification_infos
+    else:
+        raise ValueError(f"Dataset {dataset} not supported")
+
     tasks = []
     mapping = []
 
+    fn_reward = dataset_to_dataset[dataset]
+
     for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
         for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info)))
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, fn_reward)))
             mapping.append(req_idx)
 
     all_results = await asyncio.gather(*tasks)
@@ -299,7 +318,7 @@ def inference(config: Config):
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
         messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
         # Assume verification_info is stored as a JSON string in the dataset.
-        verification_infos = [item["verification_info"] for item in batch]
+        verification_infos = [item.get("verification_info", None) for item in batch]
 
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
@@ -345,7 +364,7 @@ def inference(config: Config):
         toploc_cache.reset_cache()
 
         # Compute rewards asynchronously, grouped as a dictionary.
-        grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
+        grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos, config.dataset))
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
 
