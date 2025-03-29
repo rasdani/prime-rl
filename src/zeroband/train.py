@@ -225,7 +225,7 @@ def train(config: Config):
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                        input_ids = input_ids[:, 1:]
+                        input_ids = input_ids[:, :-1]
                         logits = logits[:, :-1, :] / config.temperature
 
                         per_token_logps = selective_log_softmax(logits, input_ids)
