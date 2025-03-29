@@ -90,6 +90,8 @@ class Config(BaseConfig):
     on_policy_log_prob: bool = False
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
+    loss_scale: float | None = None
+
     @model_validator(mode="after")
     def check_liger(self):
         if self.train.liger_qwen:
@@ -282,6 +284,10 @@ def train(config: Config):
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / gradient_accumulation_steps
+
+                if config.loss_scale is not None:
+                    loss = loss / config.loss_scale
+
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
                 sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
