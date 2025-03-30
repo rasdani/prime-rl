@@ -288,7 +288,7 @@ def train(config: Config):
                 )
                 entropy = entropy_loss(logits, loss_mask, config.temperature)
 
-                nornmalizer = batch["seq_lens"].sum() / batch["total_seq_lens"]
+                nornmalizer = batch["total_seq_lens"] / batch["seq_lens"].sum()
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / nornmalizer
