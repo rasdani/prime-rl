@@ -292,19 +292,19 @@ def train(config: Config):
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / nornmalizer
+                clip_ratio = clip_ratio / nornmalizer
+
+                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / nornmalizer
+
+                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
                 loss.backward()
                 loss_batch += loss.detach().clone()
-
-                with torch.no_grad():
-                    clip_ratio = clip_ratio / nornmalizer
-
-                    sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / nornmalizer
-
-                    pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
-                    entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
-                    clip_ratio_batch += clip_ratio.detach().clone()
+                pg_loss_batch += (pg_loss / nornmalizer).detach().clone()
+                entropy_loss_batch += (entropy / nornmalizer).detach().clone()
+                clip_ratio_batch += clip_ratio.detach().clone()
+                del loss, clip_ratio, pg_loss, entropy
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
