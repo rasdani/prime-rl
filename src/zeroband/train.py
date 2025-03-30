@@ -219,6 +219,8 @@ def train(config: Config):
                 data = []
 
                 for rollout_step in range(config.optim.step_per_rollout):
+                    total_seq_len = 0
+                    rollout_data = []
                     for grad_acc_step in range(gradient_accumulation_steps):
                         batch = next(train_dataloader_iterator)
                         input_ids = batch["input_ids"].to("cuda")
@@ -231,7 +233,13 @@ def train(config: Config):
                         per_token_logps = selective_log_softmax(logits, input_ids)
                         batch["logprobs"] = per_token_logps.to("cpu")
 
+                        total_seq_len += batch["seq_lens"].sum()
+
                         del logits, per_token_logps
+                        rollout_data.append(batch)
+
+                    for batch in rollout_data:
+                        batch["total_seq_lens"] = total_seq_len
                         data.append(batch)
 
                 logprobs_aware_iterator = iter(data)
@@ -280,21 +288,23 @@ def train(config: Config):
                 )
                 entropy = entropy_loss(logits, loss_mask, config.temperature)
 
+                nornmalizer = batch["seq_lens"].sum() / batch["total_seq_lens"]
+
                 loss = pg_loss - config.entropy_loss_coeff * entropy
-                loss = loss / gradient_accumulation_steps
-                clip_ratio = clip_ratio / gradient_accumulation_steps
-
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
-
-                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
+                loss = loss / nornmalizer
 
                 # Backward
                 loss.backward()
                 loss_batch += loss.detach().clone()
-                pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
-                entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
-                clip_ratio_batch += clip_ratio.detach().clone()
-                del loss, clip_ratio, pg_loss, entropy
+
+                with torch.no_grad():
+                    clip_ratio = clip_ratio / nornmalizer
+
+                    sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / nornmalizer
+
+                    pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
+                    entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
+                    clip_ratio_batch += clip_ratio.detach().clone()
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
             dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
