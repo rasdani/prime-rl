@@ -244,6 +244,7 @@ def train(config: Config):
             entropy_loss_batch = 0
             clip_ratio_batch = 0
             seq_lens_batch = 0
+            clip_seq_lens = 0
             sample_reward_batch = 0
 
             rewards_sum = torch.tensor(0.0)
@@ -263,6 +264,7 @@ def train(config: Config):
                 rewards_token_count += rewards.numel()
 
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
+                clip_seq_lens += (batch["seq_lens"] == config.data.seq_length).sum() / gradient_accumulation_steps
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -303,6 +305,9 @@ def train(config: Config):
 
             seq_lens_batch = seq_lens_batch / world_info.world_size
             dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
+
+            clip_seq_lens = clip_seq_lens / world_info.world_size
+            dist.all_reduce(tensor=clip_seq_lens, op=dist.ReduceOp.SUM)
 
             sample_reward_batch = sample_reward_batch / world_info.world_size
             dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
@@ -345,6 +350,7 @@ def train(config: Config):
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
                 "sample_reward": sample_reward_batch.item(),
+                "clip_seq_lens": clip_seq_lens.item(),
             }
 
             log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
