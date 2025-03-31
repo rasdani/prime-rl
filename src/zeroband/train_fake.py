@@ -214,14 +214,14 @@ def train(config: Config):
         batch = torch.load(f"save_data/data_to_save_0_{_grad_acc_step}.pt")
 
         input_ids = batch["inputs_ids"].to("cuda")
-        loss_mask = batch["attention_mask"]
+        attention_mask = batch["attention_mask"].to("cuda")
 
         # Forward
-        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids, attention_mask=attention_mask).logits.contiguous()
 
         # Gather args for grpo loss
         advantages = batch["advantages"].to("cuda")
-        loss_mask = loss_mask.to("cuda")
+        loss_mask = batch["attention_mask"].to("cuda")
         original_logprobs = batch["old_log_prob"].to("cuda")
 
         original_logprobs = original_logprobs[:, 1:]
@@ -259,8 +259,9 @@ def train(config: Config):
         losses[key] = torch.tensor(losses[key]).mean()
         verl_losses[key] = torch.tensor(verl_losses[key]).mean()
         diff = losses[key] - verl_losses[key]
+        rel_diff = (diff / (verl_losses[key] + 1e-8)).abs() * 100
 
-        logger.info(f"{key}: {diff.max()=}, {diff.min()=}, {diff.mean()=}")
+        logger.info(f"{key}: rel diff %: {rel_diff.mean():.2f}%, diff: {diff.mean():.2f}, max: {diff.max():.2f}, min: {diff.min():.2f}")
 
     # for key in losses:
     #     torch.testing.assert_close(losses[key], verl_losses[key])
