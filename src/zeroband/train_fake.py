@@ -221,7 +221,15 @@ def train(config: Config):
 
         # Forward
         logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids, attention_mask=attention_mask).logits.contiguous()
+        
 
+        # with torch.no_grad():
+        #     batch_logits = batch["logits"]
+        #     cpu_logits = logits.to("cpu")
+        #     mask = (input_ids != tokenizer.pad_token_id).to("cpu")
+        #     logits_diff = (cpu_logits - batch_logits)[mask]
+        #     logger.info(f"logits_diff: {logits_diff.abs().mean()}")
+        
         # Gather args for grpo loss
         advantages = batch["advantages"].to("cuda")
         loss_mask = batch["attention_mask"].to("cuda")
@@ -269,13 +277,13 @@ def train(config: Config):
 
         axes[idx, 0].plot(loss_tensor.numpy(), label="ours")
         axes[idx, 0].plot(verl_tensor.numpy(), label="verl")
-        axes[idx, 0].axhline(y=loss_tensor.mean(), color="r", linestyle="--", label="loss mean")
-        axes[idx, 0].axhline(y=verl_tensor.mean(), color="g", linestyle="--", label="verl mean")
+        axes[idx, 0].axhline(y=loss_tensor.mean(), color="r", linestyle="--", label=f"loss mean: {loss_tensor.mean():.4f}")
+        axes[idx, 0].axhline(y=verl_tensor.mean(), color="g", linestyle="--", label=f"verl mean: {verl_tensor.mean():.4f}")
         axes[idx, 0].set_title(f"{key} Values")
         axes[idx, 0].legend()
 
         axes[idx, 1].plot(rel_diffs.numpy(), label="rel diff")
-        axes[idx, 1].set_title(f"{key} Relative Difference")
+        axes[idx, 1].set_title(f"{key} Relative Difference (%)")
         axes[idx, 1].legend()
 
     plt.tight_layout()
