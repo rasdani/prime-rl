@@ -96,6 +96,12 @@ class Config(BaseConfig):
             assert "Qwen" in self.name_model, "train.liger_qwen can only be applied to Qwen2 models."
         return self
 
+    @model_validator(mode="after")
+    def check_ckpt_interval(self):
+        if self.ckpt.interval is not None:
+            assert self.ckpt.interval % self.optim.step_per_rollout == 0, "ckpt.interval must be divisible by train.step_per_rollout"
+        return self
+
 
 def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
     assert batch_size % world_info.world_size == 0
@@ -168,15 +174,6 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
-    train_dataloader, prefetcher = get_dataloader(
-        tokenizer=tokenizer,
-        micro_batch_size=config.train.micro_bs,
-        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
-        data_config=config.data,
-    )
-
-    train_dataloader_iterator = iter(train_dataloader)
-
     if config.train.liger_qwen:
         apply_liger_kernel_to_qwen2(
             rope=True,
@@ -204,7 +201,22 @@ def train(config: Config):
         model = torch.compile(model) if not TYPE_CHECKING else model
 
     if config.ckpt.resume:
-        load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
+        load_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.resume)
+
+    if training_progress.step % config.optim.step_per_rollout != 0:
+        logger.warning(
+            f"Resuming training from step {training_progress.step} seems invalid, as it should be multiple of train.step_per_rollout ({config.optim.step_per_rollout})"
+            f"training will continue as if it was from step {training_progress.step - training_progress.step % config.optim.step_per_rollout}"
+        )
+
+    train_dataloader, prefetcher = get_dataloader(
+        tokenizer=tokenizer,
+        micro_batch_size=config.train.micro_bs,
+        batch_size=config.optim.batch_size * config.optim.step_per_rollout,
+        data_config=config.data,
+        step_count_init=training_progress.step // config.optim.step_per_rollout,
+    )
+    train_dataloader_iterator = iter(train_dataloader)
 
     perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
 
@@ -387,7 +399,10 @@ def train(config: Config):
                 torch.cuda.memory._record_memory_history(enabled=False)
 
             if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
-                save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
+                logger.info(
+                    f"Saving checkpoint at step {training_progress.step}, rollout_step {training_progress.step // config.optim.step_per_rollout}"
+                )
+                save_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.path)
 
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
