@@ -1,4 +1,4 @@
-name_model = "Qwen32B"
+name_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 project = "qwen_32_rl"
 
 [train]
