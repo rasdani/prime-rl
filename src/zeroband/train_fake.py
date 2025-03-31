@@ -26,6 +26,7 @@ from pydantic import model_validator
 from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
+import matplotlib.pyplot as plt
 
 
 class AdamConfig(BaseConfig):
@@ -207,7 +208,7 @@ def train(config: Config):
     if config.train.memory_profile and world_info.rank == 0:
         torch.cuda.memory._record_memory_history()
 
-    for _grad_acc_step in range(32):
+    for _grad_acc_step in range(30):
         # Load args
         # batch = next(logprobs_aware_iterator)
 
@@ -255,14 +256,36 @@ def train(config: Config):
 
         del loss, clip_ratio, pg_loss, entropy
 
+    os.makedirs("plots", exist_ok=True)
+    fig, axes = plt.subplots(len(losses), 2, figsize=(12, 4 * len(losses)))
+
+    for idx, key in enumerate(losses):
+        loss_tensor = torch.tensor(losses[key])
+        verl_tensor = torch.tensor(verl_losses[key])
+        diffs = (loss_tensor - verl_tensor).abs()
+        rel_diffs = (diffs / (loss_tensor + 1e-8)) * 100
+
+        axes[idx, 0].plot(loss_tensor.numpy(), label="loss")
+        axes[idx, 0].plot(verl_tensor.numpy(), label="verl")
+        axes[idx, 0].set_title(f"{key} Values")
+        axes[idx, 0].legend()
+
+        axes[idx, 1].plot(rel_diffs.numpy(), label="rel diff")
+        axes[idx, 1].set_title(f"{key} Relative Difference")
+        axes[idx, 1].legend()
+
+    plt.tight_layout()
+    plt.savefig("plots/loss_comparison.png")
+    plt.close()
+
     for key in losses:
-        losses[key] = torch.tensor(losses[key]).mean()
-        verl_losses[key] = torch.tensor(verl_losses[key]).mean()
-        diff = losses[key] - verl_losses[key]
-        rel_diff = (diff / (losses[key] + 1e-8)).abs() * 100
+        loss_tensor = torch.tensor(losses[key])
+        verl_tensor = torch.tensor(verl_losses[key])
+        diffs = (loss_tensor - verl_tensor).abs()
+        rel_diffs = (diffs / (loss_tensor + 1e-8)) * 100
 
         logger.info(
-            f"{key}: relative_diff: {rel_diff:5f}, diff: {diff:5f}, max: {diff.max():5f}, min: {diff.min():5f}, mean_loss: {losses[key]:5f}, verl_loss: {verl_losses[key]:5f}"
+            f"{key}: mean_rel_diff: {rel_diffs.mean():5f}, mean_diff: {diffs.mean():5f}, max: {diffs.max():5f}, min: {diffs.min():5f}, mean_loss: {loss_tensor.mean():5f}, verl_loss: {verl_tensor.mean():5f}"
         )
 
     # for key in losses:
