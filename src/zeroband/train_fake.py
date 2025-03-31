@@ -1,3 +1,4 @@
+from collections import defaultdict
 import os
 from pathlib import Path
 import shutil
@@ -206,51 +207,14 @@ def train(config: Config):
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
 
-    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
-
-    previous_ckpt_rollout = []
-
-
 
     
     while True:
-        time_start = time.time()
 
-        # # here we want to pre-compute the logprobs with the model before update
-        # with torch.no_grad():
-        #     if config.on_policy_log_prob:
-        #         data = []
-
-        #         for rollout_step in range(config.optim.step_per_rollout):
-        #             for grad_acc_step in range(gradient_accumulation_steps):
-        #                 batch = next(train_dataloader_iterator)
-        #                 input_ids = batch["input_ids"].to("cuda")
-
-        #                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-
-        #                 input_ids = input_ids[:, 1:]
-        #                 logits = logits[:, :-1, :] / config.temperature
-
-        #                 per_token_logps = selective_log_softmax(logits, input_ids)
-        #                 batch["logprobs"] = per_token_logps.to("cpu")
-
-        #                 del logits, per_token_logps
-        #                 data.append(batch)
-
-        #         logprobs_aware_iterator = iter(data)
-        #     else:
-        #         logprobs_aware_iterator = train_dataloader_iterator
-
+        losses = defaultdict(list)
+        verl_losses = defaultdict(list)
+        
         for rollout_step in range(config.optim.step_per_rollout):
-            loss_batch = 0
-            pg_loss_batch = 0
-            entropy_loss_batch = 0
-            clip_ratio_batch = 0
-            seq_lens_batch = 0
-            sample_reward_batch = 0
-
-            rewards_sum = torch.tensor(0.0)
-            rewards_token_count = torch.tensor(0.0)
 
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
@@ -260,16 +224,10 @@ def train(config: Config):
                 # batch = next(logprobs_aware_iterator)
                 
                 batch = torch.load(f"save_data/data_to_save_{rollout_step}_{_grad_acc_step}.pt")
-                print(batch)
                 
                 input_ids = batch["inputs_ids"].to("cuda")
                 loss_mask = batch["attention_mask"]
 
-                rewards = batch["advantages"][loss_mask.bool()]
-                rewards_sum += rewards.sum()
-                rewards_token_count += rewards.numel()
-
-                seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -278,9 +236,17 @@ def train(config: Config):
                 advantages = batch["advantages"].to("cuda")
                 loss_mask = loss_mask.to("cuda")
                 original_logprobs = batch["old_log_prob"].to("cuda")
-                # if not config.on_policy_log_prob:
-                #     original_logprobs = original_logprobs[:, 1:]
-
+                
+                original_logprobs = original_logprobs[:, 1:]
+                
+                prompt_len = logits.shape[1] - advantages.shape[1]
+                
+                advantages = torch.cat([torch.zeros(advantages.shape[0], prompt_len).to("cuda"), advantages], dim=1)
+                original_logprobs = torch.cat([torch.zeros(original_logprobs.shape[0], prompt_len).to("cuda"), original_logprobs], dim=1)
+                
+                logger.info(f"HERE: logits: {logits.shape}, input_ids: {input_ids.shape}, advantages: {advantages.shape}, original_logprobs: {original_logprobs.shape}, loss_mask: {loss_mask.shape}")
+                
+                
                 # Loss
                 pg_loss, clip_ratio = grpo_loss(
                     logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
@@ -288,126 +254,35 @@ def train(config: Config):
                 entropy = entropy_loss(logits, loss_mask, config.temperature)
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
-                loss = loss / gradient_accumulation_steps
-                clip_ratio = clip_ratio / gradient_accumulation_steps
-
-                sample_reward_batch += batch["advantages"][:, 0].sum() / batch["advantages"].shape[0] / gradient_accumulation_steps
+                
+                
+                losses["loss"].append(loss.item())
+                losses["pg_loss"].append(pg_loss.item())
+                losses["entropy"].append(entropy.item())
+                losses["clip_ratio"].append(clip_ratio.item())
+                
+                verl_losses["loss"].append(batch["policy_loss"].item())
+                verl_losses["pg_loss"].append(batch["pg_loss"].item())
+                verl_losses["entropy"].append(batch["pg_clipfrac"].item())
+                verl_losses["clip_ratio"].append(batch["pg_clipfrac"].item())
 
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
-                # Backward
-                # loss.backward()
-                loss_batch += loss.detach().clone()
-                pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
-                entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
-                clip_ratio_batch += clip_ratio.detach().clone()
+        
                 del loss, clip_ratio, pg_loss, entropy
 
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
-            dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
-            dist.all_reduce(tensor=entropy_loss_batch, op=dist.ReduceOp.AVG)
-            dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
+                logger.info(f"{_grad_acc_step} / {gradient_accumulation_steps}, rollout_step: {rollout_step}/{config.optim.step_per_rollout}")
+        break
+        
+    for key in losses:
+        losses[key] = torch.tensor(losses[key]).mean()
+        verl_losses[key] = torch.tensor(verl_losses[key]).mean()
 
-            seq_lens_batch = seq_lens_batch / world_info.world_size
-            dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
+        
+    for key in losses:
+        torch.assert_close(losses[key], verl_losses[key])
+    
 
-            sample_reward_batch = sample_reward_batch / world_info.world_size
-            dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
-
-            dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
-            average_rewards = rewards_sum / rewards_token_count
-
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
-
-            # optimizer.step()
-            # scheduler.step()
-
-            # optimizer.zero_grad()
-
-            # logging
-            training_progress.step += 1
-            inner_lr = [group["lr"] for group in optimizer.param_groups][0]
-
-            # syncing loss across all data parallel rank within a nodes
-            new_tokens = config.data.seq_length * config.optim.batch_size
-            perf_counter.count_tokens(new_tokens)
-            training_progress.total_tokens += new_tokens
-
-            padding_proportion = (config.data.seq_length - seq_lens_batch.item() - 1) / config.data.seq_length
-
-            metrics = {
-                "Loss": loss_batch.item(),
-                "pg_loss": pg_loss_batch.item(),
-                "entropy_loss": entropy_loss_batch.item(),
-                "step": training_progress.step,
-                "rollout_step": rollout_step,
-                "seq_lens": seq_lens_batch.item(),
-                "inner_lr": inner_lr,
-                "Perplexity": torch.exp(loss_batch).item(),
-                "total_tokens": training_progress.total_tokens,
-                "time": time.time(),
-                "grad_norm": grad_norm.item(),
-                "average_rewards": average_rewards.item(),
-                "clip_ratio": clip_ratio_batch.item(),
-                "padding_proportion": padding_proportion,
-                "sample_reward": sample_reward_batch.item(),
-            }
-
-            log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
-
-            del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
-
-            tokens_per_second = perf_counter.get_tokens_per_second()
-            if tokens_per_second is not None:
-                metrics["tokens_per_second"] = tokens_per_second
-                metrics["mfu"] = perf_counter.get_mfu()
-                log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
-
-            if world_info.rank == 0 and config.wandb:
-                wandb.log(metrics)
-
-            logger.info(log)
-
-            # Lets do this first so that clients can start downloading as soon as possible
-            if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
-                rollout_step = training_progress.step // config.optim.step_per_rollout
-                path = Path(config.ckpt.rollout_path) / f"step_{rollout_step}"
-                previous_ckpt_rollout.append(path)
-                safetensor_path = save_ckpt_for_rollout(model, path)
-                if world_info.rank == 0:
-                    logger.info(f"Broadcasting {safetensor_path}")
-                    shardcast.broadcast(safetensor_path)  # TODO: Is this blocking?
-
-                if len(previous_ckpt_rollout) > config.max_async_level:
-                    path_to_delete = previous_ckpt_rollout.pop(0)
-                    if path_to_delete.exists():
-                        logger.info(f"Removing past rollout ckpt at {path_to_delete}")
-                        shutil.rmtree(path_to_delete, ignore_errors=True)
-
-            if config.train.memory_profile and (training_progress.step == 2) and world_info.rank == 0:
-                logger.info("Dumping memory snapshot.")
-                pickle_path: str = config.train.memory_profile
-                if not pickle_path.endswith(".pickle"):
-                    pickle_path += ".pickle"
-                torch.cuda.memory._dump_snapshot(pickle_path)
-                torch.cuda.memory._record_memory_history(enabled=False)
-
-            if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
-                save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
-
-        logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
-        if world_info.rank == 0 and config.wandb:
-            wandb.log({"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time.time() - time_start})
-
-        if training_progress.step >= config.optim.total_steps:
-            break
-
-    if prefetcher is not None:
-        prefetcher.shutdown()
-
-    logger.info("Training finished, exiting ...")
-    logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
 
 
 if __name__ == "__main__":
