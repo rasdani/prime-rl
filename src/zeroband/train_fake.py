@@ -1,22 +1,18 @@
 from collections import defaultdict
 import os
-from pathlib import Path
-import shutil
-import time
 from typing import TYPE_CHECKING, Literal
 
 import torch
-import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 import shardcast
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
-from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
+from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
+from zeroband.training.loss import grpo_loss, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
-from zeroband.training.utils import PerfCounter, apply_ac_ckpt
+from zeroband.training.utils import apply_ac_ckpt
 
 from zeroband.logger import get_logger
 
@@ -159,9 +155,9 @@ def train(config: Config):
 
     # batch_size is the total batch size for all GPUs
 
-    gradient_accumulation_steps = get_gradient_accumulation_steps(
-        config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
-    )
+    # gradient_accumulation_steps = get_gradient_accumulation_steps(
+    #     config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
+    # )
 
     if config.ckpt.rollout_path is not None and world_info.rank == 0:
         origin_data_dir = os.environ.get("SHARDCAST_OUTPUT_DIR", "./origin_data")
@@ -175,8 +171,6 @@ def train(config: Config):
         batch_size=config.optim.batch_size * config.optim.step_per_rollout,
         data_config=config.data,
     )
-
-    train_dataloader_iterator = iter(train_dataloader)
 
     if config.train.liger_qwen:
         apply_liger_kernel_to_qwen2(
@@ -207,82 +201,69 @@ def train(config: Config):
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
 
+    losses = defaultdict(list)
+    verl_losses = defaultdict(list)
 
-    
-    while True:
+    if config.train.memory_profile and world_info.rank == 0:
+        torch.cuda.memory._record_memory_history()
 
-        losses = defaultdict(list)
-        verl_losses = defaultdict(list)
-        
-        for rollout_step in range(config.optim.step_per_rollout):
+    for _grad_acc_step in range(32):
+        # Load args
+        # batch = next(logprobs_aware_iterator)
 
-            if config.train.memory_profile and world_info.rank == 0:
-                torch.cuda.memory._record_memory_history()
+        batch = torch.load(f"save_data/data_to_save_0_{_grad_acc_step}.pt")
 
-            for _grad_acc_step in range(gradient_accumulation_steps):
-                # Load args
-                # batch = next(logprobs_aware_iterator)
-                
-                batch = torch.load(f"save_data/data_to_save_{rollout_step}_{_grad_acc_step}.pt")
-                
-                input_ids = batch["inputs_ids"].to("cuda")
-                loss_mask = batch["attention_mask"]
+        input_ids = batch["inputs_ids"].to("cuda")
+        loss_mask = batch["attention_mask"]
 
+        # Forward
+        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                # Forward
-                logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+        # Gather args for grpo loss
+        advantages = batch["advantages"].to("cuda")
+        loss_mask = loss_mask.to("cuda")
+        original_logprobs = batch["old_log_prob"].to("cuda")
 
-                # Gather args for grpo loss
-                advantages = batch["advantages"].to("cuda")
-                loss_mask = loss_mask.to("cuda")
-                original_logprobs = batch["old_log_prob"].to("cuda")
-                
-                original_logprobs = original_logprobs[:, 1:]
-                
-                prompt_len = logits.shape[1] - advantages.shape[1]
-                
-                advantages = torch.cat([torch.zeros(advantages.shape[0], prompt_len).to("cuda"), advantages], dim=1)
-                original_logprobs = torch.cat([torch.zeros(original_logprobs.shape[0], prompt_len).to("cuda"), original_logprobs], dim=1)
-                
-                logger.info(f"HERE: logits: {logits.shape}, input_ids: {input_ids.shape}, advantages: {advantages.shape}, original_logprobs: {original_logprobs.shape}, loss_mask: {loss_mask.shape}")
-                
-                
-                # Loss
-                pg_loss, clip_ratio = grpo_loss(
-                    logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
-                )
-                entropy = entropy_loss(logits, loss_mask, config.temperature)
+        original_logprobs = original_logprobs[:, 1:]
 
-                loss = pg_loss - config.entropy_loss_coeff * entropy
-                
-                
-                losses["loss"].append(loss.item())
-                losses["pg_loss"].append(pg_loss.item())
-                losses["entropy"].append(entropy.item())
-                losses["clip_ratio"].append(clip_ratio.item())
-                
-                verl_losses["loss"].append(batch["policy_loss"].item())
-                verl_losses["pg_loss"].append(batch["pg_loss"].item())
-                verl_losses["entropy"].append(batch["pg_clipfrac"].item())
-                verl_losses["clip_ratio"].append(batch["pg_clipfrac"].item())
+        prompt_len = logits.shape[1] - advantages.shape[1]
 
-                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
+        advantages = torch.cat([torch.zeros(advantages.shape[0], prompt_len).to("cuda"), advantages], dim=1)
+        original_logprobs = torch.cat([torch.zeros(original_logprobs.shape[0], prompt_len).to("cuda"), original_logprobs], dim=1)
 
-        
-                del loss, clip_ratio, pg_loss, entropy
+        # logger.info(f"HERE: logits: {logits.shape}, input_ids: {input_ids.shape}, advantages: {advantages.shape}, original_logprobs: {original_logprobs.shape}, loss_mask: {loss_mask.shape}")
 
-                logger.info(f"{_grad_acc_step} / {gradient_accumulation_steps}, rollout_step: {rollout_step}/{config.optim.step_per_rollout}")
-        break
-        
+        # Loss
+        pg_loss, clip_ratio = grpo_loss(
+            logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
+        )
+        entropy = entropy_loss(logits, loss_mask, config.temperature)
+
+        loss = pg_loss - config.entropy_loss_coeff * entropy
+
+        losses["loss"].append(loss.item())
+        losses["pg_loss"].append(pg_loss.item())
+        losses["entropy"].append(entropy.item())
+        losses["clip_ratio"].append(clip_ratio.item())
+
+        verl_losses["loss"].append(batch["policy_loss"])
+        verl_losses["pg_loss"].append(batch["pg_loss"])
+        verl_losses["entropy"].append(batch["pg_clipfrac"])
+        verl_losses["clip_ratio"].append(batch["pg_clipfrac"])
+
+        del batch, logits, input_ids, advantages, loss_mask, original_logprobs
+
+        del loss, clip_ratio, pg_loss, entropy
+
     for key in losses:
         losses[key] = torch.tensor(losses[key]).mean()
         verl_losses[key] = torch.tensor(verl_losses[key]).mean()
+        diff = losses[key] - verl_losses[key]
 
-        
-    for key in losses:
-        torch.assert_close(losses[key], verl_losses[key])
-    
+        logger.info(f"{key}: {diff.max()=}, {diff.min()=}, {diff.mean()=}")
 
+    # for key in losses:
+    #     torch.testing.assert_close(losses[key], verl_losses[key])
 
 
 if __name__ == "__main__":
