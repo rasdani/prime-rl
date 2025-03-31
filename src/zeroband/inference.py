@@ -72,6 +72,8 @@ class Config(BaseConfig):
 
     dtype: Literal["fp32", "bf16"] = "bf16"
 
+    ckpt_start_path: str | None = None
+
     @model_validator(mode="after")
     def validate_step_batch_size(self):
         assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
@@ -271,8 +273,18 @@ def inference(config: Config):
     if not toploc_cache.disable:
         model.logits_processor.register_forward_pre_hook(logits_processor_hook)
 
-    ckpt_step = 0
-    real_step = 0
+    if config.ckpt_start_path is not None:
+        path = Path(config.ckpt_start_path)
+        path_file = path / "model.safetensors"
+        if not path_file.exists():
+            raise FileNotFoundError(f"Checkpoint file {path_file} does not exist")
+        ckpt_step = int(path.name.split("_")[-1])
+        logger.info(f"Resuming from step {ckpt_step} at {path_file}")
+        llm = reload_model_weights(llm, path_file)
+        real_step = ckpt_step
+    else:
+        ckpt_step = 0
+        real_step = 0
 
     total_problems = 0
     total_tokens = 0
