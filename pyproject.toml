@@ -26,6 +26,7 @@ dependencies = [
     "liger_kernel",
     "google-cloud-storage",
     "shardcast >= 0.1.5",
+    "matplotlib",
 ] 
 
 [build-system]
