@@ -71,7 +71,7 @@ class TrainConfig(BaseConfig):
 
     dp: int = -1 # World size by default, otherwise specifiy with tp
     tp: int = 1
-    more_tp: bool = False
+    more_tp: bool = False # Also TP shard the embedding and lm_head
 
 
 class CkptConfig(BaseConfig):
@@ -283,9 +283,6 @@ def train(config: Config):
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
         pass
-
-    model = model.to("cuda")
-
 
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
