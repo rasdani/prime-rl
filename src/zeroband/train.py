@@ -37,7 +37,6 @@ from zeroband.training.world_info import WorldInfo, get_world_info
 
 from pydantic import model_validator
 
-from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
 
@@ -228,8 +227,11 @@ def train(config: Config):
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
     if config.train.liger_qwen:
+        from liger_kernel.transformers import apply_liger_kernel_to_qwen2
         apply_liger_kernel_to_qwen2(
             rope=True,
+            cross_entropy=False,
+            fused_linear_cross_entropy=False,
             rms_norm=True,
             swiglu=True,
             model=model,
