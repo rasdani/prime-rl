@@ -209,6 +209,9 @@ def train(config: Config):
     if config.train.memory_profile and world_info.rank == 0:
         torch.cuda.memory._record_memory_history()
 
+    seq_lens_batch = []
+    advantages_batch = []
+
     for _grad_acc_step in range(32):
         # Load args
         # batch = next(logprobs_aware_iterator)
@@ -221,7 +224,8 @@ def train(config: Config):
 
         # Forward
         logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids, attention_mask=attention_mask).logits.contiguous()
-        
+
+        seq_lens = (attention_mask != 0).sum(dim=1)
 
         # with torch.no_grad():
         #     batch_logits = batch["logits"]
@@ -229,7 +233,7 @@ def train(config: Config):
         #     mask = (input_ids != tokenizer.pad_token_id).to("cpu")
         #     logits_diff = (cpu_logits - batch_logits)[mask]
         #     logger.info(f"logits_diff: {logits_diff.abs().mean()}")
-        
+
         # Gather args for grpo loss
         advantages = batch["advantages"].to("cuda")
         loss_mask = batch["attention_mask"].to("cuda")
@@ -238,6 +242,10 @@ def train(config: Config):
         original_logprobs = original_logprobs[:, 1:]
 
         prompt_len = logits.shape[1] - advantages.shape[1]
+
+        for i in range(len(seq_lens)):
+            seq_lens_batch.append(seq_lens[i].item())
+            advantages_batch.append(advantages[i, 0].item())
 
         advantages = torch.cat([torch.zeros(advantages.shape[0], prompt_len).to("cuda"), advantages], dim=1)
         original_logprobs = torch.cat([torch.zeros(original_logprobs.shape[0], prompt_len).to("cuda"), original_logprobs], dim=1)
@@ -285,6 +293,14 @@ def train(config: Config):
         axes[idx, 1].plot(rel_diffs.numpy(), label="rel diff")
         axes[idx, 1].set_title(f"{key} Relative Difference (%)")
         axes[idx, 1].legend()
+
+    plt.figure(figsize=(8, 6))
+    plt.scatter(seq_lens_batch, advantages_batch)
+    plt.xlabel("Sequence Length")
+    plt.ylabel("Advantages")
+    plt.title("Sequence Length vs Advantages")
+    plt.savefig("plots/seq_len_vs_advantages.png")
+    plt.close()
 
     plt.tight_layout()
     plt.savefig("plots/loss_comparison.png")
