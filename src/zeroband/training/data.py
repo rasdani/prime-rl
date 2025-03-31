@@ -37,7 +37,7 @@ class DataConfig(BaseConfig):
 class FakeTokenizedDataset(IterableDataset):
     """This is a dummy dataset that generates random sequences of length seq_len and vocab_size"""
 
-    def __init__(self, seq_len: int, vocab_size: int, dp_rank: int):
+    def __init__(self, seq_len: int, vocab_size: int, dp_rank: int, dp_world_size: int):
         self.seq_len = seq_len
         self.vocab_size = vocab_size
         assert vocab_size > 3, "Vocab size must be greater than 3"
@@ -150,11 +150,15 @@ class ParquetDataset(IterableDataset):
         batch_size: int,
         timeout: float,
         pq_read_bs: int = 64,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
     ):
         self._logger = get_logger()
         self._path = path
         self._batch_size = batch_size
         self._pq_read_bs = pq_read_bs
+        self.dp_rank = dp_rank
+        self.dp_world_size = dp_world_size
 
         self._world_info = get_world_info()
 
@@ -213,8 +217,8 @@ class ParquetDataset(IterableDataset):
                         counter += 1
                         if not _should_skip_index(
                             index=counter,
-                            world_size=self._world_info.world_size,
-                            rank=self._world_info.rank,
+                            world_size=self.dp_world_size,
+                            rank=self.dp_rank,
                             num_workers=num_workers,
                             workers_id=worker_id,
                         ):
@@ -390,9 +394,9 @@ def get_dataloader(
         path = data_config.local_dir
 
     if data_config.fake:
-        train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer), dp_rank)
+        train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer), dp_rank=dp_rank, dp_world_size=dp_world_size)
     else:
-        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout)
+        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, dp_rank=dp_rank, dp_world_size=dp_world_size)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
     return ParallelAwareDataloader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn, dp_rank=dp_rank, dp_world_size=dp_world_size), prefetcher
