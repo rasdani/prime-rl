@@ -8,7 +8,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
-
 import wandb
 import shardcast
 
@@ -16,7 +15,7 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     RowwiseParallel,
-    # PrepareModuleInput, # TODO
+    # PrepareModuleInput,
     # SequenceParallel,
 )
 from torch.distributed.tensor.placement_types import Replicate, Shard
@@ -256,12 +255,12 @@ def train(config: Config):
     logger.info(f"tp_rank: {tp_rank}, tp_mesh: {tp_mesh}")
     if config.train.tp > 1:
         apply_tp(model, config.train, device_mesh=world_mesh["tp"])
-    
+
     dp_mesh = world_mesh["fsdp"]
     dp_rank = dp_mesh.get_local_rank() if config.train.dp > 1 else 0
     logger.info(f"dp_rank: {dp_rank}, dp_mesh: {dp_mesh}")
     apply_fsdp(model, config.train.reshard_after_forward, device_mesh=dp_mesh) # Always enabled for Mixed Precision
-    
+
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
@@ -341,12 +340,6 @@ def train(config: Config):
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
-
-                print(f"\n[{dp_rank}][{tp_rank}]: {input_ids[:5]}\n")
-                dist.barrier()
-                print("-" * 20, end="")
-                dist.barrier()
-                print("")
 
                 rewards = batch["rewards"][loss_mask.bool()]
                 rewards_sum += rewards.sum().to("cuda")
@@ -436,6 +429,7 @@ def train(config: Config):
                 "padding_proportion": padding_proportion,
                 "sample_reward": sample_reward_batch.item(),
             }
+
             log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
 
             del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch

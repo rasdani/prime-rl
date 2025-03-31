@@ -156,13 +156,13 @@ class PerfCounter:
     def get_tokens_per_second(self) -> float | None:
         if len(self.tokens) < 2:
             return None
-        return sum(self.tokens[1:]) / (self.times[-1] - self.times[0])
+        return sum(self.tokens[1:]) / (self.times[-1] - self.times[0]) / self.tp_world_size
 
     def get_mfu(self) -> float | None:
         tokens_per_second = self.get_tokens_per_second()
         if tokens_per_second is None:
             return None
-        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops / self._world_info.world_size / self.tp_world_size
+        return 100 * self.num_flop_per_token * tokens_per_second / self.gpu_peak_flops / self._world_info.world_size
 
 
 def get_random_available_port_list(num_port):
