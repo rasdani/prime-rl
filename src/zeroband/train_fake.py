@@ -209,7 +209,7 @@ def train(config: Config):
     if config.train.memory_profile and world_info.rank == 0:
         torch.cuda.memory._record_memory_history()
 
-    for _grad_acc_step in range(30):
+    for _grad_acc_step in range(32):
         # Load args
         # batch = next(logprobs_aware_iterator)
 
@@ -267,8 +267,10 @@ def train(config: Config):
         diffs = (loss_tensor - verl_tensor).abs()
         rel_diffs = (diffs / (loss_tensor + 1e-8)) * 100
 
-        axes[idx, 0].plot(loss_tensor.numpy(), label="loss")
+        axes[idx, 0].plot(loss_tensor.numpy(), label="ours")
         axes[idx, 0].plot(verl_tensor.numpy(), label="verl")
+        axes[idx, 0].axhline(y=loss_tensor.mean(), color="r", linestyle="--", label="loss mean")
+        axes[idx, 0].axhline(y=verl_tensor.mean(), color="g", linestyle="--", label="verl mean")
         axes[idx, 0].set_title(f"{key} Values")
         axes[idx, 0].legend()
 
