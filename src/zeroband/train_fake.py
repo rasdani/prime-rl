@@ -248,7 +248,7 @@ def train(config: Config):
 
         verl_losses["loss"].append(batch["policy_loss"])
         verl_losses["pg_loss"].append(batch["pg_loss"])
-        verl_losses["entropy"].append(batch["pg_clipfrac"])
+        verl_losses["entropy"].append(batch["entropy_loss"])
         verl_losses["clip_ratio"].append(batch["pg_clipfrac"])
 
         del batch, logits, input_ids, advantages, loss_mask, original_logprobs
@@ -259,9 +259,11 @@ def train(config: Config):
         losses[key] = torch.tensor(losses[key]).mean()
         verl_losses[key] = torch.tensor(verl_losses[key]).mean()
         diff = losses[key] - verl_losses[key]
-        rel_diff = (diff / (verl_losses[key] + 1e-8)).abs() * 100
+        rel_diff = (diff / (losses[key] + 1e-8)).abs() * 100
 
-        logger.info(f"{key}: rel diff %: {rel_diff.mean():.2f}%, diff: {diff.mean():.2f}, max: {diff.max():.2f}, min: {diff.min():.2f}")
+        logger.info(
+            f"{key}: relative_diff: {rel_diff:5f}, diff: {diff:5f}, max: {diff.max():5f}, min: {diff.min():5f}, mean_loss: {losses[key]:5f}, verl_loss: {verl_losses[key]:5f}"
+        )
 
     # for key in losses:
     #     torch.testing.assert_close(losses[key], verl_losses[key])
