@@ -283,6 +283,7 @@ def inference(config: Config):
         )
         if config.rollout_path is not None and real_step - ckpt_step > config.async_level:
             ckpt_step += 1
+            attempt_count = 0
             while True:
                 stable_file = Path(config.rollout_path) / f"step_{ckpt_step}/stable"
                 if stable_file.exists():
@@ -292,8 +293,10 @@ def inference(config: Config):
                     total_tokens = 0
                     logger.info(f"Reloaded model weights from {config.rollout_path} ckpt {ckpt_step}")
                     break
-                logger.info(f"No stable file found at {stable_file}, waiting for new checkpoint")
+                if attempt_count % 30 == 0:
+                    logger.info(f"No stable file found at {stable_file}, waiting for new checkpoint")
                 time.sleep(1)
+                attempt_count += 1
 
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
