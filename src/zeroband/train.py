@@ -74,7 +74,7 @@ class TrainConfig(BaseConfig):
 
     dp: int = -1 # World size by default, otherwise specifiy with tp
     tp: int = 1
-    more_tp: bool = True
+    more_tp: bool = False
 
 
 class CkptConfig(BaseConfig):
@@ -160,13 +160,13 @@ def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
             transformer_block,
             device_mesh,
             {
-                'layers.*.self_attn.q_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.self_attn.k_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.self_attn.v_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.self_attn.o_proj':   RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
-                'layers.*.mlp.gate_proj':      ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.mlp.up_proj':        ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'layers.*.mlp.down_proj':      RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
+                'self_attn.q_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'self_attn.k_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'self_attn.v_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'self_attn.o_proj':   RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
+                'mlp.gate_proj':      ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'mlp.up_proj':        ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+                'mlp.down_proj':      RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
             }
         )
 
