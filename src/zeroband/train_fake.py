@@ -27,6 +27,7 @@ from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 
 class AdamConfig(BaseConfig):
@@ -212,7 +213,8 @@ def train(config: Config):
         # Load args
         # batch = next(logprobs_aware_iterator)
 
-        batch = torch.load(f"save_data/data_to_save_0_{_grad_acc_step}.pt")
+        path = Path(config.data.path) / f"data_to_save_0_{_grad_acc_step}.pt"
+        batch = torch.load(path)
 
         input_ids = batch["inputs_ids"].to("cuda")
         attention_mask = batch["attention_mask"].to("cuda")
