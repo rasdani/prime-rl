@@ -314,7 +314,7 @@ def train(config: Config):
                         per_token_logps = selective_log_softmax(logits, input_ids)
                         batch["logprobs"] = per_token_logps.to("cpu")
 
-                        del logits, per_token_logps
+                        del input_ids, logits, per_token_logps
                         data.append(batch)
 
                 logprobs_aware_iterator = iter(data)
@@ -374,8 +374,7 @@ def train(config: Config):
 
                 sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
-                del batch, logits, advantages, loss_mask, original_logprobs
-                # del input_ids
+                del batch, input_ids, logits, advantages, loss_mask, original_logprobs
 
                 # Backward
                 loss.backward()
