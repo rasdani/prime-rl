@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision
 import wandb
 import shardcast
 
@@ -127,16 +127,13 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_fsdp(model: ModelType, reshard_after_forward: bool):
-    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
+def apply_fsdp(model: ModelType) -> ModelType:
+    model = model.to("cuda")
+    mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
 
-    for layer_id, transformer_block in enumerate(model.model.layers):
-        if reshard_after_forward:
-            layer_reshard_after_forward = layer_id < len(model.model.layers) - 1
-        else:
-            layer_reshard_after_forward = False
-        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward)
-    fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
+    model = FSDP(model, mixed_precision=mixed_precision)
+
+    return model
 
 
 def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> int:
@@ -153,6 +150,8 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
 
 def train(config: Config):
+    dist.init_process_group()
+
     if "ZERO_BAND_DEV" not in os.environ:
         torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
         torch_log.setLevel(logging.CRITICAL)  #
@@ -194,7 +193,7 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    apply_fsdp(model, config.train.reshard_after_forward)
+    model = apply_fsdp(model)
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 
@@ -240,18 +239,19 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     for grad_acc_step in range(gradient_accumulation_steps):
-                        batch = next(train_dataloader_iterator)
-                        input_ids = batch["input_ids"].to("cuda")
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                            batch = next(train_dataloader_iterator)
+                            input_ids = batch["input_ids"].to("cuda")
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                            logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                        input_ids = input_ids[:, 1:]
-                        logits = logits[:, :-1, :] / config.temperature
+                            input_ids = input_ids[:, 1:]
+                            logits = logits[:, :-1, :] / config.temperature
 
-                        per_token_logps = selective_log_softmax(logits, input_ids)
-                        batch["logprobs"] = per_token_logps.to("cpu")
+                            per_token_logps = selective_log_softmax(logits, input_ids)
+                            batch["logprobs"] = per_token_logps.to("cpu")
 
-                        del logits, per_token_logps
+                            del logits, per_token_logps
                         data.append(batch)
 
                 logprobs_aware_iterator = iter(data)
@@ -288,36 +288,37 @@ def train(config: Config):
                     (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / gradient_accumulation_steps
                 )
 
-                # Forward
-                logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    # Forward
+                    logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                # Gather args for grpo loss
-                advantages = batch["advantages"].to("cuda")
-                loss_mask = loss_mask.to("cuda")
-                original_logprobs = batch["logprobs"].to("cuda")
-                if not config.on_policy_log_prob:
-                    original_logprobs = original_logprobs[:, 1:]
+                    # Gather args for grpo loss
+                    advantages = batch["advantages"].to("cuda")
+                    loss_mask = loss_mask.to("cuda")
+                    original_logprobs = batch["logprobs"].to("cuda")
+                    if not config.on_policy_log_prob:
+                        original_logprobs = original_logprobs[:, 1:]
 
-                # Loss
-                pg_loss, clip_ratio = grpo_loss(
-                    logits,
-                    input_ids,
-                    advantages,
-                    original_logprobs,
-                    loss_mask,
-                    config.temperature,
-                    config.grpo_epsilon,
-                    config.masked_mean_axis,
-                )
-                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
+                    # Loss
+                    pg_loss, clip_ratio = grpo_loss(
+                        logits,
+                        input_ids,
+                        advantages,
+                        original_logprobs,
+                        loss_mask,
+                        config.temperature,
+                        config.grpo_epsilon,
+                        config.masked_mean_axis,
+                    )
+                    entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
-                loss = pg_loss - config.entropy_loss_coeff * entropy
-                loss = loss / gradient_accumulation_steps
-                clip_ratio = clip_ratio / gradient_accumulation_steps
+                    loss = pg_loss - config.entropy_loss_coeff * entropy
+                    loss = loss / gradient_accumulation_steps
+                    clip_ratio = clip_ratio / gradient_accumulation_steps
 
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
+                    sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
-                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
+                    del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
                 loss.backward()
@@ -345,8 +346,8 @@ def train(config: Config):
             dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
             average_rewards = rewards_sum / rewards_token_count
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
-
+            # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+            grad_norm = model.clip_grad_norm_(1.0)
             optimizer.step()
             scheduler.step()
 
