@@ -42,7 +42,7 @@ class SamplingParamConfig(BaseConfig):
     top_p: float = 1
     n: int = 8
     logprobs: int = 0  # 0 mean 1 logprob here
-    topk: int = -1
+    top_k: int = -1
 
 
 class Config(BaseConfig):
