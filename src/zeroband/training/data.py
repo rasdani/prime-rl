@@ -149,6 +149,7 @@ class ParquetDataset(IterableDataset):
         path: Path,
         batch_size: int,
         timeout: float,
+        step_count_init: int,
         pq_read_bs: int = 64,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -162,7 +163,7 @@ class ParquetDataset(IterableDataset):
 
         self._world_info = get_world_info()
 
-        self._step_count = -1
+        self._step_count = step_count_init - 1  # we immediatly bump the step count by one later
         self._timeout = timeout
 
     def __iter__(self):
@@ -319,7 +320,7 @@ class PaddingColate:
 
 
 def get_dataloader(
-    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, dp_rank: int, dp_world_size: int
+    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int, dp_rank: int, dp_world_size: int
 ) -> tuple[StatefulDataLoader[BatchOutput], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
@@ -334,7 +335,7 @@ def get_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer), dp_rank=dp_rank, dp_world_size=dp_world_size)
     else:
-        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, dp_rank=dp_rank, dp_world_size=dp_world_size)
+        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, dp_rank=dp_rank, dp_world_size=dp_world_size)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
     return StatefulDataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn), prefetcher

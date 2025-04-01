@@ -81,6 +81,12 @@ class CkptConfig(BaseConfig):
 
     rollout_path: str | None = None  # if rollout path is set we saved at each step
 
+    @model_validator(mode="after")
+    def check_path_and_interval(self):
+        if (self.path is None) != (self.interval is None):
+            raise ValueError("path and interval must be either both None or both not None")
+        return self
+
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
@@ -107,6 +113,12 @@ class Config(BaseConfig):
     def check_liger(self):
         if self.train.liger_qwen:
             assert "Qwen" in self.name_model, "train.liger_qwen can only be applied to Qwen2 models."
+        return self
+
+    @model_validator(mode="after")
+    def check_ckpt_interval(self):
+        if self.ckpt.interval is not None:
+            assert self.ckpt.interval % self.optim.step_per_rollout == 0, "ckpt.interval must be divisible by train.step_per_rollout"
         return self
 
 
@@ -258,6 +270,8 @@ def train(config: Config):
     logger.info(f"dp_rank: {dp_rank}, dp_mesh: {dp_mesh}")
     apply_fsdp(model, config.train.reshard_after_forward, device_mesh=dp_mesh) # Always enabled for Mixed Precision
 
+    training_progress = TrainingProgress(total_tokens=0, step=0)
+
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
@@ -267,12 +281,11 @@ def train(config: Config):
         micro_batch_size=config.train.micro_bs,
         batch_size=config.optim.batch_size * config.optim.step_per_rollout,
         data_config=config.data,
+        step_count_init=training_progress.step // config.optim.step_per_rollout,
         dp_rank=dp_rank,
         dp_world_size=config.train.dp,
     )
     train_dataloader_iterator = iter(train_dataloader)
-
-    training_progress = TrainingProgress(total_tokens=0, step=0)
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
@@ -282,7 +295,13 @@ def train(config: Config):
         pass
 
     if config.ckpt.resume:
-        load_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.resume)
+        load_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.resume)
+
+    if training_progress.step % config.optim.step_per_rollout != 0:
+        logger.warning(
+            f"Resuming training from step {training_progress.step} seems invalid, as it should be multiple of train.step_per_rollout ({config.optim.step_per_rollout})"
+            f"training will continue as if it was from step {training_progress.step - training_progress.step % config.optim.step_per_rollout}"
+        )
 
     perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length, tp_world_size=config.train.tp)
 
@@ -323,6 +342,7 @@ def train(config: Config):
             clip_ratio_batch = 0
             seq_lens_batch = torch.tensor(0.0, device="cuda") # On GPU for allreduce sum
             sample_reward_batch = torch.tensor(0.0, device="cuda")
+            clip_seq_lens = torch.tensor(0.0, device="cuda")
             rewards_sum = torch.tensor(0.0, device="cuda")
             rewards_token_count = torch.tensor(0.0, device="cuda")
 
@@ -340,6 +360,9 @@ def train(config: Config):
 
                 rewards_token_count += rewards.numel()
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
+                clip_seq_lens += (
+                    (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / gradient_accumulation_steps
+                )
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -381,10 +404,12 @@ def train(config: Config):
                 dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG, group=dp_group)
 
                 dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM, group=dp_group)
+                dist.all_reduce(tensor=clip_seq_lens, op=dist.ReduceOp.SUM, group=dp_group)
                 dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM, group=dp_group)
                 dist.all_reduce(tensor=rewards_sum, op=dist.ReduceOp.SUM, group=dp_group)
                 dist.all_reduce(tensor=rewards_token_count, op=dist.ReduceOp.SUM, group=dp_group)
             seq_lens_batch = seq_lens_batch / config.train.dp
+            clip_seq_lens = clip_seq_lens / config.train.dp
             sample_reward_batch = sample_reward_batch / config.train.dp
             average_rewards = rewards_sum / rewards_token_count
 
@@ -422,6 +447,7 @@ def train(config: Config):
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
                 "sample_reward": sample_reward_batch.item(),
+                "clip_seq_lens": clip_seq_lens.item(),
             }
 
             log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
@@ -464,7 +490,10 @@ def train(config: Config):
                 torch.cuda.memory._record_memory_history(enabled=False)
 
             if config.ckpt.interval is not None and training_progress.step % config.ckpt.interval == 0:
-                save_checkpoint_fsdp_state(model, [optimizer], training_progress, train_dataloader, scheduler, config.ckpt.path)
+                logger.info(
+                    f"Saving checkpoint at step {training_progress.step}, rollout_step {training_progress.step // config.optim.step_per_rollout}"
+                )
+                save_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.path)
 
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:

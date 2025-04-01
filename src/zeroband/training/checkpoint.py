@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 import time
 import torch
-from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from safetensors.torch import save_file
 
@@ -32,7 +31,6 @@ def save_checkpoint_fsdp_state(
     model: ModelType,
     optimizers: list[torch.optim.Optimizer],
     training_progress: TrainingProgress,
-    dataloader: StatefulDataLoader,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     path_root: str | Path,
 ):
@@ -44,15 +42,13 @@ def save_checkpoint_fsdp_state(
 
     path_file = _local_file_path(path_root, world_info.local_rank)
 
-    if not os.path.exists(path_root):
-        os.makedirs(path_root)
+    os.makedirs(path_root, exist_ok=True)
 
     with open(path_file, "wb") as f:
         state = {}
         state["model"] = model.state_dict()
         state["optimizers"] = [optimizer.state_dict() for optimizer in optimizers]
         state["training_progress"] = training_progress
-        state["dataloader"] = dataloader.state_dict()
         state["scheduler"] = scheduler.state_dict()
 
         torch.save(state, f)
@@ -62,7 +58,6 @@ def load_checkpoint_fsdp_state(
     model: ModelType,
     optimizers: list[torch.optim.Optimizer],
     training_progress: TrainingProgress,
-    dataloader: StatefulDataLoader,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     path: str | Path,
 ):
@@ -88,7 +83,6 @@ def load_checkpoint_fsdp_state(
     training_progress.total_tokens = state["training_progress"].total_tokens
     training_progress.step = state["training_progress"].step
 
-    dataloader.load_state_dict(state["dataloader"])
     scheduler.load_state_dict(state["scheduler"])
 
 
