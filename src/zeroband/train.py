@@ -292,7 +292,6 @@ def train(config: Config):
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
-        pass
 
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.resume)
