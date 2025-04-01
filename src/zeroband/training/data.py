@@ -285,6 +285,7 @@ class PaddingColate:
                 rew = rew[: self._seq_len]
                 # loss_mask = loss_mask[: self._seq_len]
                 loss_mask = torch.zeros(self._seq_len, dtype=loss_mask.dtype)
+                loss_mask[-1] = 1e8
                 logprob = logprob[: self._seq_len]
             else:
                 ids = torch.cat([ids, torch.full((self._seq_len - len(ids),), fill_value=self._pad_token_id, dtype=ids.dtype)])

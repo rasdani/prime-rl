@@ -105,10 +105,10 @@ def _compile_grpo_loss(
     per_token_loss2 = -coef_2 * advantages
     per_token_loss = torch.max(per_token_loss1, per_token_loss2)
 
-    loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
+    loss = (per_token_loss * loss_mask).sum() / (loss_mask.sum() + 1e-8)
 
     is_clipped = (per_token_loss1 < per_token_loss2).float()
-    clip_ratio = (is_clipped * loss_mask).sum() / loss_mask.sum()
+    clip_ratio = (is_clipped * loss_mask).sum() / (loss_mask.sum() + 1e-8)
     return loss, clip_ratio
 
 
@@ -127,4 +127,4 @@ def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, tempera
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
     masked_entropy = entropy * loss_mask
 
-    return masked_entropy.sum() / loss_mask.sum()
+    return masked_entropy.sum() / (loss_mask.sum() + 1e-8)
