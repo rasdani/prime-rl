@@ -114,7 +114,6 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     assert batch_size % world_info.world_size == 0
     batch_size = batch_size // world_info.world_size
 
-    print(f"batch_size: {batch_size}, micro_bs: {micro_bs}, data_workers: {data_workers}")
     assert batch_size % micro_bs == 0, str(
         f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
     )
@@ -152,20 +151,19 @@ def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
             },
         )
 
-    for _, transformer_block in enumerate(model.model.layers):
-        parallelize_module(
-            transformer_block,
-            device_mesh,
-            {
-                'self_attn.q_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'self_attn.k_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'self_attn.v_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'self_attn.o_proj':   RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
-                'mlp.gate_proj':      ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'mlp.up_proj':        ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
-                'mlp.down_proj':      RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
-            }
-        )
+    parallelize_module(
+        model.model,
+        device_mesh,
+        {
+            'layers.*.self_attn.q_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+            'layers.*.self_attn.k_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+            'layers.*.self_attn.v_proj':   ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+            'layers.*.self_attn.o_proj':   RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
+            'layers.*.mlp.gate_proj':      ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+            'layers.*.mlp.up_proj':        ColwiseParallel(input_layouts=Replicate(), output_layouts=Shard(dim=-1), use_local_output=True),
+            'layers.*.mlp.down_proj':      RowwiseParallel(input_layouts=Shard(dim=-1), output_layouts=Replicate(), use_local_output=True),
+        }
+    )
 
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool, device_mesh: DeviceMesh | None):
@@ -199,11 +197,10 @@ def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
         torch._logging.set_logs(dynamo=logging.CRITICAL)  # type: ignore (silence flex attn error)
         torch_log.setLevel(logging.CRITICAL)  #
+        logging.getLogger("transformers.modeling_utils").setLevel(logging.CRITICAL) # Silence dtype and device warnings
 
     logger = get_logger()
     world_info = get_world_info()
-
-    logger.info(f"start training with world size: {world_info.world_size}")
 
     # Allow eager fallback during production so that that the training runs dont die
     # However, in development, we want to know that we broke torch compile
@@ -236,10 +233,6 @@ def train(config: Config):
             model=model,
         )
 
-    if config.train.ac_ckpt:
-        num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
-        apply_ac_ckpt(model, num)
-
     if config.train.dp == -1:
         assert world_info.world_size % config.train.tp == 0, "world size must be divisible by tp"
         config.train.dp = world_info.world_size // config.train.tp
@@ -255,6 +248,10 @@ def train(config: Config):
     logger.info(f"tp_rank: {tp_rank}, tp_mesh: {tp_mesh}")
     if config.train.tp > 1:
         apply_tp(model, config.train, device_mesh=world_mesh["tp"])
+
+    if config.train.ac_ckpt:
+        num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
+        apply_ac_ckpt(model, num)
 
     dp_mesh = world_mesh["fsdp"]
     dp_rank = dp_mesh.get_local_rank() if config.train.dp > 1 else 0
