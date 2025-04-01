@@ -68,6 +68,12 @@ class CkptConfig(BaseConfig):
 
     rollout_path: str | None = None  # if rollout path is set we saved at each step
 
+    @model_validator(mode="after")
+    def check_path_and_interval(self):
+        if (self.path is None) != (self.interval is None):
+            raise ValueError("path and interval must be either both None or both not None")
+        return self
+
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
