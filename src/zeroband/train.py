@@ -179,7 +179,7 @@ def apply_tp(model: ModelType, config: TrainConfig, device_mesh: DeviceMesh):
 
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool, device_mesh: DeviceMesh | None):
-    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=None)
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32)
 
     for layer_id, transformer_block in enumerate(model.model.layers):
         if reshard_after_forward:
