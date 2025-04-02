@@ -100,7 +100,7 @@ uv  run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/Qwe
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
-uv run python src/zeroband/inference.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml --batch-size 22 --dp 6 --rollout_path outputs --output_path data_rollout --step_batch_size 132  --max_model_len 4096 --seed 42
+uv run python src/zeroband/inference.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml --batch-size 22 --dp 6 --rollout_path outputs --output_path data_rollout  --max_model_len 4096 --seed 42
 ```
 
 

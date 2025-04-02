@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Literal
 import uuid
 import numpy as np
-from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
@@ -52,7 +51,6 @@ class Config(BaseConfig):
     max_samples: int | None = None
     output_path: str = "outputs"
     total_step: int | None = None
-    step_batch_size: int = 64  # will be used to create stable file
     rollout_path: str | None = None
 
     quant: Literal["fp8"] | None = None
@@ -74,12 +72,6 @@ class Config(BaseConfig):
     dtype: Literal["fp32", "bf16"] = "bf16"
 
     ckpt_start_path: str | None = None
-
-    @model_validator(mode="after")
-    def validate_step_batch_size(self):
-        assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
-        assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
-        return self
 
 
 def fake_chat_template(messages):
@@ -379,9 +371,8 @@ def inference(config: Config):
         metric = {"dashbord-progress/total": total_problems, f"dashbord-progress/{config.dataset}": total_tokens}
         prime_metric.log_prime(metric)
 
-        if total_problems % config.step_batch_size == 0:
-            logger.info(f"Generated {total_problems} problems for step {real_step}")
-            real_step += 1
+        logger.info(f"Generated {total_problems} problems for step {real_step}")
+        real_step += 1
 
         if config.total_step is not None and real_step > config.total_step:
             logger.info(f"Reached total step {config.total_step}, stopping inference")
@@ -409,8 +400,6 @@ def inference_sub_process(config: Config, gpus_ids: list[int], rank: int) -> lis
 def inference_run(config: Config) -> list[mp.Process]:
     if config.dp > 1:
         processes = []
-
-        config.step_batch_size = config.step_batch_size // config.dp
 
         gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
 
