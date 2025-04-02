@@ -14,7 +14,6 @@ def main(config: Config):
     path = Path(config.output_path)
     os.makedirs(path, exist_ok=True)
 
-    num_files = config.step_batch_size // config.batch_size
     total_step = config.max_samples // config.batch_size
 
     _create_fake_rollout_parquet_file(

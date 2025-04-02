@@ -68,7 +68,6 @@ class Config(BaseConfig):
         if self.batch_size is not None:
             assert self.batch_size % self.train.optim.step_per_rollout == 0, "batch_size must be divisible by step_per_rollout"
 
-            self.inference.step_batch_size = self.batch_size // self.inference.sampling.n
             self.train.optim.batch_size = self.batch_size // self.train.optim.step_per_rollout
 
         return self
