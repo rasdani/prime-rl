@@ -69,8 +69,7 @@ class TrainConfig(BaseConfig):
 
     attn_impl: AttnImpl = "flex_attention"
 
-    dp: int = -1 # World size by default, otherwise specifiy with tp
-    tp: int = 1
+    tp: int = 1 # Tensor parallel shard the model
     more_tp: bool = False # Also TP shard the embedding and lm_head
 
 
@@ -245,20 +244,19 @@ def train(config: Config):
             model=model,
         )
 
-    if config.train.dp == -1:
-        assert world_info.world_size % config.train.tp == 0, "world size must be divisible by tp"
-        config.train.dp = world_info.world_size // config.train.tp
 
-    assert config.train.dp * config.train.tp == world_info.world_size, \
-        f"world size {world_info.world_size} must be equal to dp * tp, but got: dp={config.train.dp}, tp={config.train.tp}."
+    # Create device mesh and apply fsdp/tp.
+    assert world_info.world_size % config.train.tp == 0, "world size must be divisible by tp"
+    tp_world_size = config.train.tp
+    dp_world_size = world_info.world_size // config.train.tp
 
-    world_mesh: DeviceMesh = init_device_mesh("cuda", mesh_shape=(config.train.dp, config.train.tp), mesh_dim_names=("fsdp", "tp"))
+    world_mesh: DeviceMesh = init_device_mesh("cuda", mesh_shape=(dp_world_size, tp_world_size), mesh_dim_names=("fsdp", "tp"))
     logger.info(f"World device mesh: {world_mesh}")
 
     tp_mesh = world_mesh["tp"]
-    tp_rank = tp_mesh.get_local_rank() if config.train.tp > 1 else 0  # type: ignore
+    tp_rank = tp_mesh.get_local_rank() if tp_world_size > 1 else 0  # type: ignore
     logger.info(f"tp_rank: {tp_rank}, tp_mesh: {tp_mesh}")
-    if config.train.tp > 1:
+    if tp_world_size > 1:
         apply_tp(model, config.train, device_mesh=world_mesh["tp"])
 
     if config.train.ac_ckpt:
@@ -266,9 +264,10 @@ def train(config: Config):
         apply_ac_ckpt(model, num)
 
     dp_mesh = world_mesh["fsdp"]
-    dp_rank = dp_mesh.get_local_rank() if config.train.dp > 1 else 0
+    dp_rank = dp_mesh.get_local_rank() if dp_world_size > 1 else 0
     logger.info(f"dp_rank: {dp_rank}, dp_mesh: {dp_mesh}")
     apply_fsdp(model, config.train.reshard_after_forward, device_mesh=dp_mesh) # Always enabled for Mixed Precision
+
 
     training_progress = TrainingProgress(total_tokens=0, step=0)
 
@@ -283,7 +282,7 @@ def train(config: Config):
         data_config=config.data,
         step_count_init=training_progress.step // config.optim.step_per_rollout,
         dp_rank=dp_rank,
-        dp_world_size=config.train.dp,
+        dp_world_size=dp_world_size,
     )
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -302,7 +301,7 @@ def train(config: Config):
             f"training will continue as if it was from step {training_progress.step - training_progress.step % config.optim.step_per_rollout}"
         )
 
-    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length, tp_world_size=config.train.tp)
+    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length, tp_world_size=tp_world_size)
 
     previous_ckpt_rollout = []
 
@@ -395,7 +394,7 @@ def train(config: Config):
                 clip_ratio_batch += clip_ratio.detach().clone()
                 del loss, clip_ratio, pg_loss, entropy
 
-            dp_group = dp_mesh.get_group("fsdp") if config.train.dp > 1 else None
+            dp_group = dp_mesh.get_group("fsdp") if dp_world_size > 1 else None
             if dp_group is not None:
                 dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=dp_group)
                 dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG, group=dp_group)
@@ -407,9 +406,9 @@ def train(config: Config):
                 dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM, group=dp_group)
                 dist.all_reduce(tensor=rewards_sum, op=dist.ReduceOp.SUM, group=dp_group)
                 dist.all_reduce(tensor=rewards_token_count, op=dist.ReduceOp.SUM, group=dp_group)
-            seq_lens_batch = seq_lens_batch / config.train.dp
-            clip_seq_lens = clip_seq_lens / config.train.dp
-            sample_reward_batch = sample_reward_batch / config.train.dp
+            seq_lens_batch = seq_lens_batch / dp_world_size
+            clip_seq_lens = clip_seq_lens / dp_world_size
+            sample_reward_batch = sample_reward_batch / dp_world_size
             average_rewards = rewards_sum / rewards_token_count
 
             grad_norm = clip_grad_norm_(model.parameters(), 1.0, dp_mesh=dp_mesh, tp_mesh=tp_mesh)
