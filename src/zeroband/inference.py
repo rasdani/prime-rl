@@ -73,6 +73,8 @@ class Config(BaseConfig):
 
     ckpt_start_path: str | None = None
 
+    toploc: bool = True
+
 
 def fake_chat_template(messages):
     formatted_prompts = []
@@ -249,8 +251,12 @@ def inference(config: Config):
     max_samples = config.max_samples or len(dataset)
 
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+
+    if config.dtype == "fp32":
+        config.toploc = False
+
     toploc_cache = TopLocCache(
-        max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size, disable=config.dtype == "fp32"
+        max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size, disable=not config.toploc
     )
 
     def logits_processor_hook(module, input):
