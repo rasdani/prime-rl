@@ -75,7 +75,7 @@ def selective_log_softmax(logits, index):
     return per_token_logps
 
 
-# @torch.compile
+@torch.compile
 def _compile_grpo_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,

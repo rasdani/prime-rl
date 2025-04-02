@@ -39,9 +39,10 @@ class SamplingParamConfig(BaseConfig):
     temperature: float = 0.6
     max_tokens: int | None = None
     ignore_eos: bool = False
-    top_p: float = 0.95
+    top_p: float = 1
     n: int = 8
     logprobs: int = 0  # 0 mean 1 logprob here
+    top_k: int = -1
 
 
 class Config(BaseConfig):
