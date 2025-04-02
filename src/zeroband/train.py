@@ -23,7 +23,7 @@ from torch.distributed.tensor.placement_types import Replicate, Shard
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
-from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
+from zeroband.training.loss import full_loss, selective_log_softmax
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt, clip_grad_norm_
 
@@ -374,19 +374,26 @@ def train(config: Config):
                 if not config.on_policy_log_prob:
                     original_logprobs = original_logprobs[:, 1:]
 
-                # Loss
-                pg_loss, clip_ratio = grpo_loss(
-                    logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
-                )
-                entropy = entropy_loss(logits, loss_mask, config.temperature)
-
-                loss = pg_loss - config.entropy_loss_coeff * entropy
-                loss = loss / gradient_accumulation_steps
-                clip_ratio = clip_ratio / gradient_accumulation_steps
-
+                # Sum the sample rewards
                 sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
-                del batch, input_ids, logits, advantages, loss_mask, original_logprobs
+                # Ensure no references escape by packing all the loss args into
+                # a dict so the tensors can be freed inside the loss fucntion.
+                arg_dict = {
+                    "logits": logits,
+                    "input_ids": input_ids,
+                    "advantages": advantages,
+                    "original_logprobs": original_logprobs,
+                    "loss_mask": loss_mask,
+                    "gradient_accumulation_steps": gradient_accumulation_steps,
+                    "temperature": config.temperature,
+                    "entropy_loss_coeff": config.entropy_loss_coeff,
+                    "grpo_epsilon": config.grpo_epsilon,
+                } # Make the only reference the arg_dict so we can delete in the loss function.
+                del batch, logits, input_ids, advantages, original_logprobs, loss_mask
+
+                # Loss
+                loss, pg_loss, entropy, clip_ratio = full_loss(arg_dict)
 
                 # Backward
                 loss.backward()

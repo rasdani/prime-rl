@@ -75,7 +75,7 @@ def selective_log_softmax(logits, index):
     return per_token_logps
 
 
-# @torch.compile
+@torch.compile
 def _compile_grpo_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -116,7 +116,6 @@ def _compile_grpo_loss(
 def entropy_loss(logits: Float[Tensor, "batch seq vocab"], loss_mask: Int[Tensor, "batch seq"], temperature: float) -> Tensor:
     return _compile_entropy_loss(logits=logits, loss_mask=loss_mask, temperature=temperature)
 
-
 @torch.compile
 def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, temperature: float):
     logits = logits[:, :-1, :]
@@ -128,3 +127,32 @@ def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, tempera
     masked_entropy = entropy * loss_mask
 
     return masked_entropy.sum() / loss_mask.sum()
+
+
+def full_loss(arg_dict: dict) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    logits = arg_dict["logits"]
+    input_ids = arg_dict["input_ids"]
+    advantages = arg_dict["advantages"]
+    original_logprobs = arg_dict["original_logprobs"]
+    loss_mask = arg_dict["loss_mask"]
+    gradient_accumulation_steps = arg_dict["gradient_accumulation_steps"]
+    temperature = arg_dict["temperature"]
+    entropy_loss_coeff = arg_dict["entropy_loss_coeff"]
+    grpo_epsilon = arg_dict["grpo_epsilon"]
+    arg_dict.clear() # Now the only reference to the tensors are the ones above.
+
+    # Compute GRPO loss
+    pg_loss, clip_ratio = _compile_grpo_loss(
+        logits, input_ids, advantages, original_logprobs, loss_mask, temperature, grpo_epsilon
+    )
+    del input_ids, advantages, original_logprobs, grpo_epsilon
+
+    # Compute the entropy loss
+    entropy = _compile_entropy_loss(logits, loss_mask, temperature)
+    del logits, loss_mask
+
+    # Combine, return
+    loss = pg_loss - entropy_loss_coeff * entropy
+    loss = loss / gradient_accumulation_steps
+    clip_ratio = clip_ratio / gradient_accumulation_steps
+    return loss, pg_loss, entropy, clip_ratio
