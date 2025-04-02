@@ -96,6 +96,8 @@ class Config(BaseConfig):
     on_policy_log_prob: bool = False
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
+    dim_loss: int | None = None
+
     @model_validator(mode="after")
     def check_liger(self):
         if self.train.liger_qwen:
@@ -298,9 +300,9 @@ def train(config: Config):
 
                 # Loss
                 pg_loss, clip_ratio = grpo_loss(
-                    logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
+                    logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon, config.dim_loss
                 )
-                entropy = entropy_loss(logits, loss_mask, config.temperature)
+                entropy = entropy_loss(logits, loss_mask, config.temperature, config.dim_loss)
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / gradient_accumulation_steps
