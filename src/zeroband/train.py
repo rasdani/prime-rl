@@ -96,7 +96,7 @@ class Config(BaseConfig):
     on_policy_log_prob: bool = False
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
-    dim_loss: int | None = None
+    masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -300,9 +300,16 @@ def train(config: Config):
 
                 # Loss
                 pg_loss, clip_ratio = grpo_loss(
-                    logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon, config.dim_loss
+                    logits,
+                    input_ids,
+                    advantages,
+                    original_logprobs,
+                    loss_mask,
+                    config.temperature,
+                    config.grpo_epsilon,
+                    config.masked_mean_axis,
                 )
-                entropy = entropy_loss(logits, loss_mask, config.temperature, config.dim_loss)
+                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / gradient_accumulation_steps
