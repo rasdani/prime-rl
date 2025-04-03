@@ -262,13 +262,11 @@ def train(config: Config):
     logger.info(f"dp_rank: {dp_rank}, dp_mesh: {dp_mesh}")
     apply_fsdp(model, config.train.reshard_after_forward, device_mesh=dp_mesh) # Always enabled for Mixed Precision
 
-
-    training_progress = TrainingProgress(total_tokens=0, step=0)
-
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
 
+    training_progress = TrainingProgress(total_tokens=0, step=0)
     gradient_accumulation_steps = get_gradient_accumulation_steps(
         config.optim.batch_size, config.train.micro_bs, config.data.num_workers, dp_world_size
     )
