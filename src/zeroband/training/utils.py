@@ -54,8 +54,6 @@ def clip_grad_norm_(parameters: Iterable[torch.Tensor], max_norm: float, dp_mesh
         total_squared_sums += w.get_future().wait()[0]
 
     total_norm = torch.sqrt(total_squared_sums)
-    if isinstance(total_norm, DTensor):
-        total_norm = total_norm.full_tensor() # Scalar
 
     clip_coef = torch.clamp(max_norm / (total_norm + 1e-6), max=1.0)
     for g in grads_to_clip:
@@ -156,7 +154,7 @@ class PerfCounter:
     def get_tokens_per_second(self) -> float | None:
         if len(self.tokens) < 2:
             return None
-        return sum(self.tokens[1:]) / (self.times[-1] - self.times[0]) / self.tp_world_size
+        return sum(self.tokens[1:]) / (self.times[-1] - self.times[0])
 
     def get_mfu(self) -> float | None:
         tokens_per_second = self.get_tokens_per_second()

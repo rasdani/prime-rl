@@ -121,9 +121,9 @@ class Config(BaseConfig):
         return self
 
 
-def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
-    assert batch_size % world_info.world_size == 0
-    batch_size = batch_size // world_info.world_size
+def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, dp_world_size: int) -> int:
+    assert batch_size % dp_world_size == 0
+    batch_size = batch_size // dp_world_size
 
     assert batch_size % micro_bs == 0, str(
         f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
@@ -221,12 +221,6 @@ def train(config: Config):
 
     torch.cuda.set_device(get_device_placement(config.gpus_ids, world_info))
 
-    # batch_size is the total batch size for all GPUs
-
-    gradient_accumulation_steps = get_gradient_accumulation_steps(
-        config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
-    )
-
     if config.ckpt.rollout_path is not None and world_info.rank == 0:
         origin_data_dir = os.environ.get("SHARDCAST_OUTPUT_DIR", "./origin_data")
         shardcast.initialize(origin_data_dir, max_distribution_folders=config.max_async_level)
@@ -274,6 +268,10 @@ def train(config: Config):
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2), foreach=False)  # fmt: skip
 
     scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
+
+    gradient_accumulation_steps = get_gradient_accumulation_steps(
+        config.optim.batch_size, config.train.micro_bs, config.data.num_workers, dp_world_size
+    )
 
     train_dataloader, prefetcher = get_dataloader(
         tokenizer=tokenizer,
