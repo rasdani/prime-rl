@@ -65,7 +65,6 @@ class TrainConfig(BaseConfig):
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
     memory_profile: str | None = None
     torch_compile: bool = True
-    liger_qwen: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
 
@@ -107,12 +106,6 @@ class Config(BaseConfig):
 
     on_policy_log_prob: bool = False
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
-
-    @model_validator(mode="after")
-    def check_liger(self):
-        if self.train.liger_qwen:
-            assert "Qwen" in self.name_model, "train.liger_qwen can only be applied to Qwen2 models."
-        return self
 
     @model_validator(mode="after")
     def check_ckpt_interval(self):
@@ -227,18 +220,6 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
-    if config.train.liger_qwen:
-        from liger_kernel.transformers import apply_liger_kernel_to_qwen2
-        apply_liger_kernel_to_qwen2(
-            rope=True,
-            cross_entropy=False,
-            fused_linear_cross_entropy=False,
-            rms_norm=True,
-            swiglu=True,
-            model=model,
-        )
-
-
     # Create device mesh and apply fsdp/tp.
     assert world_info.world_size % config.train.tp == 0, "world size must be divisible by tp"
     tp_world_size = config.train.tp
@@ -248,7 +229,7 @@ def train(config: Config):
     logger.info(f"World device mesh: {world_mesh}")
 
     tp_mesh = world_mesh["tp"]
-    tp_rank = tp_mesh.get_local_rank() if tp_world_size > 1 else 0  # type: ignore
+    tp_rank = tp_mesh.get_local_rank() if tp_world_size > 1 else 0
     logger.info(f"tp_rank: {tp_rank}, tp_mesh: {tp_mesh}")
     if tp_world_size > 1:
         apply_tp(model, config.train, device_mesh=world_mesh["tp"])
@@ -334,10 +315,10 @@ def train(config: Config):
             pg_loss_batch = 0
             entropy_loss_batch = 0
             clip_ratio_batch = 0
-            seq_lens_batch = torch.tensor(0.0, device="cuda") # On GPU for allreduce sum
-            sample_reward_batch = torch.tensor(0.0, device="cuda")
-            clip_seq_lens = torch.tensor(0.0, device="cuda")
-            rewards_sum = torch.tensor(0.0, device="cuda")
+            seq_lens_batch = 0
+            sample_reward_batch = 0
+            clip_seq_lens = 0
+            rewards_sum = torch.tensor(0.0, device="cuda") # On GPU for allreduce sum
             rewards_token_count = torch.tensor(0.0, device="cuda")
 
             if config.train.memory_profile and world_info.rank == 0:
@@ -353,10 +334,10 @@ def train(config: Config):
                 rewards_sum += rewards.sum().to("cuda")
 
                 rewards_token_count += rewards.numel()
-                seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
+                seq_lens_batch += batch["seq_lens"].float().mean().to('cuda') / gradient_accumulation_steps
                 clip_seq_lens += (
                     (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / gradient_accumulation_steps
-                )
+                ).to('cuda')
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -378,7 +359,7 @@ def train(config: Config):
                 loss = loss / gradient_accumulation_steps
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
+                sample_reward_batch += (batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps).to("cuda")
 
                 del batch, input_ids, logits, advantages, loss_mask, original_logprobs
 
@@ -396,15 +377,11 @@ def train(config: Config):
                 dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG, group=dp_group)
                 dist.all_reduce(tensor=entropy_loss_batch, op=dist.ReduceOp.AVG, group=dp_group)
                 dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG, group=dp_group)
-
-                dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM, group=dp_group)
-                dist.all_reduce(tensor=clip_seq_lens, op=dist.ReduceOp.SUM, group=dp_group)
-                dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM, group=dp_group)
+                dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.AVG, group=dp_group)
+                dist.all_reduce(tensor=clip_seq_lens, op=dist.ReduceOp.AVG, group=dp_group)
+                dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.AVG, group=dp_group)
                 dist.all_reduce(tensor=rewards_sum, op=dist.ReduceOp.SUM, group=dp_group)
                 dist.all_reduce(tensor=rewards_token_count, op=dist.ReduceOp.SUM, group=dp_group)
-            seq_lens_batch = seq_lens_batch / dp_world_size
-            clip_seq_lens = clip_seq_lens / dp_world_size
-            sample_reward_batch = sample_reward_batch / dp_world_size
             average_rewards = rewards_sum / rewards_token_count
 
             grad_norm = clip_grad_norm_(model.parameters(), 1.0, dp_mesh=dp_mesh, tp_mesh=tp_mesh)
