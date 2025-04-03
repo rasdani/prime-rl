@@ -6,13 +6,11 @@ from pydantic_config import BaseConfig
 
 
 import torch
-from torch.utils.data import IterableDataset
+from torch.utils.data import IterableDataset, DataLoader
 
 from jaxtyping import Float, Int
 
 from pyarrow import dataset as ds
-
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 from zeroband.logger import get_logger
 from zeroband.training.data_prefetch import GCPPrefetcher
@@ -320,7 +318,7 @@ class PaddingColate:
 
 def get_dataloader(
     tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int, dp_rank: int, dp_world_size: int
-) -> tuple[StatefulDataLoader[BatchOutput], GCPPrefetcher | None]:
+) -> tuple[DataLoader[BatchOutput], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
     prefetcher = None
@@ -337,4 +335,4 @@ def get_dataloader(
         train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, dp_rank=dp_rank, dp_world_size=dp_world_size)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
-    return StatefulDataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn), prefetcher
+    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn), prefetcher
