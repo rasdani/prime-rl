@@ -61,6 +61,12 @@ uv run python src/zeroband/inference.py @ configs/inference/debug.toml
 
 ## Larger run
 
+if you see error related to torch multiprocessing spawn method, you can set the following environment variable:
+
+```bash
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+```
+
 For now you need to generate fake rollout data for testing. 
 
 ```bash
@@ -70,6 +76,7 @@ uv run python generate_fake_rollout.py @ configs/inference/Qwen1.5B/Qwen1.5B.tom
 and then do the training on it
 
 ```bash
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
 uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/150M/A40.toml --data.path data/fake_rollout 
 ```
 

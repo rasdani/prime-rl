@@ -21,7 +21,7 @@ from vllm.sequence import SampleLogprobs
 from vllm.model_executor import SamplingMetadata
 
 from zeroband.logger import get_logger
-from zeroband.models import ModelName, name_to_hf_model
+from zeroband.models import ModelName
 from zeroband.rewards.math import compute_math_reward
 
 from datasets import load_dataset
@@ -231,7 +231,7 @@ def compute_advantages_grpo(grouped_rewards: dict[int, torch.FloatTensor], epsil
 def inference(config: Config):
     prime_metric = PrimeMetric(disable=config.prime_log_freq is None, period=config.prime_log_freq)
     llm = LLM(
-        model=name_to_hf_model[config.name_model],
+        model=config.name_model,
         tensor_parallel_size=config.tp,
         max_seq_len_to_capture=config.max_model_len,
         max_model_len=config.max_model_len,
