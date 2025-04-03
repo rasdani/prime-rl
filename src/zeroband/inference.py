@@ -73,7 +73,7 @@ class Config(BaseConfig):
 
     ckpt_start_path: str | None = None
 
-    toploc: bool = True
+    toploc: bool = False
 
 
 def fake_chat_template(messages):
@@ -250,14 +250,12 @@ def inference(config: Config):
     dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
     max_samples = config.max_samples or len(dataset)
 
-    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    # model = llm.llm_engine.model_executor.driver_worker.model_runner.model
 
     if config.dtype == "fp32":
         config.toploc = False
 
-    toploc_cache = TopLocCache(
-        max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size, disable=not config.toploc
-    )
+    toploc_cache = TopLocCache(max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=512, disable=not config.toploc)
 
     def logits_processor_hook(module, input):
         assert isinstance(input[1], torch.Tensor)
