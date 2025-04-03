@@ -75,10 +75,17 @@ class Config(BaseConfig):
 
     ckpt_start_path: str | None = None
 
+    length_reward_min: int | None = None
+    length_reward_max: int | None = None
+    length_reward_coeff: float | None = None
+
     @model_validator(mode="after")
     def validate_step_batch_size(self):
         assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
         assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
+        assert (self.length_reward_min is None) == (self.length_reward_max is None), (
+            "length_reward_min and length_reward_max must be either both defined or both None"
+        )
         return self
 
 
@@ -197,20 +204,51 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     return llm
 
 
-async def compute_reward_for_output(output, verification_info):
+def generate_target_length_prompts(config: Config, batch_size: int):
+    if config.length_reward_min and config.length_reward_max:
+        target_lengths = torch.randint(
+            low=config.length_reward_min, high=config.length_reward_max + 1, size=(batch_size,), device="cpu"
+        ).tolist()
+
+        return [f"\n\nThink for {target} tokens." for target in target_lengths], target_lengths
+
+    return [""] * batch_size, [-1] * batch_size
+
+
+async def compute_reward_for_output(output, verification_info, len_reward_coeff):
     loop = asyncio.get_running_loop()
     # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
-    return await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
+    math_reward = await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
+
+    total_reward = math_reward
+    if verification_info["target_length"] > 0 and math_reward == 1:
+        # Calculate length reward - this could be a separate function
+        output_length = len(output.token_ids)
+        target_length = verification_info["target_length"]
+
+        length_penalty = max(abs(output_length - target_length) / target_length, 0)
+        length_reward = -length_penalty * len_reward_coeff  # Scale factor to balance with math reward
+
+        # Add to total reward
+        total_reward += length_reward
+
+    return total_reward
 
 
-async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput], verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
+async def compute_rewards_async(
+    generated_tokens: list[vllm.RequestOutput], verification_infos: list[str], target_lengths: list[int], config: Config
+) -> dict[int, torch.FloatTensor]:
     parsed_infos = [json.loads(ver) for ver in verification_infos]
+
+    for info, target_len in zip(parsed_infos, target_lengths):
+        info["target_length"] = target_len
+
     tasks = []
     mapping = []
 
     for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
         for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info)))
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.length_reward_coeff)))
             mapping.append(req_idx)
 
     all_results = await asyncio.gather(*tasks)
@@ -313,7 +351,13 @@ def inference(config: Config):
 
         # Get batch
         batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
-        messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
+
+        length_prompt_additions, target_lengths = generate_target_length_prompts(config, len(batch))
+
+        messages = [
+            [{"role": "user", "content": item["prompt"] + length_prompt}, {"role": "assistant", "content": "<think>\n"}]
+            for item, length_prompt in zip(batch, length_prompt_additions)
+        ]
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
 
@@ -361,7 +405,7 @@ def inference(config: Config):
         toploc_cache.reset_cache()
 
         # Compute rewards asynchronously, grouped as a dictionary.
-        grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
+        grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos, target_lengths, config))
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
 
