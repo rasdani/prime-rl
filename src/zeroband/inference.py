@@ -226,8 +226,9 @@ async def compute_reward_for_output(output, verification_info, len_reward_coeff)
         output_length = len(output.token_ids)
         target_length = verification_info["target_length"]
 
-        length_penalty = max(abs(output_length - target_length) / target_length, 0)
-        length_reward = -length_penalty * len_reward_coeff  # Scale factor to balance with math reward
+        length_penalty = abs(output_length - target_length)
+        length_reward = length_penalty * len_reward_coeff  # Scale factor to balance with math reward
+        length_reward = -min(1, length_reward)
 
         # Add to total reward
         total_reward += length_reward
