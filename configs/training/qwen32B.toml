@@ -3,7 +3,6 @@ project = "qwen_32_rl"
 
 [train]
 micro_bs = 32
-reshard_after_forward = true
 
 [optim]
 batch_size = 1024

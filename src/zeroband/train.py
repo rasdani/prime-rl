@@ -1,3 +1,4 @@
+import functools
 import os
 from pathlib import Path
 import shutil
@@ -7,6 +8,8 @@ from typing import TYPE_CHECKING, Literal
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision
+from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+
 import wandb
 import shardcast
 
@@ -50,15 +53,20 @@ class OptimConfig(BaseConfig):
     step_per_rollout: int = 1
 
 
+class FSDPConfig(BaseConfig):
+    min_num_params: int = 20000
+
 class TrainConfig(BaseConfig):
     micro_bs: int = 1
     ac_ckpt: bool | int = False
-    reshard_after_forward: bool = True  # old shard grad op True mean full shard
     memory_profile: str | None = None
     torch_compile: bool = True
     liger_qwen: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
+    
+    
+    fsdp: FSDPConfig = FSDPConfig()
 
 
 class CkptConfig(BaseConfig):
@@ -127,11 +135,16 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_fsdp(model: ModelType) -> ModelType:
+def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
+    
+    my_auto_wrap_policy = functools.partial(
+        size_based_auto_wrap_policy, min_num_params=fsdp_config.min_num_params
+    )
+
     model = model.to("cuda")
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
 
-    model = FSDP(model, mixed_precision=mixed_precision)
+    model = FSDP(model, mixed_precision=mixed_precision, auto_wrap_policy=my_auto_wrap_policy)
 
     return model
 
@@ -195,7 +208,7 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    model = apply_fsdp(model)
+    model = apply_fsdp(model, config.train.fsdp)
 
     optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
 

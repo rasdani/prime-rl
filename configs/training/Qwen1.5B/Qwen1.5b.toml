@@ -3,7 +3,6 @@ project = "rl-Qwen1.5B"
 
 [train]
 micro_bs = 32
-reshard_after_forward = true
 
 [optim]
 batch_size = 128
