@@ -54,7 +54,7 @@ class OptimConfig(BaseConfig):
 
 
 class FSDPConfig(BaseConfig):
-    min_num_params: int = 20000
+    min_num_params: int = 20_000
 
 class TrainConfig(BaseConfig):
     micro_bs: int = 1
@@ -144,7 +144,7 @@ def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
     model = model.to("cuda")
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
 
-    model = FSDP(model, mixed_precision=mixed_precision, auto_wrap_policy=my_auto_wrap_policy)
+    model = FSDP(model, mixed_precision=mixed_precision, auto_wrap_policy=my_auto_wrap_policy, use_orig_params=True)
 
     return model
 
