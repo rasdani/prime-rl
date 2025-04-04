@@ -8,7 +8,6 @@ project = "rl-Qwen1.5B"
 
 [train.train]
 micro_bs = 32
-reshard_after_forward = true
 
 [train.optim]
 warmup_steps = 1

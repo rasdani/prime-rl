@@ -3,7 +3,6 @@ project = "debug_1B_zero_band"
 
 [train]
 micro_bs = 32
-reshard_after_forward = true
 
 [optim]
 batch_size = 1024
