@@ -59,76 +59,11 @@ def selective_log_softmax(logits, index):
         `torch.Tensor`:
             Gathered log probabilities with the same shape as `index`.
     """
-    if logits.dtype in [torch.float32, torch.float64]:
-        selected_logits = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
-        # loop to reduce peak mem consumption
-        logsumexp_values = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
-        per_token_logps = selected_logits - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
-    else:
-        # logsumexp approach is unstable with bfloat16, fall back to slightly less efficent approach
-        per_token_logps = []
-        for row_logits, row_labels in zip(logits, index):  # loop to reduce peak mem consumption
-            row_logps = F.log_softmax(row_logits, dim=-1)
-            row_per_token_logps = row_logps.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
-            per_token_logps.append(row_per_token_logps)
-        per_token_logps = torch.stack(per_token_logps)
+
     return per_token_logps
 
 
 @torch.compile
-def _compile_grpo_loss(
-    logits: torch.Tensor,
-    input_ids: torch.Tensor,
-    advantages: torch.Tensor,
-    original_logprobs: torch.Tensor,
-    loss_mask: torch.Tensor,
-    temperature: float,
-    epsilon: float,
-) -> tuple[Tensor, Tensor]:
-    # we start by dropping the bos token because it does not have a corresponding logit
-    input_ids = input_ids[:, 1:]
-    advantages = advantages[:, 1:]
-    # original_logprobs = original_logprobs[:, 1:] # no need to do it now
-    loss_mask = loss_mask[:, 1:]
-
-    # from the logits we drop the last logits because it corresponds to the next token that will be sample but is not here yet
-    logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token prediction
-
-    # Divide logits by sampling temperature.
-    # See https://huggingface.co/blog/the_n_implementation_details_of_rlhf_with_ppo#policy-training-implementation-details
-    logits = logits / temperature
-    per_token_logps = selective_log_softmax(logits, input_ids)
-
-    coef_1 = torch.exp(per_token_logps - original_logprobs)
-    coef_2 = torch.clamp(coef_1, 1 - epsilon, 1 + epsilon)
-    per_token_loss1 = -coef_1 * advantages
-    per_token_loss2 = -coef_2 * advantages
-    per_token_loss = torch.max(per_token_loss1, per_token_loss2)
-
-    loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
-
-    is_clipped = (per_token_loss1 < per_token_loss2).float()
-    clip_ratio = (is_clipped * loss_mask).sum() / loss_mask.sum()
-    return loss, clip_ratio
-
-
-@jaxtyped(typechecker=typechecker)
-def entropy_loss(logits: Float[Tensor, "batch seq vocab"], loss_mask: Int[Tensor, "batch seq"], temperature: float) -> Tensor:
-    return _compile_entropy_loss(logits=logits, loss_mask=loss_mask, temperature=temperature)
-
-@torch.compile
-def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, temperature: float):
-    logits = logits[:, :-1, :]
-    logits = logits / temperature
-
-    loss_mask = loss_mask[:, 1:]
-    pd = torch.nn.functional.softmax(logits, dim=-1)
-    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
-    masked_entropy = entropy * loss_mask
-
-    return masked_entropy.sum() / loss_mask.sum()
-
-
 def full_loss(arg_dict: dict) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     logits = arg_dict["logits"]
     input_ids = arg_dict["input_ids"]
@@ -141,18 +76,44 @@ def full_loss(arg_dict: dict) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     grpo_epsilon = arg_dict["grpo_epsilon"]
     arg_dict.clear() # Now the only reference to the tensors are the ones above.
 
-    # Compute GRPO loss
-    pg_loss, clip_ratio = _compile_grpo_loss(
-        logits, input_ids, advantages, original_logprobs, loss_mask, temperature, grpo_epsilon
-    )
-    del input_ids, advantages, original_logprobs, grpo_epsilon
+    # we start by dropping the bos token because it does not have a corresponding logit
+    input_ids = input_ids[:, 1:]
+    advantages = advantages[:, 1:]
+    # original_logprobs = original_logprobs[:, 1:] # no need to do it now
+    loss_mask = loss_mask[:, 1:]
+
+    # from the logits we drop the last logits because it corresponds to the next token that will be sample but is not here yet
+    logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token prediction
+
+    # Divide logits by sampling temperature.
+    # See https://huggingface.co/blog/the_n_implementation_details_of_rlhf_with_ppo#policy-training-implementation-details
+    logits = logits / temperature
+
+    per_token_logps = []
+    for row_logits, row_labels in zip(logits, input_ids):  # loop to reduce peak mem consumption
+        row_logps = F.log_softmax(row_logits, dim=-1)
+        row_per_token_logps = row_logps.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
+        per_token_logps.append(row_per_token_logps)
+    per_token_logps = torch.stack(per_token_logps)
+
+    coef_1 = torch.exp(per_token_logps - original_logprobs)
+    coef_2 = torch.clamp(coef_1, 1 - grpo_epsilon, 1 + grpo_epsilon)
+    per_token_loss1 = -coef_1 * advantages
+    per_token_loss2 = -coef_2 * advantages
+    per_token_loss = torch.max(per_token_loss1, per_token_loss2)
+
+    grpo_loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
+
+    is_clipped = (per_token_loss1 < per_token_loss2).float()
+    clip_ratio = (is_clipped * loss_mask).sum() / loss_mask.sum() / gradient_accumulation_steps
 
     # Compute the entropy loss
-    entropy = _compile_entropy_loss(logits, loss_mask, temperature)
-    del logits, loss_mask
+    pd = torch.nn.functional.softmax(logits, dim=-1)
+    softmax_sum = torch.sum(pd * logits, dim=-1)
+    unmasked_entropy = torch.logsumexp(logits, dim=-1) - softmax_sum
+    masked_entropy = unmasked_entropy * loss_mask
+    entropy = masked_entropy.sum() / loss_mask.sum()
 
     # Combine, return
-    loss = pg_loss - entropy_loss_coeff * entropy
-    loss = loss / gradient_accumulation_steps
-    clip_ratio = clip_ratio / gradient_accumulation_steps
-    return loss, pg_loss, entropy, clip_ratio
+    loss = grpo_loss - entropy_loss_coeff * entropy / gradient_accumulation_steps
+    return loss, grpo_loss, entropy, clip_ratio
