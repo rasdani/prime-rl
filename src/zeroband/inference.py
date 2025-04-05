@@ -238,6 +238,7 @@ def inference(config: Config):
         max_model_len=config.max_model_len,
         quantization=config.quant,
         enforce_eager=config.enforce_eager,
+        disable_async_output_proc=True,  # We have an off by 1 error in toploc without this flag when cuda graph padding is enabled.
         dtype="bfloat16" if config.dtype == "bf16" else torch.float32,
     )
     tokenizer = llm.get_tokenizer()
