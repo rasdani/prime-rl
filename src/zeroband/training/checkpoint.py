@@ -6,6 +6,7 @@ import torch
 from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions, get_state_dict, set_state_dict
 
 from safetensors.torch import save_file
+import torch.distributed.checkpoint as dcp
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelType
@@ -39,23 +40,24 @@ def save_checkpoint_fsdp_state(
     Checkpoint the model in a way that is compatible with FSDP.
     """
     import warnings
+
     warnings.filterwarnings("ignore", message="Please use DTensor instead")
     path_root = _pathify(path_root) / f"step_{training_progress.step}"
     world_info = get_world_info()
 
-    path_file = _local_file_path(path_root, world_info.local_rank)
-
     os.makedirs(path_root, exist_ok=True)
 
-    with open(path_file, "wb") as f:
-        model_state_dict, optimizers_state_dict = get_state_dict(model, optimizers)
+    model_state_dict, optimizers_state_dict = get_state_dict(model, optimizers)
 
-        state = {}
-        state["model"] = model_state_dict
-        state["optimizers"] = optimizers_state_dict
+    state = {}
+    state["model"] = model_state_dict
+    state["optimizers"] = optimizers_state_dict
+
+    dcp.save(state_dict=state, checkpoint_id=path_root)
+
+    with open(_local_file_path(path_root, world_info.local_rank), "wb") as f:
         state["training_progress"] = training_progress
         state["scheduler"] = scheduler.state_dict()
-
         torch.save(state, f)
 
 
@@ -70,30 +72,31 @@ def load_checkpoint_fsdp_state(
     Load the checkpoint state.
     """
     import warnings
+
     warnings.filterwarnings("ignore", message="Please use DTensor instead")
     path = _pathify(path)
     world_info = get_world_info()
 
-    path_file = _local_file_path(path, world_info.local_rank)
+    model_state_dict, optimizer_state_dict = get_state_dict(model, optimizers)
+    dcp_state_dict = {
+        "model": model_state_dict,
+        "optimizers": optimizer_state_dict,
+    }
 
-    if not os.path.exists(path_file):
-        raise FileNotFoundError(f"Checkpoint step {training_progress.step} not found at {path_file}")
-
-    with open(path_file, "rb") as f:
-        state = torch.load(f, weights_only=False)
+    dcp.load(dcp_state_dict, checkpoint_id=path)
 
     set_state_dict(
         model,
-        optimizers,
-        model_state_dict=state["model"],
-        optim_state_dict=state["optimizers"],
+        optimizers=optimizers,
+        model_state_dict=model_state_dict,
+        optim_state_dict=optimizer_state_dict,
     )
 
-    training_progress.total_tokens = state["training_progress"].total_tokens
-    training_progress.total_tokens = state["training_progress"].total_tokens
-    training_progress.step = state["training_progress"].step
-
-    scheduler.load_state_dict(state["scheduler"])
+    with open(_local_file_path(path, world_info.local_rank), "rb") as f:
+        state = torch.load(f)
+        training_progress.total_tokens = state["training_progress"].total_tokens
+        training_progress.step = state["training_progress"].step
+        scheduler.load_state_dict(state["scheduler"])
 
 
 def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16) -> Path:
