@@ -182,6 +182,8 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
+    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
+
     if config.train.liger_qwen:
         apply_liger_kernel_to_qwen2(
             rope=True,
@@ -225,8 +227,6 @@ def train(config: Config):
         step_count_init=training_progress.step // config.optim.step_per_rollout,
     )
     train_dataloader_iterator = iter(train_dataloader)
-
-    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
 
     previous_ckpt_rollout = []
 
