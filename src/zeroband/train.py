@@ -388,9 +388,13 @@ def train(config: Config):
 
             tokens_per_second = perf_counter.get_tokens_per_second()
             if tokens_per_second is not None:
+                tokens_per_second_per_gpu = tokens_per_second / world_info.world_size
                 metrics["tokens_per_second"] = tokens_per_second
+                metrics["tokens_per_second_per_gpu"] = tokens_per_second_per_gpu
+
                 metrics["mfu"] = perf_counter.get_mfu()
-                log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
+
+                log += f", tokens_per_second: {tokens_per_second:.2f}, tokens_per_second_per_gpu: {tokens_per_second_per_gpu:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if world_info.rank == 0 and config.wandb:
                 wandb.log(metrics)
