@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, BackwardPrefetch
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 
 import wandb
@@ -55,7 +55,8 @@ class OptimConfig(BaseConfig):
 
 class FSDPConfig(BaseConfig):
     min_num_params: int = 20_000
-
+    backward_prefetch: Literal["pre", "post"] = "pre" # pre == faster but more memory, post == slower but less memory https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.BackwardPrefetch
+ 
 class TrainConfig(BaseConfig):
     micro_bs: int = 1
     ac_ckpt: bool | int = False
@@ -142,8 +143,14 @@ def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
     )
 
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
+    
+    match fsdp_config.backward_prefetch:
+        case "pre":
+            backward_prefetch = BackwardPrefetch.BACKWARD_PRE
+        case "post":
+            backward_prefetch = BackwardPrefetch.BACKWARD_POST
 
-    model = FSDP(model, mixed_precision=mixed_precision, auto_wrap_policy=my_auto_wrap_policy, use_orig_params=True, device_id=torch.cuda.current_device())
+    model = FSDP(model, mixed_precision=mixed_precision, auto_wrap_policy=my_auto_wrap_policy, use_orig_params=True, device_id=torch.cuda.current_device(), backward_prefetch=backward_prefetch)
 
     return model
 
