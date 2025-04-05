@@ -54,8 +54,11 @@ class OptimConfig(BaseConfig):
 
 
 class FSDPConfig(BaseConfig):
-    backward_prefetch: Literal["pre", "post"] = "pre" # pre == faster but more memory, post == slower but less memory https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.BackwardPrefetch
- 
+    backward_prefetch: Literal["pre", "post"] = (
+        "pre"  # pre == faster but more memory, post == slower but less memory https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.BackwardPrefetch
+    )
+
+
 class TrainConfig(BaseConfig):
     micro_bs: int = 1
     ac_ckpt: bool | int = False
@@ -64,8 +67,7 @@ class TrainConfig(BaseConfig):
     liger_qwen: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
-    
-    
+
     fsdp: FSDPConfig = FSDPConfig()
 
 
@@ -136,7 +138,6 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
-    
     my_auto_wrap_policy = functools.partial(
         functools.partial(
             transformer_auto_wrap_policy,
@@ -147,14 +148,21 @@ def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
     )
 
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-    
+
     match fsdp_config.backward_prefetch:
         case "pre":
             backward_prefetch = BackwardPrefetch.BACKWARD_PRE
         case "post":
             backward_prefetch = BackwardPrefetch.BACKWARD_POST
 
-    model = FSDP(model, mixed_precision=mixed_precision, auto_wrap_policy=my_auto_wrap_policy, use_orig_params=True, device_id=torch.cuda.current_device(), backward_prefetch=backward_prefetch)
+    model = FSDP(
+        model,
+        mixed_precision=mixed_precision,
+        auto_wrap_policy=my_auto_wrap_policy,
+        use_orig_params=True,
+        device_id=torch.cuda.current_device(),
+        backward_prefetch=backward_prefetch,
+    )
 
     return model
 
@@ -229,11 +237,11 @@ def train(config: Config):
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
-    if config.train.torch_compile:
-        model = torch.compile(model) if not TYPE_CHECKING else model
-
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.resume)
+
+    if config.train.torch_compile:
+        model = torch.compile(model) if not TYPE_CHECKING else model
 
     if training_progress.step % config.optim.step_per_rollout != 0:
         logger.warning(
