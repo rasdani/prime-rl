@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, BackwardPrefetch
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 import wandb
 import shardcast
@@ -54,7 +54,6 @@ class OptimConfig(BaseConfig):
 
 
 class FSDPConfig(BaseConfig):
-    min_num_params: int = 20_000
     backward_prefetch: Literal["pre", "post"] = "pre" # pre == faster but more memory, post == slower but less memory https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.BackwardPrefetch
  
 class TrainConfig(BaseConfig):
@@ -139,7 +138,12 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
     
     my_auto_wrap_policy = functools.partial(
-        size_based_auto_wrap_policy, min_num_params=fsdp_config.min_num_params
+        functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls={
+                type(model.model.layers[0]),
+            },
+        ),
     )
 
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
