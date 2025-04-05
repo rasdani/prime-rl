@@ -3,7 +3,8 @@ import os
 from pathlib import Path
 import time
 import torch
-from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions, get_state_dict, set_state_dict
+
 from safetensors.torch import save_file
 
 from zeroband.logger import get_logger
@@ -37,6 +38,8 @@ def save_checkpoint_fsdp_state(
     """
     Checkpoint the model in a way that is compatible with FSDP.
     """
+    import warnings
+    warnings.filterwarnings("ignore", message="Please use DTensor instead")
     path_root = _pathify(path_root) / f"step_{training_progress.step}"
     world_info = get_world_info()
 
@@ -45,9 +48,11 @@ def save_checkpoint_fsdp_state(
     os.makedirs(path_root, exist_ok=True)
 
     with open(path_file, "wb") as f:
+        model_state_dict, optimizers_state_dict = get_state_dict(model, optimizers)
+
         state = {}
-        state["model"] = model.state_dict()
-        state["optimizers"] = [optimizer.state_dict() for optimizer in optimizers]
+        state["model"] = model_state_dict
+        state["optimizers"] = optimizers_state_dict
         state["training_progress"] = training_progress
         state["scheduler"] = scheduler.state_dict()
 
@@ -64,6 +69,8 @@ def load_checkpoint_fsdp_state(
     """
     Load the checkpoint state.
     """
+    import warnings
+    warnings.filterwarnings("ignore", message="Please use DTensor instead")
     path = _pathify(path)
     world_info = get_world_info()
 
@@ -75,11 +82,14 @@ def load_checkpoint_fsdp_state(
     with open(path_file, "rb") as f:
         state = torch.load(f, weights_only=False)
 
-    model.load_state_dict(state["model"])
+    set_state_dict(
+        model,
+        optimizers,
+        model_state_dict=state["model"],
+        optim_state_dict=state["optimizers"],
+    )
 
-    for optimizer, optimizer_state in zip(optimizers, state["optimizers"]):
-        optimizer.load_state_dict(optimizer_state)
-
+    training_progress.total_tokens = state["training_progress"].total_tokens
     training_progress.total_tokens = state["training_progress"].total_tokens
     training_progress.step = state["training_progress"].step
 
