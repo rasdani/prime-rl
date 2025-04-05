@@ -182,7 +182,7 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
-    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
+    perf_counter = PerfCounter(window_size=min(10, 2 * config.optim.step_per_rollout), model=model, seq_len=config.data.seq_length)
 
     if config.train.liger_qwen:
         apply_liger_kernel_to_qwen2(
