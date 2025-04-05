@@ -141,10 +141,9 @@ def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
         size_based_auto_wrap_policy, min_num_params=fsdp_config.min_num_params
     )
 
-    model = model.to("cuda")
     mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
 
-    model = FSDP(model, mixed_precision=mixed_precision, auto_wrap_policy=my_auto_wrap_policy, use_orig_params=True)
+    model = FSDP(model, mixed_precision=mixed_precision, auto_wrap_policy=my_auto_wrap_policy, use_orig_params=True, device_id=torch.cuda.current_device())
 
     return model
 
