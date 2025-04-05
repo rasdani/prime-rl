@@ -374,7 +374,6 @@ def train(config: Config):
             dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
             average_rewards = rewards_sum / rewards_token_count
 
-            # grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
             grad_norm = model.clip_grad_norm_(1.0)
             optimizer.step()
             scheduler.step()
