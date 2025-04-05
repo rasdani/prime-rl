@@ -313,9 +313,16 @@ def train(config: Config):
                     entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
                     # Loss
                     pg_loss, clip_ratio = grpo_loss(
-                        logits, input_ids, advantages, original_logprobs, loss_mask, config.temperature, config.grpo_epsilon
+                        logits,
+                        input_ids,
+                        advantages,
+                        original_logprobs,
+                        loss_mask,
+                        config.temperature,
+                        config.grpo_epsilon,
+                        config.masked_mean_axis,
                     )
-                    entropy = entropy_loss(logits, loss_mask, config.temperature)
+                    entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
                     loss = pg_loss - config.entropy_loss_coeff * entropy
                     loss = loss / gradient_accumulation_steps
