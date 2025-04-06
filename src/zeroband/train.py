@@ -55,7 +55,7 @@ class TrainConfig(BaseConfig):
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
     memory_profile: str | None = None
-    torch_compile: bool = True
+    torch_compile: bool = False  #  disabling torch compile because its too unstable for RL
     liger_qwen: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
