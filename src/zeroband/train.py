@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, BackwardPrefetch
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, BackwardPrefetch, ShardingStrategy
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 import wandb
@@ -57,6 +57,8 @@ class FSDPConfig(BaseConfig):
     backward_prefetch: Literal["pre", "post"] = (
         "pre"  # pre == faster but more memory, post == slower but less memory https://pytorch.org/docs/stable/fsdp.html#torch.distributed.fsdp.BackwardPrefetch
     )
+
+    sharding_strategy: Literal["full", "shard_grad", "no_shard"] = "full"
 
 
 class TrainConfig(BaseConfig):
@@ -155,6 +157,14 @@ def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
         case "post":
             backward_prefetch = BackwardPrefetch.BACKWARD_POST
 
+    match fsdp_config.sharding_strategy:
+        case "full":
+            sharding_strategy = ShardingStrategy.FULL_SHARD
+        case "shard_grad":
+            sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
+        case "no_shard":
+            sharding_strategy = ShardingStrategy.NO_SHARD
+
     model = FSDP(
         model,
         mixed_precision=mixed_precision,
@@ -162,6 +172,7 @@ def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
         use_orig_params=True,
         device_id=torch.cuda.current_device(),
         backward_prefetch=backward_prefetch,
+        sharding_strategy=sharding_strategy,
     )
 
     return model
