@@ -382,7 +382,7 @@ def train(config: Config):
                 "clip_seq_lens": clip_seq_lens.item(),
             }
 
-            log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}"
+            log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}, clip_ratio: {clip_ratio_batch.item():.4f}"
 
             del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
 
