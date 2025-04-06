@@ -1,4 +1,3 @@
-import functools
 import os
 from pathlib import Path
 import shutil
@@ -7,8 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision, BackwardPrefetch, ShardingStrategy
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import wandb
 import shardcast
@@ -140,40 +138,8 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 
 def apply_fsdp(model: ModelType, fsdp_config: FSDPConfig) -> ModelType:
-    my_auto_wrap_policy = functools.partial(
-        functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls={
-                type(model.model.layers[0]),
-            },
-        ),
-    )
-
-    mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-
-    match fsdp_config.backward_prefetch:
-        case "pre":
-            backward_prefetch = BackwardPrefetch.BACKWARD_PRE
-        case "post":
-            backward_prefetch = BackwardPrefetch.BACKWARD_POST
-
-    match fsdp_config.sharding_strategy:
-        case "full":
-            sharding_strategy = ShardingStrategy.FULL_SHARD
-        case "shard_grad":
-            sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
-        case "no_shard":
-            sharding_strategy = ShardingStrategy.NO_SHARD
-
-    model = FSDP(
-        model,
-        mixed_precision=mixed_precision,
-        auto_wrap_policy=my_auto_wrap_policy,
-        use_orig_params=True,
-        device_id=torch.cuda.current_device(),
-        backward_prefetch=backward_prefetch,
-        sharding_strategy=sharding_strategy,
-    )
+    model = model.to("cuda")
+    model = DDP(model, device_ids=[get_world_info().local_rank])
 
     return model
 
@@ -281,16 +247,17 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     for grad_acc_step in range(gradient_accumulation_steps):
-                        batch = next(train_dataloader_iterator)
-                        input_ids = batch["input_ids"].to("cuda")
+                        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                            batch = next(train_dataloader_iterator)
+                            input_ids = batch["input_ids"].to("cuda")
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                            logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                        input_ids = input_ids[:, 1:]
-                        logits = logits[:, :-1, :] / config.temperature
+                            input_ids = input_ids[:, 1:]
+                            logits = logits[:, :-1, :] / config.temperature
 
-                        per_token_logps = selective_log_softmax(logits, input_ids)
-                        batch["logprobs"] = per_token_logps.to("cpu")
+                            per_token_logps = selective_log_softmax(logits, input_ids)
+                            batch["logprobs"] = per_token_logps.to("cpu")
 
                         data.append(batch)
 
@@ -315,49 +282,50 @@ def train(config: Config):
 
             for _grad_acc_step in range(gradient_accumulation_steps):
                 # Load args
-                batch = next(logprobs_aware_iterator)
-                input_ids = batch["input_ids"].to("cuda")
-                loss_mask = batch["loss_mask"]
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    batch = next(logprobs_aware_iterator)
+                    input_ids = batch["input_ids"].to("cuda")
+                    loss_mask = batch["loss_mask"]
 
-                rewards = batch["rewards"][loss_mask.bool()]
-                rewards_sum += rewards.sum()
-                rewards_token_count += rewards.numel()
+                    rewards = batch["rewards"][loss_mask.bool()]
+                    rewards_sum += rewards.sum()
+                    rewards_token_count += rewards.numel()
 
-                seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
-                clip_seq_lens += (
-                    (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / gradient_accumulation_steps
-                )
+                    seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
+                    clip_seq_lens += (
+                        (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / gradient_accumulation_steps
+                    )
 
-                # Forward
-                logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                    # Forward
+                    logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
-                # Gather args for grpo loss
-                advantages = batch["advantages"].to("cuda")
-                loss_mask = loss_mask.to("cuda")
-                original_logprobs = batch["logprobs"].to("cuda")
-                if not config.on_policy_log_prob:
-                    original_logprobs = original_logprobs[:, 1:]
+                    # Gather args for grpo loss
+                    advantages = batch["advantages"].to("cuda")
+                    loss_mask = loss_mask.to("cuda")
+                    original_logprobs = batch["logprobs"].to("cuda")
+                    if not config.on_policy_log_prob:
+                        original_logprobs = original_logprobs[:, 1:]
 
-                # Loss
-                pg_loss, clip_ratio = grpo_loss(
-                    logits,
-                    input_ids,
-                    advantages,
-                    original_logprobs,
-                    loss_mask,
-                    config.temperature,
-                    config.grpo_epsilon,
-                    config.masked_mean_axis,
-                )
-                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
+                    # Loss
+                    pg_loss, clip_ratio = grpo_loss(
+                        logits,
+                        input_ids,
+                        advantages,
+                        original_logprobs,
+                        loss_mask,
+                        config.temperature,
+                        config.grpo_epsilon,
+                        config.masked_mean_axis,
+                    )
+                    entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
-                loss = pg_loss - config.entropy_loss_coeff * entropy
-                loss = loss / gradient_accumulation_steps
-                clip_ratio = clip_ratio / gradient_accumulation_steps
+                    loss = pg_loss - config.entropy_loss_coeff * entropy
+                    loss = loss / gradient_accumulation_steps
+                    clip_ratio = clip_ratio / gradient_accumulation_steps
 
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
+                    sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
-                del batch, logits, input_ids, advantages, loss_mask, original_logprobs
+                    del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
                 loss.backward()
@@ -385,7 +353,8 @@ def train(config: Config):
             dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
             average_rewards = rewards_sum / rewards_token_count
 
-            grad_norm = model.clip_grad_norm_(1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
             optimizer.step()
             scheduler.step()
 
