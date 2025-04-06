@@ -275,7 +275,7 @@ def train(config: Config):
         time_start = time.time()
 
         # here we want to pre-compute the logprobs with the model before update
-        with torch.no_grad():
+        with torch.no_grad() and FSDP.summon_full_params(model):
             if config.on_policy_log_prob:
                 data = []
 
