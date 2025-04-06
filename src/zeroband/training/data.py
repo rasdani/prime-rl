@@ -251,6 +251,7 @@ class BatchOutput(TypedDict):
     loss_mask: Int[torch.Tensor, "batch seq"]
     logprobs: Float[torch.Tensor, "batch seq"]
     seq_lens: Int[torch.Tensor, "batch"]
+    attn_mask: Float[torch.Tensor, "1 1 seq seq"]
 
 
 class PaddingColate:
@@ -269,6 +270,7 @@ class PaddingColate:
         loss_masks = []
         logprobs = []
         seq_lens = []
+        attn_masks = []
         for sample in samples:
             ids = sample["input_ids"]
             seq_len = len(ids)
@@ -299,6 +301,12 @@ class PaddingColate:
             loss_masks.append(loss_mask)
             logprobs.append(logprob)
 
+        batch_attn_mask = torch.tril(torch.ones((self._seq_len, self._seq_len), dtype=ids.dtype))
+        pairwise_seq_lens = [(seq_lens[i], seq_lens[i + 1]) for i in range(len(seq_lens) - 1)]
+        for s1, s2 in pairwise_seq_lens:
+            if s2 < self._seq_len:
+                batch_attn_mask[s2:self._seq_len, s1:s2] = 0
+
         return {
             "input_ids": torch.stack(inputs_ids, dim=0),
             "advantages": torch.stack(advantages, dim=0),
@@ -306,6 +314,7 @@ class PaddingColate:
             "loss_mask": torch.stack(loss_masks, dim=0).int(),
             "logprobs": torch.stack(logprobs, dim=0),
             "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
+            "attn_mask": batch_attn_mask.unsqueeze(0).unsqueeze(0),
         }
 
 
