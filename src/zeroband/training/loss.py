@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 
 # beartype here just make sure we have the correct shape
-@jaxtyped(typechecker=typechecker)
+# @jaxtyped(typechecker=typechecker)
 def grpo_loss(
     logits: Float[Tensor, "batch seq vocab"],
     input_ids: Int[Tensor, "batch seq"],
@@ -77,7 +77,7 @@ def selective_log_softmax(logits, index):
     return per_token_logps
 
 
-@torch.compile
+# @torch.compile
 def _compile_grpo_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
