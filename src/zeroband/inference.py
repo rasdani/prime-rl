@@ -45,6 +45,12 @@ class SamplingParamConfig(BaseConfig):
     top_k: int = -1
 
 
+class LenRewardConfig(BaseConfig):
+    min_length: int = 1000
+    max_length: int = 24000
+    reward_coef: int = 0.0003
+
+
 class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/deepscaler-math-genesys-format"
@@ -75,9 +81,7 @@ class Config(BaseConfig):
 
     ckpt_start_path: str | None = None
 
-    length_reward_min: int | None = None
-    length_reward_max: int | None = None
-    length_reward_coeff: float | None = None
+    len_reward: LenRewardConfig | None = None
 
     @model_validator(mode="after")
     def validate_step_batch_size(self):
