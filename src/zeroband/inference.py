@@ -80,7 +80,7 @@ class Config(BaseConfig):
 
     ckpt_start_path: str | None = None
 
-    toploc: bool = True
+    toploc: bool = False
 
     len_reward: LenRewardConfig | None = None
 
