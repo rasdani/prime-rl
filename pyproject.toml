@@ -26,6 +26,7 @@ dependencies = [
     "liger_kernel",
     "google-cloud-storage",
     "shardcast >= 0.1.7",
+    "pyext>=0.7",
 ] 
 
 [build-system]
