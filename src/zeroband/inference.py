@@ -246,7 +246,9 @@ def inference(config: Config):
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
     if os.environ.get("NODE_ADDRESS") is not None:
+        # We dont shuffle here because we shuffle reproducibly in the sampling loop.
         dataset = load_dataset(config.dataset, split="train")
+        assert config.seed is None, "Seed is not supported when NODE_ADDRESS is set"
         assert rank == 0, "DP is not supported when NODE_ADDRESS is set"
         node_address_int = int(os.environ.get("NODE_ADDRESS"), 16)
         logger.info(f"Seeding with {node_address_int} ({os.environ.get('NODE_ADDRESS')})")
@@ -326,6 +328,9 @@ def inference(config: Config):
         if node_address_int is not None:
             # TODO: What if we have multiple sample per real step?
             # Its impossible right now but we need to fix this if accept counter is used.
+
+            # We reseed the generator here to make the sampling reproducible at each step.
+            # This would work even if the node restarts and resumes from the current step.
             generator = np.random.default_rng(node_address_int + real_step)
             indexes = generator.integers(0, len(dataset), config.batch_size)
             batch = dataset.select(indexes)
