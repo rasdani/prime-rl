@@ -87,8 +87,6 @@ class Config(BaseConfig):
 
     @model_validator(mode="after")
     def validate_step_batch_size(self):
-        assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
-        assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
         assert (self.len_reward.min_len is None) == (self.len_reward.max_len is None), (
             "len_reward.min_length and len_reward.max_length must be either both defined or both None"
         )
