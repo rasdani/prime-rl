@@ -195,7 +195,7 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    model = apply_fsdp(model)
+    apply_fsdp(model, config.train.reshard_after_forward)
 
     optimizer = torch.optim.AdamW(
         params=model.parameters(),
