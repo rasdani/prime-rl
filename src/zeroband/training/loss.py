@@ -1,11 +1,12 @@
 import torch
 from torch import Tensor
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, jaxtyped
+from beartype import beartype as typechecker
 import torch.nn.functional as F
 
 
 # beartype here just make sure we have the correct shape
-# @jaxtyped(typechecker=typechecker)
+@jaxtyped(typechecker=typechecker)
 def grpo_loss(
     logits: Float[Tensor, "batch seq vocab"],
     input_ids: Int[Tensor, "batch seq"],
@@ -114,7 +115,7 @@ def _compile_grpo_loss(
     return loss, clip_ratio
 
 
-# @jaxtyped(typechecker=typechecker)
+@jaxtyped(typechecker=typechecker)
 def entropy_loss(
     logits: Float[Tensor, "batch seq vocab"], loss_mask: Int[Tensor, "batch seq"], temperature: float, masked_mean_axis: int | None
 ) -> Tensor:
