@@ -51,6 +51,12 @@ class LenRewardConfig(BaseConfig):
     reward_coef: int = 0.0003
 
 
+class DifficultyFilteringConfig(BaseConfig):
+    solve_rate_field: str = "solve_rate_qwen_r1_distill_7b"
+    min_solve_rate: float = 0.0
+    max_solve_rate: float = 0.5
+
+
 class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/deepscaler-math-genesys-format"
@@ -83,6 +89,7 @@ class Config(BaseConfig):
     toploc: bool = False
 
     len_reward: LenRewardConfig | None = None
+    difficulty_filtering: DifficultyFilteringConfig | None = None
 
 
 def fake_chat_template(messages):
@@ -331,6 +338,12 @@ def inference(config: Config):
         generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
         dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
         node_address_int = None
+
+    if config.difficulty_filtering:
+        dataset = dataset.filter(
+            lambda x: x[config.difficulty_filtering.solve_rate_field] >= config.difficulty_filtering.min_solve_rate
+            and x[config.difficulty_filtering.solve_rate_field] <= config.difficulty_filtering.max_solve_rate
+        )
 
     max_samples = config.max_samples or len(dataset)
 
