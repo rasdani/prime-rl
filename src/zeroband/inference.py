@@ -245,10 +245,16 @@ def inference(config: Config):
     logger = get_logger(f"INFERENCE {rank}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
-    generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
-    # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
+    if os.environ.get("NODE_ADDRESS") is not None:
+        dataset = load_dataset(config.dataset, split="train")
+        node_address_int = (int(os.environ.get("NODE_ADDRESS"), 16) * (rank + 1)) % 1000_000_007
+        logger.info(f"Seeding with {node_address_int} ({os.environ.get('NODE_ADDRESS')})")
+    else:
+        # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
+        generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
+        dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
+        node_address_int = None
 
-    dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
     max_samples = config.max_samples or len(dataset)
 
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
@@ -317,7 +323,12 @@ def inference(config: Config):
                 attempt_count += 1
 
         # Get batch
-        batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
+        if node_address_int is not None:
+            generator = np.random.default_rng(node_address_int + real_step)
+            indexes = generator.integers(0, len(dataset), config.batch_size)
+            batch = dataset.select(indexes)
+        else:
+            batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
         messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
