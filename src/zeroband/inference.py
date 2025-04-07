@@ -85,6 +85,21 @@ class Config(BaseConfig):
     len_reward: LenRewardConfig | None = None
 
 
+def fake_chat_template(messages):
+    formatted_prompts = []
+
+    for conversation in messages:
+        prompt = ""
+        for message in conversation:
+            if message["role"] == "user":
+                prompt += f"Human: {message['content']}\n\n"
+            elif message["role"] == "assistant":
+                prompt += f"Assistant: {message['content']}\n\n"
+        formatted_prompts.append(prompt.strip())
+
+    return formatted_prompts
+
+
 pa_schema = pa.schema(
     [
         ("input_tokens", pa.list_(pa.int32())),
@@ -213,20 +228,20 @@ def generate_target_length_prompts(config: Config, batch_size: int):
     return [""] * batch_size, [-1] * batch_size
 
 
-async def compute_reward_for_output(output, verification_info, len_reward_coeff):
+async def compute_reward_for_output(output, verification_info, len_reward_config):
     loop = asyncio.get_running_loop()
     # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
     math_reward = await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
 
     total_reward = math_reward
     length_penalty = 0
-    if verification_info["target_length"] > 0 and math_reward == 1:
+    if verification_info["target_length"] > 0:
         # Calculate length reward - this could be a separate function
         output_length = len(output.token_ids)
         target_length = verification_info["target_length"]
 
         length_penalty = abs(output_length - target_length)
-        length_penalty = length_penalty * len_reward_coeff  # Scale factor to balance with math reward
+        length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
         length_penalty = min(1, length_penalty)
 
         total_reward -= length_penalty
@@ -247,7 +262,7 @@ async def compute_rewards_async(
 
     for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
         for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.len_reward.reward_coef)))
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.len_reward)))
             mapping.append(req_idx)
 
     all_results = await asyncio.gather(*tasks)
@@ -403,10 +418,12 @@ def inference(config: Config):
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
 
-        assert tokenizer.chat_template is not None, "Selected Tokenizer does not have a chat template"
-        prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
-        for i, p in enumerate(prompts):
-            prompts[i] = p.replace("<｜begin▁of▁sentence｜>", "")
+        if tokenizer.chat_template:
+            prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
+            for i, p in enumerate(prompts):
+                prompts[i] = p.replace("<｜begin▁of▁sentence｜>", "")
+        else:
+            prompts = fake_chat_template(messages)
 
         start_time = time.time()
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)
