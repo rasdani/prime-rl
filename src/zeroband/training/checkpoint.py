@@ -102,7 +102,7 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
 
     start_time = time.time()
     logger.info(f"Saving rollout ckpt at {path}")
-    state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True))
+    state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
 
     # Only save on rank 0
     if torch.distributed.get_rank() == 0:
