@@ -254,68 +254,96 @@ class BatchOutput(TypedDict):
     attn_mask: Float[torch.Tensor, "1 1 seq seq"]
 
 
-class PaddingColate:
-    def __init__(self, seq_len: int, pad_token_id: int) -> None:
-        self._seq_len = seq_len
+class SequencePackingDataset(IterableDataset):
+    def __init__(self, dataset: IterableDataset, seq_len: int, pad_token_id: int, micro_batch_size: int):
+        self._dataset = dataset
+        self._seq_len = seq_len * micro_batch_size
         self._pad_token_id = pad_token_id
 
-    def __call__(self, samples: list[dict[str, torch.LongTensor]]) -> BatchOutput:
-        assert samples[0].keys() == {"input_ids", "advantages", "rewards", "loss_mask", "logprobs"}, (
-            f"samples[0].keys() == {samples[0].keys()}"
-        )
-
-        inputs_ids = []
+    def __iter__(self) -> Generator[dict[str, Any], Any, None]:
+        input_ids = []
         advantages = []
         rewards = []
         loss_masks = []
         logprobs = []
         seq_lens = []
-        attn_masks = []
-        for sample in samples:
-            ids = sample["input_ids"]
-            seq_len = len(ids)
-            # seq_len = self._seq_len
+        seq_len_sum = 0
+        dataset_iter = enumerate(iter(self._dataset))
+        while True:
+            try:
+                i, sample = next(dataset_iter)
+                seq_len = len(sample["input_ids"])
+                input_dtype = sample["input_ids"].dtype
+                if seq_len > self._seq_len:
+                    get_logger().debug(f"Sample {i} seq_len: {seq_len} > {self._seq_len}. Skipping sample.")
+                    continue
+            except StopIteration:
+                break
 
-            adv = sample["advantages"]
-            rew = sample["rewards"]
-            loss_mask = sample["loss_mask"]
-            logprob = sample["logprobs"]
+            # If the sample fits, add it to the batch.
+            if (seq_len_sum + seq_len) < self._seq_len:
+                input_ids.append(sample["input_ids"])
+                advantages.append(sample["advantages"])
+                rewards.append(sample["rewards"])
+                loss_masks.append(sample["loss_mask"])
+                logprobs.append(sample["logprobs"])
+                seq_lens.append(seq_len)
+                seq_len_sum += seq_len
+                assert len(sample["input_ids"]) == len(sample["advantages"]) == len(sample["rewards"]) == len(sample["loss_mask"]) == len(sample["logprobs"]), \
+                    f"Sample {i} has different lengths: {len(sample['input_ids'])}, {len(sample['advantages'])}, {len(sample['rewards'])}, {len(sample['loss_mask'])}, {len(sample['logprobs'])}"
 
-            if len(ids) >= self._seq_len:
-                ids = ids[: self._seq_len]
-                adv = adv[: self._seq_len]
-                rew = rew[: self._seq_len]
-                loss_mask = loss_mask[: self._seq_len]
-                logprob = logprob[: self._seq_len]
+            # Otherwise, pad the batch and yield it.
             else:
-                ids = torch.cat([ids, torch.full((self._seq_len - len(ids),), fill_value=self._pad_token_id, dtype=ids.dtype)])
-                adv = torch.cat([adv, torch.zeros(self._seq_len - len(adv), dtype=adv.dtype)])
-                rew = torch.cat([rew, torch.zeros(self._seq_len - len(rew), dtype=rew.dtype)])
-                loss_mask = torch.cat([loss_mask, torch.zeros(self._seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
-                logprob = torch.cat([logprob, torch.zeros(self._seq_len - len(logprob), dtype=logprob.dtype)])
+                # Pad. We don't append to seq_lens so not to attend to the padding.
+                padding_len = self._seq_len - seq_len_sum
+                input_ids.append(torch.full((padding_len,), fill_value=self._pad_token_id, dtype=input_dtype))
+                advantages.append(torch.zeros(padding_len, dtype=sample["advantages"].dtype))
+                rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
+                loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
+                logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
 
-            seq_lens.append(seq_len)
-            inputs_ids.append(ids)
-            advantages.append(adv)
-            rewards.append(rew)
-            loss_masks.append(loss_mask)
-            logprobs.append(logprob)
+                # Yield the batch and reset so we can make a new one.
+                position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens]
+                                       + [torch.zeros(padding_len, dtype=input_dtype)])
+                yield {
+                    "input_ids": torch.cat(input_ids),
+                    "advantages": torch.cat(advantages),
+                    "rewards": torch.cat(rewards),
+                    "loss_mask": torch.cat(loss_masks).int(),
+                    "logprobs": torch.cat(logprobs),
+                    "seq_lens": torch.tensor(seq_lens),
+                    "position_ids": position_ids,
+                }
 
-        batch_attn_mask = torch.tril(torch.ones((self._seq_len, self._seq_len), dtype=ids.dtype))
-        pairwise_seq_lens = [(seq_lens[i], seq_lens[i + 1]) for i in range(len(seq_lens) - 1)]
-        for s1, s2 in pairwise_seq_lens:
-            if s2 < self._seq_len:
-                batch_attn_mask[s2:self._seq_len, s1:s2] = 0
+                input_ids = []
+                advantages = []
+                rewards = []
+                loss_masks = []
+                logprobs = []
+                seq_lens = []
+                seq_len_sum = 0
 
-        return {
-            "input_ids": torch.stack(inputs_ids, dim=0),
-            "advantages": torch.stack(advantages, dim=0),
-            "rewards": torch.stack(rewards, dim=0),
-            "loss_mask": torch.stack(loss_masks, dim=0).int(),
-            "logprobs": torch.stack(logprobs, dim=0),
-            "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
-            "attn_mask": batch_attn_mask.unsqueeze(0).unsqueeze(0),
-        }
+        # Pad and yield the last batch if it is not empty
+        if seq_len_sum:
+            padding_len = self._seq_len - seq_len_sum
+            input_ids.append(torch.full((padding_len,), fill_value=self._pad_token_id, dtype=input_dtype))
+            advantages.append(torch.zeros(padding_len, dtype=sample["advantages"].dtype))
+            rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
+            loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
+            logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
+            position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens]
+                                   + [torch.zeros(padding_len, dtype=input_dtype)])
+            yield {
+                "input_ids": torch.cat(input_ids).contiguous(),
+                "advantages": torch.cat(advantages),
+                "rewards": torch.cat(rewards),
+                "loss_mask": torch.cat(loss_masks).int(),
+                "logprobs": torch.cat(logprobs),
+                "seq_lens": torch.tensor(seq_lens),
+                "position_ids": position_ids.contiguous(),
+            }
+
+        return # Dataset exhausted
 
 
 def get_dataloader(
@@ -336,5 +364,12 @@ def get_dataloader(
     else:
         train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init)
 
-    collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)  # todo adjust padding token for qwen later
-    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers, collate_fn=collate_fn), prefetcher
+    # Wrap for sequence packing
+    train_dataset = SequencePackingDataset(
+        dataset=train_dataset,
+        seq_len=data_config.seq_length,
+        pad_token_id=tokenizer.pad_token_id,
+        micro_batch_size=micro_batch_size
+    )
+
+    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers), prefetcher

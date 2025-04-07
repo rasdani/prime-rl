@@ -242,8 +242,12 @@ def train(config: Config):
                     for grad_acc_step in range(gradient_accumulation_steps):
                         batch = next(train_dataloader_iterator)
                         input_ids = batch["input_ids"].to("cuda")
+                        position_ids = batch["position_ids"].to("cuda")
+                        assert len(input_ids.shape) == 2 and len(position_ids.shape) == 2, f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}"
+                        assert input_ids.shape == position_ids.shape, f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}"
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                        #logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                        logits = model(input_ids=input_ids, position_ids=position_ids).logits.contiguous()
 
                         input_ids = input_ids[:, 1:]
                         logits = logits[:, :-1, :] / config.temperature
@@ -277,7 +281,15 @@ def train(config: Config):
                 # Load args
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
+                position_ids = batch["position_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
+
+                logger.info(f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}")
+                assert len(input_ids.shape) == 2 and len(position_ids.shape) == 2, f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}"
+                assert input_ids.shape == position_ids.shape, f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}"
+
+                d = (torch.diff(position_ids, dim=-1) >= 0).all()
+                logger.info(f"position_ids diff: {d}")
 
                 rewards = batch["rewards"][loss_mask.bool()]
                 rewards_sum += rewards.sum()
@@ -289,9 +301,10 @@ def train(config: Config):
                 )
 
                 # Forward
-                logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids, position_ids=position_ids).logits.contiguous()
 
                 # Gather args for grpo loss
+                del position_ids
                 advantages = batch["advantages"].to("cuda")
                 loss_mask = loss_mask.to("cuda")
                 original_logprobs = batch["logprobs"].to("cuda")
