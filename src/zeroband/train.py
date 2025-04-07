@@ -55,7 +55,7 @@ class TrainConfig(BaseConfig):
     ac_ckpt: bool | int = False
     reshard_after_forward: bool = True  # old shard grad op True mean full shard
     memory_profile: str | None = None
-    torch_compile: bool = True
+    torch_compile: bool = False  #  disabling torch compile because its too unstable for RL
     liger_qwen: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
@@ -93,7 +93,7 @@ class Config(BaseConfig):
     grpo_epsilon: float = 0.2
     entropy_loss_coeff: float = 0.001
 
-    on_policy_log_prob: bool = False
+    on_policy_log_prob: bool = True
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
     masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
@@ -241,6 +241,8 @@ def train(config: Config):
     while True:
         time_start = time.time()
 
+        total_time_data_loading = 0
+
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             if config.on_policy_log_prob:
@@ -248,7 +250,13 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     for grad_acc_step in range(gradient_accumulation_steps):
+                        time_data_loading = time.time()
+
                         batch = next(train_dataloader_iterator)
+
+                        time_data_loading = time.time() - time_data_loading
+                        total_time_data_loading += time_data_loading
+
                         input_ids = batch["input_ids"].to("cuda")
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -263,6 +271,9 @@ def train(config: Config):
                         data.append(batch)
 
                 logprobs_aware_iterator = iter(data)
+
+                time_logprob = time.time() - time_start
+                logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
             else:
                 logprobs_aware_iterator = train_dataloader_iterator
 
@@ -489,7 +500,12 @@ def train(config: Config):
         time_rollout_step = time.time() - time_start
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
-            wandb.log({"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step})
+            new_metrics = {"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step}
+            if config.on_policy_log_prob:
+                new_metrics["time_logprob"] = time_logprob
+                new_metrics["time_data_loading"] = total_time_data_loading
+
+            wandb.log(new_metrics)
 
         if training_progress.step >= config.optim.total_steps:
             break

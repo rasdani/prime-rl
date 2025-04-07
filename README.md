@@ -82,20 +82,6 @@ uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/150M
 
 when using `on_policy_log_prob` you might need to do `ulimit -n 4096` to avoid crash.
 
-## RL launcher
-
-rl launcher is a script that allow to start training and inference at the same time and assign GPUs to each process.
-
-Under the hood its just start script a bit like torchrun do.
-
-```bash
-uv run src/zeroband/rl_launcher.py @ configs/rl_debug.toml --rollout_path outputs --rollout_data data_rollout
-```
-
-You can pass any config that you would pass for training via `--train.<config_name>` and for inference via `--inference.<config_name>`.
-
-In the future this launcher will make sure that both training and inference configs are compatible with each other. For now there is no specific config validation logic.
-
 ## manual 4k run
 
 on two different terminal do:
