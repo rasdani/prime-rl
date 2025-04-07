@@ -203,9 +203,9 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 
 
 def generate_target_length_prompts(config: Config, batch_size: int):
-    if config.length_reward_min and config.length_reward_max:
+    if config.len_reward is not None:
         target_lengths = torch.randint(
-            low=config.length_reward_min, high=config.length_reward_max + 1, size=(batch_size,), device="cpu"
+            low=config.len_reward.min_length, high=config.len_reward.max_length + 1, size=(batch_size,), device="cpu"
         ).tolist()
 
         return [f"\n\nThink for {target} tokens." for target in target_lengths], target_lengths
@@ -247,7 +247,7 @@ async def compute_rewards_async(
 
     for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
         for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.length_reward_coeff)))
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.len_reward.reward_coef)))
             mapping.append(req_idx)
 
     all_results = await asyncio.gather(*tasks)
@@ -392,7 +392,6 @@ def inference(config: Config):
         else:
             batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
         messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
-
 
         length_prompt_additions, target_lengths = generate_target_length_prompts(config, len(batch))
 
