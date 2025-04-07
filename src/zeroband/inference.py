@@ -34,6 +34,8 @@ from zeroband.inferencing.toploc import TopLocCache
 from zeroband.training.mp import EnvWrapper, cuda_available_devices
 from zeroband.prime_metrics import PrimeMetric
 
+from pydantic import model_validator
+
 
 class SamplingParamConfig(BaseConfig):
     temperature: float = 0.6
@@ -83,7 +85,6 @@ class Config(BaseConfig):
     len_reward: LenRewardConfig | None = None
     toploc: bool = True
 
-
     @model_validator(mode="after")
     def validate_step_batch_size(self):
         assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
@@ -92,7 +93,7 @@ class Config(BaseConfig):
             "len_reward.min_length and len_reward.max_length must be either both defined or both None"
         )
         return self
-      
+
 
 pa_schema = pa.schema(
     [
@@ -212,9 +213,9 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 
 
 def generate_target_length_prompts(config: Config, batch_size: int):
-    if config.length_reward_min and config.length_reward_max:
+    if config.len_reward.min_len and config.len_reward.max_len:
         target_lengths = torch.randint(
-            low=config.length_reward_min, high=config.length_reward_max + 1, size=(batch_size,), device="cpu"
+            low=config.len_reward.min_len, high=config.len_reward.max_len + 1, size=(batch_size,), device="cpu"
         ).tolist()
 
         return [f"\n\nThink for {target} tokens." for target in target_lengths], target_lengths
@@ -256,7 +257,7 @@ async def compute_rewards_async(
 
     for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
         for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.length_reward_coeff)))
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.len_reward.reward_coef)))
             mapping.append(req_idx)
 
     all_results = await asyncio.gather(*tasks)
