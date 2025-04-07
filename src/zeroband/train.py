@@ -255,6 +255,9 @@ def train(config: Config):
                         data.append(batch)
 
                 logprobs_aware_iterator = iter(data)
+
+                time_logprob = time.time() - time_start
+                logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
             else:
                 logprobs_aware_iterator = train_dataloader_iterator
 
@@ -434,7 +437,10 @@ def train(config: Config):
         time_rollout_step = time.time() - time_start
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
-            wandb.log({"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step})
+            new_metrics = {"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step}
+            if time_logprob is not None:
+                new_metrics["time_logprob"] = time_logprob
+            wandb.log(new_metrics)
 
         if training_progress.step >= config.optim.total_steps:
             break
