@@ -60,6 +60,8 @@ RUN . .venv/bin/activate && uv sync && uv pip install flash-attn --no-build-isol
 FROM python:3.11-slim
 WORKDIR /root/prime-rl
 
+RUN apt-get update && apt-get install -y --no-install-recommends --force-yes build-essential
+
 # Copy virtual environment
 COPY --from=builder /root/prime-rl/.venv /root/prime-rl/.venv
 RUN rm /root/prime-rl/.venv/bin/python
