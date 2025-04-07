@@ -89,7 +89,7 @@ def load_checkpoint_fsdp_state(
 async_ckpt_job = None
 
 
-def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16) -> Path:
+def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16, async_save: bool = False) -> Path:
     """
     Save the checkpoint for rollout as one unified safetensors file.
 
@@ -106,9 +106,6 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
 
     start_time = time.time()
     logger.info(f"Saving rollout ckpt at {path}")
-    # state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
-
-    # Only save on rank 0
 
     cpu_state = {}
 
@@ -132,11 +129,11 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
 
             logger.info(f"Full Rollout ckpt saved at {path} in {time.time() - start_time:.2f} seconds")
 
-    logger.info(f"Rollout ckpt async saving  in {path} in {time.time() - start_time:.2f} seconds scheduled withasync")
+    if async_save:
+        logger.info(f"Rollout ckpt async saving  in {path} in {time.time() - start_time:.2f} seconds scheduled with async")
+        async_ckpt_job = threading.Thread(target=_save)
+        async_ckpt_job.start()
+    else:
+        _save()
 
-    # if async_ckpt_job is not None:
-    #     async_ckpt_job.join()
-
-    async_ckpt_job = threading.Thread(target=_save)
-    async_ckpt_job.start()
     return path_file
