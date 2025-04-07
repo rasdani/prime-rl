@@ -80,9 +80,24 @@ class Config(BaseConfig):
 
     ckpt_start_path: str | None = None
 
-    toploc: bool = True
+    toploc: bool = False
 
     len_reward: LenRewardConfig | None = None
+
+
+def fake_chat_template(messages):
+    formatted_prompts = []
+
+    for conversation in messages:
+        prompt = ""
+        for message in conversation:
+            if message["role"] == "user":
+                prompt += f"Human: {message['content']}\n\n"
+            elif message["role"] == "assistant":
+                prompt += f"Assistant: {message['content']}\n\n"
+        formatted_prompts.append(prompt.strip())
+
+    return formatted_prompts
 
 
 pa_schema = pa.schema(
@@ -203,7 +218,7 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 
 
 def generate_target_length_prompts(config: Config, batch_size: int):
-    if config.len_reward:
+    if config.len_reward is not None:
         target_lengths = torch.randint(
             low=config.len_reward.min_length, high=config.len_reward.max_length + 1, size=(batch_size,), device="cpu"
         ).tolist()
@@ -304,10 +319,18 @@ def inference(config: Config):
     logger = get_logger(f"INFERENCE {rank}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
-    generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
-    # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
-
-    dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
+    if os.environ.get("NODE_ADDRESS") is not None:
+        # We dont shuffle here because we shuffle reproducibly in the sampling loop.
+        dataset = load_dataset(config.dataset, split="train")
+        assert config.seed is None, "Seed is not supported when NODE_ADDRESS is set"
+        assert rank == 0, "DP is not supported when NODE_ADDRESS is set"
+        node_address_int = int(os.environ.get("NODE_ADDRESS"), 16)
+        logger.info(f"Seeding with {node_address_int} ({os.environ.get('NODE_ADDRESS')})")
+    else:
+        # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
+        generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
+        dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
+        node_address_int = None
 
     max_samples = config.max_samples or len(dataset)
 
@@ -332,7 +355,6 @@ def inference(config: Config):
         if len(sampling_metadata.seq_groups) != hidden_states.shape[0]:
             raise ValueError(f"Lengths dont match: {len(sampling_metadata.seq_groups)} {hidden_states.shape}")
 
-        # TODO: Maybe just use sampling_metadata.selected_token_indices?
         index = [i.seq_ids[0] for i in sampling_metadata.seq_groups]
         toploc_cache.add(index, hidden_states)
 
@@ -377,7 +399,18 @@ def inference(config: Config):
                 attempt_count += 1
 
         # Get batch
-        batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
+        if node_address_int is not None:
+            # TODO: What if we have multiple sample per real step?
+            # Its impossible right now but we need to fix this if accept counter is used.
+
+            # We reseed the generator here to make the sampling reproducible at each step.
+            # This would work even if the node restarts and resumes from the current step.
+            generator = np.random.default_rng(node_address_int + real_step)
+            indexes = generator.integers(0, len(dataset), config.batch_size)
+            batch = dataset.select(indexes)
+        else:
+            batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
+        messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
 
         length_prompt_additions, target_lengths = generate_target_length_prompts(config, len(batch))
 
@@ -385,14 +418,17 @@ def inference(config: Config):
             [{"role": "user", "content": item["prompt"] + length_prompt}, {"role": "assistant", "content": "<think>\n"}]
             for item, length_prompt in zip(batch, length_prompt_additions)
         ]
+
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
         task_types = [item["task_type"] for item in batch]
 
-        assert tokenizer.chat_template is not None, "Selected Tokenizer does not have a chat template"
-        prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
-        for i, p in enumerate(prompts):
-            prompts[i] = p.replace("<｜begin▁of▁sentence｜>", "")
+        if tokenizer.chat_template:
+            prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
+            for i, p in enumerate(prompts):
+                prompts[i] = p.replace("<｜begin▁of▁sentence｜>", "")
+        else:
+            prompts = fake_chat_template(messages)
 
         start_time = time.time()
         generated_tokens = llm.generate(prompts, sampling_params, use_tqdm=False)

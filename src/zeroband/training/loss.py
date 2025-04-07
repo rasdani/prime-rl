@@ -77,7 +77,7 @@ def selective_log_softmax(logits, index):
     return per_token_logps
 
 
-@torch.compile
+# @torch.compile
 def _compile_grpo_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -122,7 +122,7 @@ def entropy_loss(
     return _compile_entropy_loss(logits=logits, loss_mask=loss_mask, temperature=temperature, masked_mean_axis=masked_mean_axis)
 
 
-@torch.compile
+# @torch.compile
 def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, temperature: float, masked_mean_axis: int | None):
     logits = logits[:, :-1, :]
     logits = logits / temperature
