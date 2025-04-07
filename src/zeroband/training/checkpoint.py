@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import threading
 import time
 import torch
 from safetensors.torch import save_file
@@ -85,6 +86,9 @@ def load_checkpoint_fsdp_state(
     scheduler.load_state_dict(state["scheduler"])
 
 
+async_ckpt_job = None
+
+
 def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16) -> Path:
     """
     Save the checkpoint for rollout as one unified safetensors file.
@@ -119,11 +123,20 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
 
     logger.info(f"gathering full tensor checkpointing in {time.time() - start_time:.2f} seconds")
 
-    if world_info.rank == 0:
-        save_file(cpu_state, path_file, metadata={"format": "pt"})
+    def _save():
+        if world_info.rank == 0:
+            save_file(cpu_state, path_file, metadata={"format": "pt"})
 
-    stable_file = path / "stable"
-    stable_file.touch()
+            stable_file = path / "stable"
+            stable_file.touch()
 
-    logger.info(f"Rollout ckpt saved at {path} in {time.time() - start_time:.2f} seconds")
+            logger.info(f"Full Rollout ckpt saved at {path} in {time.time() - start_time:.2f} seconds")
+
+    logger.info(f"Rollout ckpt async saving  in {path} in {time.time() - start_time:.2f} seconds scheduled withasync")
+
+    # if async_ckpt_job is not None:
+    #     async_ckpt_job.join()
+
+    async_ckpt_job = threading.Thread(target=_save)
+    async_ckpt_job.start()
     return path_file
