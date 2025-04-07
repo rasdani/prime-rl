@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, MixedPrecision
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
 import wandb
 import shardcast
 
@@ -129,9 +129,14 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool):
     mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32)
-    model = FSDP(model, mixed_precision=mixed_precision)
 
-    return model
+    for layer_id, transformer_block in enumerate(model.model.layers):
+        if reshard_after_forward:
+            layer_reshard_after_forward = layer_id < len(model.model.layers) - 1
+        else:
+            layer_reshard_after_forward = False
+        fully_shard(transformer_block, mp_policy=mp_policy, reshard_after_forward=layer_reshard_after_forward)
+    fully_shard(model, mp_policy=mp_policy, reshard_after_forward=reshard_after_forward)
 
 
 def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> int:
@@ -308,7 +313,7 @@ def train(config: Config):
                 length_pen_token_count += len_pen_this.numel()
 
                 sample_task_reward_batch += batch["task_rewards"][:, 0].sum() / batch["task_rewards"].shape[0] / gradient_accumulation_steps
-                
+
                 # Loss
                 pg_loss, clip_ratio = grpo_loss(
                     logits,
@@ -444,7 +449,7 @@ def train(config: Config):
                 f"average_task_rewards: {average_task_rewards.item():.4f}, "
                 f"average_length_penalties: {average_length_penalties.item():.4f}"
             )
-            
+
             del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
 
             tokens_per_second = perf_counter.get_tokens_per_second()
