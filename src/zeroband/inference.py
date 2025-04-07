@@ -53,7 +53,7 @@ class LenRewardConfig(BaseConfig):
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
-    dataset: str = "justus27/rl-semi"
+    dataset: str = "justus27/deepscaler-math-genesys-format"
     batch_size: int = 32
     max_samples: int | None = None
     output_path: str = "outputs"
@@ -308,7 +308,6 @@ def inference(config: Config):
     # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
 
     dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
-    dataset = dataset.filter(lambda x: x["task_type"] == "prime_rl_code")
 
     max_samples = config.max_samples or len(dataset)
 
