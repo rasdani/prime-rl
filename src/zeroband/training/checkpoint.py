@@ -117,6 +117,8 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
         if world_info.rank == 0:
             cpu_state[key] = value.to("cpu", non_blocking=True)
 
+    logger.info(f"gathering full tensor checkpointing in {time.time() - start_time:.2f} seconds")
+
     if world_info.rank == 0:
         save_file(cpu_state, path_file, metadata={"format": "pt"})
 
