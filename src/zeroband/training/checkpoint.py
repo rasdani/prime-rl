@@ -3,9 +3,8 @@ import os
 from pathlib import Path
 import time
 import torch
-from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from safetensors.torch import save_file
-
+from torch.distributed.tensor import DTensor
 from zeroband.logger import get_logger
 from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
@@ -94,6 +93,7 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
         Path to the saved checkpoint safetensor
     """
     logger = get_logger()
+    world_info = get_world_info()
 
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
@@ -102,16 +102,26 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
 
     start_time = time.time()
     logger.info(f"Saving rollout ckpt at {path}")
-    state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
+    # state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
 
     # Only save on rank 0
-    if torch.distributed.get_rank() == 0:
-        for key, value in state.items():
-            state[key] = value.to(dtype)
-        save_file(state, path_file, metadata={"format": "pt"})
 
-        stable_file = path / "stable"
-        stable_file.touch()
+    cpu_state = {}
+
+    for key, value in model.state_dict().items():
+        if isinstance(value, DTensor):
+            value: DTensor = value.to(dtype)
+            # only gather after the downcast to dtype as it will be faster
+            value = value.full_tensor()  # idealy would only be gathered on rank 0
+
+        if world_info.rank == 0:
+            cpu_state[key] = value.to("cpu", non_blocking=True)
+
+    if world_info.rank == 0:
+        save_file(cpu_state, path_file, metadata={"format": "pt"})
+
+    stable_file = path / "stable"
+    stable_file.touch()
 
     logger.info(f"Rollout ckpt saved at {path} in {time.time() - start_time:.2f} seconds")
     return path_file
