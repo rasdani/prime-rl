@@ -247,7 +247,8 @@ def inference(config: Config):
 
     if os.environ.get("NODE_ADDRESS") is not None:
         dataset = load_dataset(config.dataset, split="train")
-        node_address_int = (int(os.environ.get("NODE_ADDRESS"), 16) * (rank + 1)) % 1000_000_007
+        assert rank == 0, "DP is not supported when NODE_ADDRESS is set"
+        node_address_int = int(os.environ.get("NODE_ADDRESS"), 16) % 1000_000_007
         logger.info(f"Seeding with {node_address_int} ({os.environ.get('NODE_ADDRESS')})")
     else:
         # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
@@ -324,6 +325,7 @@ def inference(config: Config):
 
         # Get batch
         if node_address_int is not None:
+            # TODO: What if we have multiple sample per real step?
             generator = np.random.default_rng(node_address_int + real_step)
             indexes = generator.integers(0, len(dataset), config.batch_size)
             batch = dataset.select(indexes)
