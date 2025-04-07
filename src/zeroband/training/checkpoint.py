@@ -6,6 +6,7 @@ import time
 import torch
 from safetensors.torch import save_file
 from torch.distributed.tensor import DTensor
+from torch.distributed.checkpoint.state_dict import _get_fqns as get_fqns
 from zeroband.logger import get_logger
 from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
@@ -116,6 +117,9 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
             value = value.full_tensor()  # idealy would only be gathered on rank 0
 
         if world_info.rank == 0:
+            key: set[str] = get_fqns(model, key)
+            assert len(key) == 1
+            key = next(iter(key))
             cpu_state[key] = value.to("cpu", non_blocking=True)
 
     logger.info(f"gathering full tensor checkpointing in {time.time() - start_time:.2f} seconds")
