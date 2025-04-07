@@ -96,6 +96,8 @@ class Config(BaseConfig):
     on_policy_log_prob: bool = False
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
+    masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
+
     @model_validator(mode="after")
     def check_liger(self):
         if self.train.liger_qwen:
@@ -125,10 +127,8 @@ def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers
     return batch_size // micro_bs
 
 
-def apply_fsdp(model: ModelType) -> ModelType:
-    model = model.to("cuda")
-    mixed_precision = MixedPrecision(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, buffer_dtype=torch.float32)
-
+def apply_fsdp(model: ModelType, reshard_after_forward: bool):
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32)
     model = FSDP(model, mixed_precision=mixed_precision)
 
     return model
@@ -175,6 +175,8 @@ def train(config: Config):
         shardcast.initialize(origin_data_dir, max_distribution_folders=config.max_async_level)
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
+
+    perf_counter = PerfCounter(window_size=min(10, 2 * config.optim.step_per_rollout), model=model, seq_len=config.data.seq_length)
 
     if config.train.liger_qwen:
         apply_liger_kernel_to_qwen2(
@@ -230,8 +232,6 @@ def train(config: Config):
         step_count_init=training_progress.step // config.optim.step_per_rollout,
     )
     train_dataloader_iterator = iter(train_dataloader)
-
-    perf_counter = PerfCounter(window_size=10, model=model, seq_len=config.data.seq_length)
 
     previous_ckpt_rollout = []
 
@@ -308,6 +308,19 @@ def train(config: Config):
                 length_pen_token_count += len_pen_this.numel()
 
                 sample_task_reward_batch += batch["task_rewards"][:, 0].sum() / batch["task_rewards"].shape[0] / gradient_accumulation_steps
+                
+                # Loss
+                pg_loss, clip_ratio = grpo_loss(
+                    logits,
+                    input_ids,
+                    advantages,
+                    original_logprobs,
+                    loss_mask,
+                    config.temperature,
+                    config.grpo_epsilon,
+                    config.masked_mean_axis,
+                )
+                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
                 sample_length_penalty_batch += (
                     batch["length_penalties"][:, 0].sum() / batch["length_penalties"].shape[0] / gradient_accumulation_steps
@@ -426,16 +439,23 @@ def train(config: Config):
                 f"step: {training_progress.step}, "
                 f"rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
                 f"loss: {loss_batch.item():.4f}, "
+                f"clip_ratio: {clip_ratio_batch.item():.4f}, "
                 f"average_rewards: {average_rewards.item():.4f}, "
                 f"average_task_rewards: {average_task_rewards.item():.4f}, "
                 f"average_length_penalties: {average_length_penalties.item():.4f}"
             )
+            
+            del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
 
             tokens_per_second = perf_counter.get_tokens_per_second()
             if tokens_per_second is not None:
+                tokens_per_second_per_gpu = tokens_per_second / world_info.world_size
                 metrics["tokens_per_second"] = tokens_per_second
+                metrics["tokens_per_second_per_gpu"] = tokens_per_second_per_gpu
+
                 metrics["mfu"] = perf_counter.get_mfu()
-                log += f", tokens_per_second: {tokens_per_second:.2f}, mfu: {metrics['mfu']:.2f}"
+
+                log += f", tokens_per_second: {tokens_per_second:.2f}, tokens_per_second_per_gpu: {tokens_per_second_per_gpu:.2f}, mfu: {metrics['mfu']:.2f}"
 
             if world_info.rank == 0 and config.wandb:
                 wandb.log(metrics)
@@ -472,9 +492,10 @@ def train(config: Config):
                 )
                 save_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.path)
 
+        time_rollout_step = time.time() - time_start
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
-            wandb.log({"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time.time() - time_start})
+            wandb.log({"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step})
 
         if training_progress.step >= config.optim.total_steps:
             break

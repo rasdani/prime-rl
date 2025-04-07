@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Literal
 import uuid
 import numpy as np
-from pydantic import model_validator
 import torch
 from vllm import LLM, SamplingParams
 from pydantic_config import BaseConfig, parse_argv
@@ -20,9 +19,10 @@ from safetensors import safe_open
 from vllm.model_executor.model_loader.loader import _process_weights_after_loading
 from vllm.sequence import SampleLogprobs
 from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.layers.logits_processor import _prune_hidden_states
 
 from zeroband.logger import get_logger
-from zeroband.models import ModelName, name_to_hf_model
+from zeroband.models import ModelName
 from zeroband.rewards.math import compute_math_reward
 
 from datasets import load_dataset
@@ -46,8 +46,8 @@ class SamplingParamConfig(BaseConfig):
 
 
 class LenRewardConfig(BaseConfig):
-    min_length: int = 1000
-    max_length: int = 24000
+    min_len: int = 1000
+    max_len: int = 24000
     reward_coef: int = 0.0003
 
 
@@ -58,7 +58,6 @@ class Config(BaseConfig):
     max_samples: int | None = None
     output_path: str = "outputs"
     total_step: int | None = None
-    step_batch_size: int = 64  # will be used to create stable file
     rollout_path: str | None = None
 
     quant: Literal["fp8"] | None = None
@@ -82,16 +81,18 @@ class Config(BaseConfig):
     ckpt_start_path: str | None = None
 
     len_reward: LenRewardConfig | None = None
+    toploc: bool = True
+
 
     @model_validator(mode="after")
     def validate_step_batch_size(self):
         assert self.step_batch_size % self.batch_size == 0, "step_batch_size must be divisible by batch_size"
         assert self.step_batch_size % self.dp == 0, "step_batch_size must be divisible by dp"
-        assert (self.length_reward_min is None) == (self.length_reward_max is None), (
-            "length_reward_min and length_reward_max must be either both defined or both None"
+        assert (self.len_reward.min_len is None) == (self.len_reward.max_len is None), (
+            "len_reward.min_length and len_reward.max_length must be either both defined or both None"
         )
         return self
-
+      
 
 pa_schema = pa.schema(
     [
@@ -295,7 +296,7 @@ def compute_advantages_grpo(grouped_rewards: dict[int, dict[str, torch.FloatTens
 def inference(config: Config):
     prime_metric = PrimeMetric(disable=config.prime_log_freq is None, period=config.prime_log_freq)
     llm = LLM(
-        model=name_to_hf_model[config.name_model],
+        model=config.name_model,
         tensor_parallel_size=config.tp,
         max_seq_len_to_capture=config.max_model_len,
         max_model_len=config.max_model_len,
@@ -315,19 +316,29 @@ def inference(config: Config):
     max_samples = config.max_samples or len(dataset)
 
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+
+    if config.dtype == "fp32":
+        config.toploc = False
+
     toploc_cache = TopLocCache(
-        max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size, disable=config.dtype == "fp32"
+        max_seqs=config.batch_size * config.sampling.n, max_len=32, hidden_size=model.config.hidden_size, disable=not config.toploc
     )
 
     def logits_processor_hook(module, input):
-        assert isinstance(input[1], torch.Tensor)
-        assert isinstance(input[2], SamplingMetadata)
-        # If the lengths dont match its not a decode step
-        if len(input[2].seq_groups) != input[1].shape[0]:
+        hidden_states, sampling_metadata = input[1], input[2]
+        assert isinstance(hidden_states, torch.Tensor)
+        assert isinstance(sampling_metadata, SamplingMetadata)
+        # This check is true only for prefills
+        if max(sampling_metadata.selected_token_indices) > len(sampling_metadata.seq_groups):
             return
+        # This pruning is required when cuda graph padding is enabled.
+        hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
+        if len(sampling_metadata.seq_groups) != hidden_states.shape[0]:
+            raise ValueError(f"Lengths dont match: {len(sampling_metadata.seq_groups)} {hidden_states.shape}")
 
-        index = [i.seq_ids[0] for i in input[2].seq_groups]
-        toploc_cache.add(index, input[1])
+        # TODO: Maybe just use sampling_metadata.selected_token_indices?
+        index = [i.seq_ids[0] for i in sampling_metadata.seq_groups]
+        toploc_cache.add(index, hidden_states)
 
     if not toploc_cache.disable:
         model.logits_processor.register_forward_pre_hook(logits_processor_hook)
@@ -452,9 +463,8 @@ def inference(config: Config):
         metric = {"dashbord-progress/total": total_problems, f"dashbord-progress/{config.dataset}": total_tokens}
         prime_metric.log_prime(metric)
 
-        if total_problems % config.step_batch_size == 0:
-            logger.info(f"Generated {total_problems} problems for step {real_step}")
-            real_step += 1
+        logger.info(f"Generated {total_problems} problems for step {real_step}")
+        real_step += 1
 
         if config.total_step is not None and real_step > config.total_step:
             logger.info(f"Reached total step {config.total_step}, stopping inference")
@@ -482,8 +492,6 @@ def inference_sub_process(config: Config, gpus_ids: list[int], rank: int) -> lis
 def inference_run(config: Config) -> list[mp.Process]:
     if config.dp > 1:
         processes = []
-
-        config.step_batch_size = config.step_batch_size // config.dp
 
         gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
 

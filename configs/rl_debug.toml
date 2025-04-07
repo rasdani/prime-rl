@@ -3,7 +3,7 @@ batch_size = 32
 
 
 [train]
-name_model = "debugmodel"
+name_model = "PrimeIntellect/llama-2m-fresh"
 wandb = false
 
 [train.data]
@@ -21,7 +21,7 @@ warmup_steps = 10
 step_per_rollout = 2
 
 [inference]
-name_model = "debugmodel"
+name_model = "PrimeIntellect/llama-2m-fresh"
 max_samples = 100000
 enforce_eager = true
 

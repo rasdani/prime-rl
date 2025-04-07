@@ -15,6 +15,7 @@ def grpo_loss(
     loss_mask: Int[Tensor, "batch seq"],
     temperature: float,
     epsilon: float,
+    masked_mean_axis: int | None,
 ) -> tuple[Tensor, Tensor]:
     """
     DeepSeek Math Loss: https://arxiv.org/abs/2402.03300
@@ -35,6 +36,7 @@ def grpo_loss(
         loss_mask=loss_mask,
         temperature=temperature,
         epsilon=epsilon,
+        masked_mean_axis=masked_mean_axis,
     )
 
 
@@ -84,6 +86,7 @@ def _compile_grpo_loss(
     loss_mask: torch.Tensor,
     temperature: float,
     epsilon: float,
+    masked_mean_axis: int | None,
 ) -> tuple[Tensor, Tensor]:
     # we start by dropping the bos token because it does not have a corresponding logit
     input_ids = input_ids[:, 1:]
@@ -105,26 +108,35 @@ def _compile_grpo_loss(
     per_token_loss2 = -coef_2 * advantages
     per_token_loss = torch.max(per_token_loss1, per_token_loss2)
 
-    loss = (per_token_loss * loss_mask).sum() / loss_mask.sum()
+    loss = _apply_mask(per_token_loss, loss_mask, masked_mean_axis)
 
     is_clipped = (per_token_loss1 < per_token_loss2).float()
-    clip_ratio = (is_clipped * loss_mask).sum() / loss_mask.sum()
+    clip_ratio = _apply_mask(is_clipped, loss_mask, masked_mean_axis)
     return loss, clip_ratio
 
 
 @jaxtyped(typechecker=typechecker)
-def entropy_loss(logits: Float[Tensor, "batch seq vocab"], loss_mask: Int[Tensor, "batch seq"], temperature: float) -> Tensor:
-    return _compile_entropy_loss(logits=logits, loss_mask=loss_mask, temperature=temperature)
+def entropy_loss(
+    logits: Float[Tensor, "batch seq vocab"], loss_mask: Int[Tensor, "batch seq"], temperature: float, masked_mean_axis: int | None
+) -> Tensor:
+    return _compile_entropy_loss(logits=logits, loss_mask=loss_mask, temperature=temperature, masked_mean_axis=masked_mean_axis)
 
 
 @torch.compile
-def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, temperature: float):
+def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, temperature: float, masked_mean_axis: int | None):
     logits = logits[:, :-1, :]
     logits = logits / temperature
 
     loss_mask = loss_mask[:, 1:]
     pd = torch.nn.functional.softmax(logits, dim=-1)
     entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
-    masked_entropy = entropy * loss_mask
 
-    return masked_entropy.sum() / loss_mask.sum()
+    return _apply_mask(entropy, loss_mask, masked_mean_axis)
+
+
+def _apply_mask(tensor: torch.Tensor, mask: torch.Tensor, masked_mean_axis: int | None) -> torch.Tensor:
+    # First sum over sequence dimension (dim=1), then mean over batch (dim=0)
+    if masked_mean_axis is None:
+        return (tensor * mask).sum() / mask.sum()
+    else:
+        return ((tensor * mask).sum(dim=masked_mean_axis) / mask.sum(dim=masked_mean_axis)).mean()

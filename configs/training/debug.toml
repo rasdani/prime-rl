@@ -1,4 +1,4 @@
-name_model = "debugmodel"
+name_model = "PrimeIntellect/llama-2m-fresh"
 wandb = false
 
 [train]

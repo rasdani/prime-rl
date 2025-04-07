@@ -3,7 +3,7 @@ batch_size = 1024
 
 
 [train]
-name_model = "Qwen1.5B"
+name_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 project = "rl-Qwen1.5B"
 
 [train.train]
