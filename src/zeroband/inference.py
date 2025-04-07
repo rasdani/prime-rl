@@ -74,7 +74,7 @@ class Config(BaseConfig):
 
     ckpt_start_path: str | None = None
 
-    toploc: bool = True
+    toploc: bool = False
 
 
 def fake_chat_template(messages):
