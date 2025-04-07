@@ -93,7 +93,7 @@ class Config(BaseConfig):
     grpo_epsilon: float = 0.2
     entropy_loss_coeff: float = 0.001
 
-    on_policy_log_prob: bool = False
+    on_policy_log_prob: bool = True
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
     masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
