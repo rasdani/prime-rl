@@ -93,7 +93,7 @@ class Config(BaseConfig):
     grpo_epsilon: float = 0.2
     entropy_loss_coeff: float = 0.001
 
-    on_policy_log_prob: bool = False
+    on_policy_log_prob: bool = True
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
     masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
@@ -155,22 +155,19 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
         torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
-        torch_log.setLevel(logging.CRITICAL)  #
+        torch_log.setLevel(logging.CRITICAL)
 
     logger = get_logger()
     world_info = get_world_info()
 
-    logger.info(f"start training on {world_info.world_size}")
+    logger.info(f"start training on {world_info.world_size} rank(s)")
 
-    # Allow eager fallback during production so that that the training runs dont die
-    # However, in development, we want to know that we broke torch compile
+    # Allow eager fallback during production so that training runs don't die if compile fails
     torch._dynamo.config.suppress_errors = "ZERO_BAND_DEV" not in os.environ  # type: ignore
     torch.set_float32_matmul_precision("high")
     torch.manual_seed(42)
 
     torch.cuda.set_device(get_device_placement(config.gpus_ids, world_info))
-
-    # batch_size is the total batch size for all GPUs
 
     gradient_accumulation_steps = get_gradient_accumulation_steps(
         config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
@@ -198,9 +195,20 @@ def train(config: Config):
 
     apply_fsdp(model, config.train.reshard_after_forward)
 
-    optimizer = torch.optim.AdamW(params=model.parameters(),lr=config.optim.optim.lr,weight_decay=config.optim.optim.weight_decay,betas=(config.optim.optim.betas1, config.optim.optim.betas2))  # fmt: skip
+    optimizer = torch.optim.AdamW(
+        params=model.parameters(),
+        lr=config.optim.optim.lr,
+        weight_decay=config.optim.optim.weight_decay,
+        betas=(config.optim.optim.betas1, config.optim.optim.betas2),
+    )
 
-    scheduler = get_scheduler(sched_type=config.optim.sched_type,optimizer=optimizer,num_warmup_steps=config.optim.warmup_steps,num_stable_steps=config.optim.stable_steps,num_training_steps=config.optim.total_steps)  # fmt: skip
+    scheduler = get_scheduler(
+        sched_type=config.optim.sched_type,
+        optimizer=optimizer,
+        num_warmup_steps=config.optim.warmup_steps,
+        num_stable_steps=config.optim.stable_steps,
+        num_training_steps=config.optim.total_steps,
+    )
 
     training_progress = TrainingProgress(total_tokens=0, step=0)
 
@@ -270,18 +278,42 @@ def train(config: Config):
             rewards_sum = torch.tensor(0.0)
             rewards_token_count = torch.tensor(0.0)
 
+            task_rewards_sum = torch.tensor(0.0)
+            task_rewards_token_count = torch.tensor(0.0)
+
+            length_pen_sum = torch.tensor(0.0)
+            length_pen_token_count = torch.tensor(0.0)
+
+            sample_task_reward_batch = torch.tensor(0.0)
+            sample_length_penalty_batch = torch.tensor(0.0)
+
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
             for _grad_acc_step in range(gradient_accumulation_steps):
-                # Load args
                 batch = next(logprobs_aware_iterator)
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
-                rewards = batch["rewards"][loss_mask.bool()]
-                rewards_sum += rewards.sum()
-                rewards_token_count += rewards.numel()
+                rewards_this = batch["rewards"][loss_mask.bool()]
+                rewards_sum += rewards_this.sum()
+                rewards_token_count += rewards_this.numel()
+
+                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
+
+                task_this = batch["task_rewards"][loss_mask.bool()]
+                task_rewards_sum += task_this.sum()
+                task_rewards_token_count += task_this.numel()
+
+                len_pen_this = batch["length_penalties"][loss_mask.bool()]
+                length_pen_sum += len_pen_this.sum()
+                length_pen_token_count += len_pen_this.numel()
+
+                sample_task_reward_batch += batch["task_rewards"][:, 0].sum() / batch["task_rewards"].shape[0] / gradient_accumulation_steps
+
+                sample_length_penalty_batch += (
+                    batch["length_penalties"][:, 0].sum() / batch["length_penalties"].shape[0] / gradient_accumulation_steps
+                )
 
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
                 clip_seq_lens += (
@@ -345,18 +377,29 @@ def train(config: Config):
             dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
             average_rewards = rewards_sum / rewards_token_count
 
+            dist.all_reduce(task_rewards_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(task_rewards_token_count, op=dist.ReduceOp.SUM)
+            dist.all_reduce(length_pen_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(length_pen_token_count, op=dist.ReduceOp.SUM)
+
+            dist.all_reduce(sample_task_reward_batch, op=dist.ReduceOp.SUM)
+            dist.all_reduce(sample_length_penalty_batch, op=dist.ReduceOp.SUM)
+
+            average_task_rewards = task_rewards_sum / task_rewards_token_count
+            average_length_penalties = length_pen_sum / length_pen_token_count
+
+            sample_task_rewards = sample_task_reward_batch / world_info.world_size
+            sample_length_penalties = sample_length_penalty_batch / world_info.world_size
+
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
             optimizer.step()
             scheduler.step()
-
             optimizer.zero_grad()
 
-            # logging
             training_progress.step += 1
             inner_lr = [group["lr"] for group in optimizer.param_groups][0]
 
-            # syncing loss across all data parallel rank within a nodes
             new_tokens = config.data.seq_length * config.optim.batch_size
             perf_counter.count_tokens(new_tokens)
             training_progress.total_tokens += new_tokens
@@ -380,9 +423,21 @@ def train(config: Config):
                 "padding_proportion": padding_proportion,
                 "sample_reward": sample_reward_batch.item(),
                 "clip_seq_lens": clip_seq_lens.item(),
+                "average_task_rewards": average_task_rewards.item(),
+                "average_length_penalties": average_length_penalties.item(),
+                "sample_task_rewards": sample_task_rewards.item(),
+                "sample_length_penalties": sample_length_penalties.item(),
             }
 
-            log = f"step: {training_progress.step}, rollout_step: {training_progress.step // config.optim.step_per_rollout}, loss: {loss_batch.item():.4f}, average_rewards: {average_rewards.item():.4f}, clip_ratio: {clip_ratio_batch.item():.4f}"
+            log = (
+                f"step: {training_progress.step}, "
+                f"rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
+                f"loss: {loss_batch.item():.4f}, "
+                f"average_rewards: {average_rewards.item():.4f}, "
+                f"clip_ratio: {clip_ratio_batch.item():.4f}, "
+                f"average_task_rewards: {average_task_rewards.item():.4f}, "
+                f"average_length_penalties: {average_length_penalties.item():.4f}"
+            )
 
             del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
 
