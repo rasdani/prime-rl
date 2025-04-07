@@ -233,6 +233,8 @@ def train(config: Config):
     while True:
         time_start = time.time()
 
+        total_time_data_loading = 0
+
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             if config.on_policy_log_prob:
@@ -240,7 +242,13 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     for grad_acc_step in range(gradient_accumulation_steps):
+                        time_data_loading = time.time()
+
                         batch = next(train_dataloader_iterator)
+
+                        time_data_loading = time.time() - time_data_loading
+                        total_time_data_loading += time_data_loading
+
                         input_ids = batch["input_ids"].to("cuda")
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -438,8 +446,10 @@ def train(config: Config):
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
             new_metrics = {"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step}
-            if time_logprob is not None:
+            if config.on_policy_log_prob:
                 new_metrics["time_logprob"] = time_logprob
+                new_metrics["time_data_loading"] = total_time_data_loading
+
             wandb.log(new_metrics)
 
         if training_progress.step >= config.optim.total_steps:
