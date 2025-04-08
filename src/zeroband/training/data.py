@@ -356,7 +356,7 @@ def get_dataloader(
 
 def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int) -> tuple[list[BatchOutput], int]:
     """
-    this function will pack the batch into [1, seq_len] tensors with positions ids for the calling fa2
+    this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
     """
     def pack_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int) -> Generator[BatchOutput, Any, None]:
         batch_seq_len = seq_len * micro_batch_size
@@ -437,7 +437,7 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
                 logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
                 seq_lens.append(padding_len) # Append fake padding sequence b/c flash attention explodes otherwise or when it's all zeros.
 
-                # Yield the batch and reset so we can make a new one.
+                # Yield the microbatch and reset so we can make a new one.
                 position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
                 yield {
                     "input_ids": torch.cat(input_ids),
@@ -474,7 +474,6 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
         logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
         seq_lens.append(padding_len)
 
-        # Yield the batch and reset so we can make a new one.
         position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
         yield {
             "input_ids": torch.cat(input_ids),
