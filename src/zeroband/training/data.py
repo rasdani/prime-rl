@@ -31,6 +31,18 @@ class DataConfig(BaseConfig):
     local_dir: str = "/dev/shm/zeroband/data"  # only used if path is gcp
 
 
+class DatasetOutput(TypedDict):
+    input_ids: Int[torch.Tensor, "seq"]
+    advantages: Float[torch.Tensor, "seq"]
+    rewards: Float[torch.Tensor, "seq"]
+    loss_mask: Int[torch.Tensor, "seq"]
+    logprobs: Float[torch.Tensor, "seq"]
+    seq_lens: Int[torch.Tensor, "seq"]
+    length_penalties: Float[torch.Tensor, "seq"]
+    target_lengths: Int[torch.Tensor, "seq"]
+    task_rewards: Float[torch.Tensor, "seq"]
+
+
 class FakeTokenizedDataset(IterableDataset):
     """A dummy dataset that generates random sequences with the full schema including new columns."""
 
@@ -40,7 +52,7 @@ class FakeTokenizedDataset(IterableDataset):
         assert vocab_size > 3, "Vocab size must be greater than 3"
         self.step = 0
 
-    def __iter__(self) -> Generator[dict[str, Any], Any, None]:
+    def __iter__(self) -> Generator[DatasetOutput, Any, None]:
         while True:
             # Generate a random length between 1 and self.seq_len
             len_ = torch.randint(1, self.seq_len + 1, (1,)).item()
@@ -164,7 +176,7 @@ class ParquetDataset(IterableDataset):
 
         self._ignore_zero_advantages = ignore_zero_advantages
 
-    def __iter__(self):
+    def __iter__(self) -> Generator[DatasetOutput, Any, None]:
         worker_info = torch.utils.data.get_worker_info()
         worker_id = worker_info.id if worker_info is not None else 0
         num_workers = worker_info.num_workers if worker_info is not None else 1
@@ -296,100 +308,8 @@ class ParquetDataset(IterableDataset):
                     break
 
 
-class BatchOutput(TypedDict):
-    input_ids: Int[torch.Tensor, "batch seq"]
-    advantages: Float[torch.Tensor, "batch seq"]
-    rewards: Float[torch.Tensor, "batch seq"]
-    loss_mask: Int[torch.Tensor, "batch seq"]
-    logprobs: Float[torch.Tensor, "batch seq"]
-    seq_lens: Int[torch.Tensor, "batch"]
-
-
-class PaddingColate:
-    def __init__(self, seq_len: int, pad_token_id: int) -> None:
-        self._seq_len = seq_len
-        self._pad_token_id = pad_token_id
-
-    def __call__(self, samples: list[dict[str, torch.Tensor]]) -> BatchOutput:
-        required_keys = {
-            "input_ids",
-            "advantages",
-            "rewards",
-            "task_rewards",
-            "length_penalties",
-            "target_lengths",
-            "loss_mask",
-            "logprobs",
-        }
-        if not (required_keys <= set(samples[0].keys())):
-            raise ValueError(f"Missing required keys. Found: {samples[0].keys()}, required: {required_keys}")
-
-        inputs_ids = []
-        advantages = []
-        rewards = []
-        task_rewards = []
-        length_penalties = []
-        target_lens = []
-        loss_masks = []
-        logprobs = []
-        seq_lens = []
-
-        for sample in samples:
-            ids = sample["input_ids"]
-            seq_len = len(ids)
-            # seq_len = self._seq_len
-
-            adv = sample["advantages"]
-            rew = sample["rewards"]
-            t_rew = sample["task_rewards"]
-            l_pen = sample["length_penalties"]
-            loss_mask = sample["loss_mask"]
-            logprob = sample["logprobs"]
-
-            if len(ids) >= self._seq_len:
-                ids = ids[: self._seq_len]
-                adv = adv[: self._seq_len]
-                rew = rew[: self._seq_len]
-                t_rew = t_rew[: self._seq_len]
-                l_pen = l_pen[: self._seq_len]
-                loss_mask = loss_mask[: self._seq_len]
-                logprob = logprob[: self._seq_len]
-            else:
-                ids = torch.cat([ids, torch.full((self._seq_len - len(ids),), fill_value=self._pad_token_id, dtype=ids.dtype)])
-
-                adv = torch.cat([adv, torch.zeros(self._seq_len - len(adv), dtype=adv.dtype)])
-
-                rew = torch.cat([rew, torch.zeros(self._seq_len - len(rew), dtype=rew.dtype)])
-
-                t_rew = torch.cat([t_rew, torch.zeros(self._seq_len - len(t_rew), dtype=t_rew.dtype)])
-
-                l_pen = torch.cat([l_pen, torch.zeros(self._seq_len - len(l_pen), dtype=l_pen.dtype)])
-
-                loss_mask = torch.cat([loss_mask, torch.zeros(self._seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
-
-                logprob = torch.cat([logprob, torch.zeros(self._seq_len - len(logprob), dtype=logprob.dtype)])
-
-            seq_lens.append(seq_len)
-            inputs_ids.append(ids)
-            advantages.append(adv)
-            rewards.append(rew)
-            task_rewards.append(t_rew)
-            length_penalties.append(l_pen)
-            target_lens.append(sample["target_lengths"])
-            loss_masks.append(loss_mask)
-            logprobs.append(logprob)
-
-        return {
-            "input_ids": torch.stack(inputs_ids, dim=0),
-            "advantages": torch.stack(advantages, dim=0),
-            "rewards": torch.stack(rewards, dim=0),
-            "task_rewards": torch.stack(task_rewards, dim=0),
-            "length_penalties": torch.stack(length_penalties, dim=0),
-            "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
-            "loss_mask": torch.stack(loss_masks, dim=0).int(),
-            "logprobs": torch.stack(logprobs, dim=0),
-            "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
-        }
+def no_collate(batch: list[DatasetOutput]) -> list[DatasetOutput]:
+    return batch
 
 
 def get_dataloader(
@@ -410,11 +330,31 @@ def get_dataloader(
     else:
         train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, ignore_zero_advantages)
 
-    collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)
     loader = DataLoader(
         train_dataset,
         batch_size=micro_batch_size,
         num_workers=data_config.num_workers,
-        collate_fn=collate_fn,
+        collate_fn=no_collate,
     )
     return loader, prefetcher
+
+
+class BatchOutput(TypedDict):
+    input_ids: Int[torch.Tensor, "batch seq"]
+    advantages: Float[torch.Tensor, "batch seq"]
+    rewards: Float[torch.Tensor, "batch seq"]
+    loss_mask: Int[torch.Tensor, "batch seq"]
+    logprobs: Float[torch.Tensor, "batch seq"]
+    seq_lens: Int[torch.Tensor, "batch"]
+    length_penalties: Float[torch.Tensor, "batch"]
+    target_lengths: Int[torch.Tensor, "batch"]
+    task_rewards: Float[torch.Tensor, "batch"]
+
+    positions_ids: Int[torch.Tensor, "batch seq"]
+
+
+def packed_batch(batch_optim: list[DatasetOutput], seq_len: int) -> tuple[list[BatchOutput], int]:
+    """
+    this function will pack the batch into [1, seq_len] tensors with positions ids for the calling fa2
+    """
+    ...

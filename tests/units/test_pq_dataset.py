@@ -1,5 +1,5 @@
 import pytest
-from zeroband.training.data import FakeTokenizedDataset, ParquetDataset, _should_skip_index, PaddingColate
+from zeroband.training.data import ParquetDataset, _should_skip_index
 from torch.utils.data import DataLoader
 
 
@@ -32,20 +32,3 @@ def test_should_skip_index(rank, workers_id):
             results.append(index)
 
     assert results == expected_results
-
-
-def test_padding_collate():
-    dataset = FakeTokenizedDataset(seq_len=10, vocab_size=10)
-
-    collate_fn = PaddingColate(seq_len=10, pad_token_id=0)
-    dataloader = DataLoader(dataset, batch_size=10, num_workers=2, collate_fn=collate_fn)
-
-    for i, batch in enumerate(dataloader):
-        assert batch["input_ids"].shape == (10, 10)
-        assert batch["advantages"].shape == (10, 10)
-        assert batch["rewards"].shape == (10, 10)
-        assert batch["loss_mask"].shape == (10, 10)
-        assert batch["logprobs"].shape == (10, 10)
-
-        if i > 10:
-            break
