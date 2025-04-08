@@ -1,4 +1,5 @@
 from functools import lru_cache
+import requests
 import os
 import asyncio
 import json
@@ -59,6 +60,7 @@ class Config(BaseConfig):
     output_path: str = "outputs"
     total_step: int | None = None
     rollout_path: str | None = None
+    step_endpoint: str | None = None
 
     quant: Literal["fp8"] | None = None
 
@@ -366,6 +368,9 @@ def inference(config: Config):
         logger.info(f"Resuming from step {ckpt_step} at {path_file}")
         llm = reload_model_weights(llm, path_file)
         real_step = ckpt_step
+    elif config.step_endpoint is not None:
+        ckpt_step = 0
+        real_step = requests.get(config.step_endpoint).json()
     else:
         ckpt_step = 0
         real_step = 0
@@ -378,7 +383,7 @@ def inference(config: Config):
             f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.async_level: {config.async_level}"
         )
         if config.rollout_path is not None and real_step - ckpt_step > config.async_level:
-            ckpt_step += 1
+            ckpt_step = real_step - config.async_level
             attempt_count = 0
             while True:
                 stable_file = Path(config.rollout_path) / f"step_{ckpt_step}/stable"
@@ -549,6 +554,12 @@ if __name__ == "__main__":
     mp.set_start_method("spawn")
     config = Config(**parse_argv())  # type: ignore
 
+    if config.step_endpoint is not None:
+        current_step = requests.get(config.step_endpoint).json()
+        logger = get_logger("PRE-INFERENCE")
+        logger.info(f"Current step: {current_step}")
+        assert isinstance(current_step, int), "Current step must be an integer"
+
     # Maybe start shardcast downloader
     from zeroband.inferencing import envs as inference_envs
 
@@ -559,7 +570,9 @@ if __name__ == "__main__":
             inference_envs.SHARDCAST_SERVERS,
             config.rollout_path,
             config.async_level + 1,
-            inference_envs.SHARDCAST_BACKLOG_VERSION,
+            # TODO: maybe +1 because we most likely wont download the current step in time?
+            # We could deadlock though.
+            max(current_step - config.async_level, 1),
         )
     else:
         shardcast_process = None
