@@ -57,7 +57,7 @@ class TrainConfig(BaseConfig):
     memory_profile: str | None = None
     torch_compile: bool = False  #  disabling torch compile because its too unstable for RL
     liger_qwen: bool = False
-    ignore_zero_advantages: bool = False
+    ignore_zero_advantages: bool = False  # don't use in local setup
 
     attn_impl: AttnImpl = "flex_attention"
 
