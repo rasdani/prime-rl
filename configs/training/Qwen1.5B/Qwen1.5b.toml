@@ -20,3 +20,6 @@ lr = 1e-6
 [data]
 path = "data_rollout"
 seq_length = 2048
+
+[ckpt]
+rollout_path = "outputs"
