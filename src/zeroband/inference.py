@@ -372,12 +372,21 @@ def inference(config: Config):
         ckpt_step = 0
         real_step = 0
 
+    current_step_batch_counter = (
+        1  # This is used by the seeding logic to make sure we dont generate the same samples twice if we do multiple batches for a step
+    )
     total_problems = 0
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         if config.step_endpoint is not None:
-            real_step = requests.get(config.step_endpoint).json()
+            new_real_step = requests.get(config.step_endpoint).json()
+            if new_real_step != real_step:
+                real_step = new_real_step
+                current_step_batch_counter = 1
+            else:
+                current_step_batch_counter += 1
+
         logger.info(
             f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.async_level: {config.async_level}"
         )
@@ -405,7 +414,7 @@ def inference(config: Config):
 
             # We reseed the generator here to make the sampling reproducible at each step.
             # This would work even if the node restarts and resumes from the current step.
-            generator = np.random.default_rng(node_address_int + real_step)
+            generator = np.random.default_rng(node_address_int * current_step_batch_counter + real_step)
             indexes = generator.integers(0, len(dataset), config.batch_size)
             batch = dataset.select(indexes)
         else:
