@@ -30,6 +30,8 @@ from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
 
+from zeroband.utils.http_monitor import HttpMonitor
+
 
 class AdamConfig(BaseConfig):
     type: Literal["adam"] = "adam"
@@ -75,6 +77,10 @@ class CkptConfig(BaseConfig):
             raise ValueError("path and interval must be either both None or both not None")
         return self
 
+class MonitorConfig(BaseConfig):
+    log_flush_interval: int = 10
+    base_url: str | None = None
+    auth_token: str | None = None
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
@@ -83,6 +89,8 @@ class Config(BaseConfig):
 
     project: str = "prime_simple"
     wandb: bool = True
+    monitor: MonitorConfig | None = None
+    run_id: str | None = None
 
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
@@ -154,6 +162,7 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
 
 def train(config: Config):
+    monitor = None
     if "ZERO_BAND_DEV" not in os.environ:
         torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
         torch_log.setLevel(logging.CRITICAL)
@@ -215,6 +224,10 @@ def train(config: Config):
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
+
+    if config.monitor is not None:
+        monitor = HttpMonitor(config=config.model_dump(), resume=False)
+        monitor.set_stage("init")
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
@@ -462,8 +475,12 @@ def train(config: Config):
 
                 log += f", tokens_per_second: {tokens_per_second:.2f}, tokens_per_second_per_gpu: {tokens_per_second_per_gpu:.2f}, mfu: {metrics['mfu']:.2f}"
 
-            if world_info.rank == 0 and config.wandb:
-                wandb.log(metrics)
+            if world_info.rank == 0:
+                if config.wandb:
+                    wandb.log(metrics)
+                if config.monitor is not None and monitor is not None:
+                    monitor.log(metrics)
+
 
             logger.info(log)
 
@@ -512,6 +529,9 @@ def train(config: Config):
 
     if prefetcher is not None:
         prefetcher.shutdown()
+
+    if world_info.rank == 0 and config.monitor is not None:
+        monitor.finish()
 
     logger.info("Training finished, exiting ...")
     logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
