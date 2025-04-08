@@ -7,15 +7,13 @@ reshard_after_forward = true
 attn_impl = "flash_attention_2"
 
 [optim]
-batch_size = 128
+batch_size = 512
 warmup_steps = 1
 total_steps = 100000000000000
 step_per_rollout = 8
 
 [optim.optim]
 lr = 1e-6
-batch_size = 512
-step_per_rollout = 4
 
 
 
