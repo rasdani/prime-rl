@@ -48,7 +48,9 @@ class SamplingParamConfig(BaseConfig):
 class LenRewardConfig(BaseConfig):
     min_length: int = 1000
     max_length: int = 24000
-    reward_coef: int = 0.0003
+    reward_coef: float = 0.0003
+    reward_type: Literal["exact", "max"] = "max"
+    max_reward_delta: float = 0.5
 
 
 class Config(BaseConfig):
@@ -240,11 +242,16 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
         output_length = len(output.token_ids)
         target_length = verification_info["target_length"]
 
-        length_penalty = abs(output_length - target_length)
-        length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
-        length_penalty = min(1, length_penalty)
+        if len_reward_config.reward_type == "exact":
+            length_penalty = abs(output_length - target_length)
+            length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
+            length_penalty = min(1, length_penalty)
+            total_reward -= length_penalty
 
-        total_reward -= length_penalty
+        elif len_reward_config.reward_type == "max":
+            diff = target_length - output_length
+            length_penalty = torch.clip(len_reward_config.reward_coef * diff + len_reward_config.max_reward_delta, 0, 1)
+            total_reward *= length_penalty
 
     return dict(total_reward=total_reward, task_reward=math_reward, length_penalty=length_penalty)
 
