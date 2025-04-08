@@ -316,7 +316,7 @@ class SequencePackingDataset(IterableDataset):
             "rewards",
             "task_rewards",
             "length_penalties",
-            "target_lengths",
+            #"target_lengths",
             "loss_mask",
             "logprobs",
         }
@@ -327,7 +327,7 @@ class SequencePackingDataset(IterableDataset):
         rewards = []
         task_rewards = []
         length_penalties = []
-        target_lens = []
+        #target_lens = []
         loss_masks = []
         logprobs = []
         seq_lens = []
@@ -353,8 +353,8 @@ class SequencePackingDataset(IterableDataset):
                 continue
 
             assert required_keys <= set(sample.keys()), f"Missing required keys. Found: {sample.keys()}, required: {required_keys}"
-            assert len(sample["input_ids"]) == len(sample["advantages"]) == len(sample["rewards"]) == len(sample["loss_mask"]) == len(sample["logprobs"]), \
-                f"Sample {i} has different lengths: {len(sample['input_ids'])}, {len(sample['advantages'])}, {len(sample['rewards'])}, {len(sample['loss_mask'])}, {len(sample['logprobs'])}"
+            assert len(sample["input_ids"]) == len(sample["advantages"]) == len(sample["rewards"]) == len(sample["task_rewards"]) == len(sample["length_penalties"]) == len(sample["loss_mask"]) == len(sample["logprobs"]), \
+                f"Sample {i} has different lengths: {len(sample['input_ids'])}, {len(sample['advantages'])}, {len(sample['rewards'])}, {len(sample['task_rewards'])}, {len(sample['length_penalties'])}, {len(sample['loss_mask'])}, {len(sample['logprobs'])}"
 
             # If the sample fits, add it to the batch.
             if (seq_len_sum + seq_len) <= self._seq_len:
@@ -363,7 +363,7 @@ class SequencePackingDataset(IterableDataset):
                 rewards.append(sample["rewards"])
                 task_rewards.append(sample["task_rewards"])
                 length_penalties.append(sample["length_penalties"])
-                target_lens.append(sample["target_lengths"])
+                # target_lens.append(sample["target_lengths"])
                 loss_masks.append(sample["loss_mask"])
                 logprobs.append(sample["logprobs"])
                 seq_lens.append(seq_len)
@@ -381,7 +381,7 @@ class SequencePackingDataset(IterableDataset):
                 rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
                 task_rewards.append(torch.zeros(padding_len, dtype=sample["task_rewards"].dtype))
                 length_penalties.append(torch.zeros(padding_len, dtype=sample["length_penalties"].dtype))
-                target_lens.append(sample["target_lengths"])
+                #target_lens.append(padding_len)
                 loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
                 logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
                 seq_lens.append(padding_len) # Append fake padding sequence b/c flash attention explodes otherwise or when it's all zeros.
@@ -394,7 +394,7 @@ class SequencePackingDataset(IterableDataset):
                     "rewards": torch.cat(rewards),
                     "task_rewards": torch.cat(task_rewards),
                     "length_penalties": torch.cat(length_penalties),
-                    "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
+                    #"target_lengths": torch.tensor(target_lens, dtype=torch.int32),
                     "loss_mask": torch.cat(loss_masks).int(),
                     "logprobs": torch.cat(logprobs),
                     "seq_lens": torch.tensor(seq_lens),
@@ -406,31 +406,11 @@ class SequencePackingDataset(IterableDataset):
                 rewards = []
                 task_rewards = []
                 length_penalties = []
-                target_lens = []
+                #target_lens = []
                 loss_masks = []
                 logprobs = []
                 seq_lens = []
                 seq_len_sum = 0
-
-        # Pad and yield the last batch if it is not empty
-        if seq_len_sum:
-            padding_len = self._seq_len - seq_len_sum
-            input_ids.append(torch.full((padding_len,), fill_value=self._pad_token_id, dtype=input_dtype))
-            advantages.append(torch.zeros(padding_len, dtype=sample["advantages"].dtype))
-            rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
-            loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
-            logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
-            seq_lens.append(padding_len)
-            position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
-            yield {
-                "input_ids": torch.cat(input_ids).contiguous(),
-                "advantages": torch.cat(advantages),
-                "rewards": torch.cat(rewards),
-                "loss_mask": torch.cat(loss_masks).int(),
-                "logprobs": torch.cat(logprobs),
-                "seq_lens": torch.tensor(seq_lens),
-                "position_ids": position_ids.contiguous(),
-            }
 
         return # Dataset exhausted
 
@@ -461,4 +441,4 @@ def get_dataloader(
         micro_batch_size=micro_batch_size
     )
 
-    return DataLoader(train_dataset, batch_size=micro_batch_size, num_workers=data_config.num_workers), prefetcher
+    return DataLoader(train_dataset, batch_size=1, num_workers=data_config.num_workers), prefetcher
