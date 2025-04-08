@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import threading
 import time
 import torch
-from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from safetensors.torch import save_file
-
+from torch.distributed.tensor import DTensor
+from torch.distributed.checkpoint.state_dict import _get_fqns as get_fqns
 from zeroband.logger import get_logger
 from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
@@ -86,7 +87,10 @@ def load_checkpoint_fsdp_state(
     scheduler.load_state_dict(state["scheduler"])
 
 
-def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16) -> Path:
+async_ckpt_job = None
+
+
+def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16, async_save: bool = False) -> Path:
     """
     Save the checkpoint for rollout as one unified safetensors file.
 
@@ -94,6 +98,7 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
         Path to the saved checkpoint safetensor
     """
     logger = get_logger()
+    world_info = get_world_info()
 
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
@@ -102,16 +107,37 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
 
     start_time = time.time()
     logger.info(f"Saving rollout ckpt at {path}")
-    state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True))
 
-    # Only save on rank 0
-    if torch.distributed.get_rank() == 0:
-        for key, value in state.items():
-            state[key] = value.to(dtype)
-        save_file(state, path_file, metadata={"format": "pt"})
+    cpu_state = {}
 
-        stable_file = path / "stable"
-        stable_file.touch()
+    for key, value in model.state_dict().items():
+        if isinstance(value, DTensor):
+            value: DTensor = value.to(dtype)
+            # only gather after the downcast to dtype as it will be faster
+            value = value.full_tensor()  # idealy would only be gathered on rank 0
 
-    logger.info(f"Rollout ckpt saved at {path} in {time.time() - start_time:.2f} seconds")
+        if world_info.rank == 0:
+            key: set[str] = get_fqns(model, key)
+            assert len(key) == 1
+            key = next(iter(key))
+            cpu_state[key] = value.to("cpu", non_blocking=True)
+
+    logger.info(f"gathering full tensor checkpointing in {time.time() - start_time:.2f} seconds")
+
+    def _save():
+        if world_info.rank == 0:
+            save_file(cpu_state, path_file, metadata={"format": "pt"})
+
+            stable_file = path / "stable"
+            stable_file.touch()
+
+            logger.info(f"Full Rollout ckpt saved at {path} in {time.time() - start_time:.2f} seconds")
+
+    if async_save:
+        logger.info(f"Rollout ckpt async saving  in {path} in {time.time() - start_time:.2f} seconds scheduled with async")
+        async_ckpt_job = threading.Thread(target=_save)
+        async_ckpt_job.start()
+    else:
+        _save()
+
     return path_file

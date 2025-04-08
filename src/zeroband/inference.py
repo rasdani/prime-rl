@@ -45,6 +45,12 @@ class SamplingParamConfig(BaseConfig):
     top_k: int = -1
 
 
+class LenRewardConfig(BaseConfig):
+    min_length: int = 1000
+    max_length: int = 24000
+    reward_coef: int = 0.0003
+
+
 class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/deepscaler-math-genesys-format"
@@ -74,7 +80,9 @@ class Config(BaseConfig):
 
     ckpt_start_path: str | None = None
 
-    toploc: bool = True
+    toploc: bool = False
+
+    len_reward: LenRewardConfig | None = None
 
 
 def fake_chat_template(messages):
@@ -100,8 +108,11 @@ pa_schema = pa.schema(
         ("output_logprobs", pa.list_(pa.float32())),
         ("advantages", pa.float32()),
         ("rewards", pa.float32()),
+        ("task_rewards", pa.float32()),
+        ("length_penalties", pa.float32()),
         ("proofs", pa.binary()),
         ("step", pa.int32()),
+        ("target_lengths", pa.int32()),
     ]
 )
 
@@ -128,8 +139,11 @@ def get_parquet_table(
     generated_tokens: list[vllm.RequestOutput],
     grouped_advantages: dict[int, list[float]],
     grouped_rewards: dict[int, torch.FloatTensor],
+    grouped_task_rewards: dict[int, torch.FloatTensor],
+    grouped_length_penalties: dict[int, torch.FloatTensor],
     proofs: list[bytes],
     step: int,
+    target_lengths: list[int],
 ) -> pa.Table:
     input_tokens_list = []
     output_tokens_list = []
@@ -137,23 +151,31 @@ def get_parquet_table(
     output_logprobs_list = []
     advantages_list = []
     rewards_list = []
+    task_rewards_list = []
+    length_penalty_list = []
     proofs_list = []
     steps_list = []
+    target_lengths_list = []
 
     proof_iter = iter(proofs)
 
-    for i, request in enumerate(generated_tokens):
+    for i, (request, target_len) in enumerate(zip(generated_tokens, target_lengths)):
         advantages = grouped_advantages[i]
         rewards = grouped_rewards[i].tolist()
-        for adv, reward, output in zip(advantages, rewards, request.outputs):
+        task_rewards = grouped_task_rewards[i].tolist()
+        length_penalties = grouped_length_penalties[i].tolist()
+        for adv, reward, task_reward, length_penalty, output in zip(advantages, rewards, task_rewards, length_penalties, request.outputs):
             input_tokens_list.append(request.prompt_token_ids)
             output_tokens_list.append(output.token_ids)
             input_logprobs_list.append([0] * len(request.prompt_token_ids))  # putting 0 for now as not needed in the grpo loss
             output_logprobs_list.append(get_own_logprobs(output.logprobs))
             advantages_list.append(adv)
             rewards_list.append(reward)
+            task_rewards_list.append(task_reward)
+            length_penalty_list.append(length_penalty)
             proofs_list.append(next(proof_iter) if len(output.token_ids) > 1 else b"")
             steps_list.append(step)
+            target_lengths_list.append(target_len)
 
     arrays = [
         pa.array(input_tokens_list, type=pa.list_(pa.int32())),
@@ -162,8 +184,11 @@ def get_parquet_table(
         pa.array(output_logprobs_list, type=pa.list_(pa.float32())),
         pa.array(advantages_list, type=pa.float32()),
         pa.array(rewards_list, type=pa.float32()),
+        pa.array(task_rewards_list, type=pa.float32()),
+        pa.array(length_penalty_list, type=pa.float32()),
         pa.array(proofs_list, type=pa.binary()),
         pa.array(steps_list, type=pa.int32()),
+        pa.array(target_lengths_list, type=pa.int32()),
     ]
     return pa.Table.from_arrays(arrays, schema=pa_schema)
 
@@ -192,34 +217,79 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     return llm
 
 
-async def compute_reward_for_output(output, verification_info):
+def generate_target_length_prompts(config: Config, batch_size: int):
+    if config.len_reward is not None:
+        target_lengths = torch.randint(
+            low=config.len_reward.min_length, high=config.len_reward.max_length + 1, size=(batch_size,), device="cpu"
+        ).tolist()
+
+        return [f"\n\nThink for {target} tokens." for target in target_lengths], target_lengths
+
+    return [""] * batch_size, [-1] * batch_size
+
+
+async def compute_reward_for_output(output, verification_info, len_reward_config):
     loop = asyncio.get_running_loop()
     # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
-    return await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
+    math_reward = await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
+
+    total_reward = math_reward
+    length_penalty = 0
+    if verification_info["target_length"] > 0:
+        # Calculate length reward - this could be a separate function
+        output_length = len(output.token_ids)
+        target_length = verification_info["target_length"]
+
+        length_penalty = abs(output_length - target_length)
+        length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
+        length_penalty = min(1, length_penalty)
+
+        total_reward -= length_penalty
+
+    return dict(total_reward=total_reward, task_reward=math_reward, length_penalty=length_penalty)
 
 
-async def compute_rewards_async(generated_tokens: list[vllm.RequestOutput], verification_infos: list[str]) -> dict[int, torch.FloatTensor]:
+async def compute_rewards_async(
+    generated_tokens: list[vllm.RequestOutput], verification_infos: list[str], target_lengths: list[int], config: Config
+) -> tuple[dict[int, torch.FloatTensor], dict[int, torch.FloatTensor], dict[int, torch.FloatTensor]]:
     parsed_infos = [json.loads(ver) for ver in verification_infos]
+
+    for info, target_len in zip(parsed_infos, target_lengths):
+        info["target_length"] = target_len
+
     tasks = []
     mapping = []
 
     for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
         for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info)))
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.len_reward)))
             mapping.append(req_idx)
 
     all_results = await asyncio.gather(*tasks)
-    grouped_results = {}
+
+    grouped_total_rewards = {}
+    grouped_task_rewards = {}
+    grouped_length_penalties = {}
+
     for req_idx in set(mapping):
-        grouped_results[req_idx] = []
+        grouped_total_rewards[req_idx] = []
+        grouped_task_rewards[req_idx] = []
+        grouped_length_penalties[req_idx] = []
+
     for req_idx, result in zip(mapping, all_results):
-        grouped_results[req_idx].append(result)
-    for req_idx in grouped_results:
-        grouped_results[req_idx] = torch.FloatTensor(grouped_results[req_idx])
-    return grouped_results
+        grouped_total_rewards[req_idx].append(result["total_reward"])
+        grouped_task_rewards[req_idx].append(result["task_reward"])
+        grouped_length_penalties[req_idx].append(result["length_penalty"])
+
+    for req_idx in grouped_total_rewards:
+        grouped_total_rewards[req_idx] = torch.FloatTensor(grouped_total_rewards[req_idx])
+        grouped_task_rewards[req_idx] = torch.FloatTensor(grouped_task_rewards[req_idx])
+        grouped_length_penalties[req_idx] = torch.FloatTensor(grouped_length_penalties[req_idx])
+
+    return grouped_total_rewards, grouped_task_rewards, grouped_length_penalties
 
 
-def compute_advantages_grpo(grouped_rewards: dict[int, torch.FloatTensor], epsilon: float = 1e-6) -> dict[int, list[float]]:
+def compute_advantages_grpo(grouped_rewards: dict[int, dict[str, torch.FloatTensor]], epsilon: float = 1e-6) -> dict[int, list[float]]:
     advantages = {}
     for req_idx, rewards_tensor in grouped_rewards.items():
         mean = torch.mean(rewards_tensor).item()
@@ -245,10 +315,19 @@ def inference(config: Config):
     logger = get_logger(f"INFERENCE {rank}")
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
-    generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
-    # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
+    if os.environ.get("NODE_ADDRESS") is not None:
+        # We dont shuffle here because we shuffle reproducibly in the sampling loop.
+        dataset = load_dataset(config.dataset, split="train")
+        assert config.seed is None, "Seed is not supported when NODE_ADDRESS is set"
+        assert rank == 0, "DP is not supported when NODE_ADDRESS is set"
+        node_address_int = int(os.environ.get("NODE_ADDRESS"), 16)
+        logger.info(f"Seeding with {node_address_int} ({os.environ.get('NODE_ADDRESS')})")
+    else:
+        # not sure what is the default seed for np.random.default_rng so doing this to make sure we use the default value
+        generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
+        dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
+        node_address_int = None
 
-    dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
     max_samples = config.max_samples or len(dataset)
 
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
@@ -272,7 +351,6 @@ def inference(config: Config):
         if len(sampling_metadata.seq_groups) != hidden_states.shape[0]:
             raise ValueError(f"Lengths dont match: {len(sampling_metadata.seq_groups)} {hidden_states.shape}")
 
-        # TODO: Maybe just use sampling_metadata.selected_token_indices?
         index = [i.seq_ids[0] for i in sampling_metadata.seq_groups]
         toploc_cache.add(index, hidden_states)
 
@@ -317,8 +395,26 @@ def inference(config: Config):
                 attempt_count += 1
 
         # Get batch
-        batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
+        if node_address_int is not None:
+            # TODO: What if we have multiple sample per real step?
+            # Its impossible right now but we need to fix this if accept counter is used.
+
+            # We reseed the generator here to make the sampling reproducible at each step.
+            # This would work even if the node restarts and resumes from the current step.
+            generator = np.random.default_rng(node_address_int + real_step)
+            indexes = generator.integers(0, len(dataset), config.batch_size)
+            batch = dataset.select(indexes)
+        else:
+            batch = dataset.select(range(i, min(i + config.batch_size, len(dataset))))
         messages = [[{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}] for item in batch]
+
+        length_prompt_additions, target_lengths = generate_target_length_prompts(config, len(batch))
+
+        messages = [
+            [{"role": "user", "content": item["prompt"] + length_prompt}, {"role": "assistant", "content": "<think>\n"}]
+            for item, length_prompt in zip(batch, length_prompt_additions)
+        ]
+
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
 
@@ -366,11 +462,22 @@ def inference(config: Config):
         toploc_cache.reset_cache()
 
         # Compute rewards asynchronously, grouped as a dictionary.
-        grouped_rewards = asyncio.run(compute_rewards_async(generated_tokens, verification_infos))
+        grouped_rewards, grouped_task_rewards, grouped_length_penalties = asyncio.run(
+            compute_rewards_async(generated_tokens, verification_infos, target_lengths, config)
+        )
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
 
-        table = get_parquet_table(generated_tokens, grouped_advantages, grouped_rewards, proofs, ckpt_step)
+        table = get_parquet_table(
+            generated_tokens,
+            grouped_advantages,
+            grouped_rewards,
+            grouped_task_rewards,
+            grouped_length_penalties,
+            proofs,
+            ckpt_step,
+            target_lengths,
+        )
 
         step_path = Path(config.output_path) / f"step_{real_step}"
         os.makedirs(step_path, exist_ok=True)

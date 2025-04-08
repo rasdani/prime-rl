@@ -32,7 +32,7 @@ class DataConfig(BaseConfig):
 
 
 class FakeTokenizedDataset(IterableDataset):
-    """This is a dummy dataset that generates random sequences of length seq_len and vocab_size"""
+    """A dummy dataset that generates random sequences with the full schema including new columns."""
 
     def __init__(self, seq_len: int, vocab_size: int):
         self.seq_len = seq_len
@@ -47,11 +47,18 @@ class FakeTokenizedDataset(IterableDataset):
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
             rewards = torch.clamp(torch.randn(len_), min=0.0, max=1.0)
+            task_rewards = torch.rand(len_)
+            length_penalties = torch.rand(len_)
+            target_length_value = torch.randint(1, self.seq_len + 1, (1,)).item()
+            target_lengths = torch.tensor(target_length_value, dtype=torch.int32)
             self.step += 1
             yield {
                 "input_ids": input_ids,
                 "advantages": advantages,
                 "rewards": rewards,
+                "task_rewards": task_rewards,
+                "length_penalties": length_penalties,
+                "target_lengths": target_lengths,
                 "loss_mask": torch.ones(len_).int(),
                 "logprobs": torch.randn(len_),
             }
@@ -179,68 +186,110 @@ class ParquetDataset(IterableDataset):
 
             dataset = _get_dataset_from_files_step(self._step_count, self._path, self._timeout, self._batch_size)
 
-            # we are NOT splitting the files across datalaoder workers and rank like we did for intellect 1
-            # This is because we cannot assume that the files would have the same number of samples each.
-            # What we rather do here is that all the workers go over all the files and only yield some of them
-            # this is unoptimal because they all load more data that they should, but since the data is already tokenized it should not be a big deal
-
-            # Set up a scanner with just the required columns
-            required_columns = ["input_tokens", "output_tokens", "advantages", "rewards", "input_logprobs", "output_logprobs"]
+            required_columns = [
+                "input_tokens",
+                "output_tokens",
+                "advantages",
+                "rewards",
+                "task_rewards",
+                "length_penalties",
+                "target_lengths",
+                "input_logprobs",
+                "output_logprobs",
+            ]
 
             scanner = dataset.scanner(columns=required_columns, batch_size=self._pq_read_bs)
-
             counter = 0
 
             for j, batch in enumerate(scanner.to_batches()):
-                # Check if both required columns exist in this batch
-
                 if all(col in batch.column_names for col in required_columns):
-                    output_tokens = batch["output_tokens"]
                     input_tokens = batch["input_tokens"]
+                    output_tokens = batch["output_tokens"]
                     advantages = batch["advantages"]
                     rewards = batch["rewards"]
+                    task_rewards = batch["task_rewards"]
+                    length_penalties = batch["length_penalties"]
+                    target_lengths = batch["target_lengths"]
                     input_logprobs = batch["input_logprobs"]
                     output_logprobs = batch["output_logprobs"]
 
-                    for in_token, out_token, in_logprob, out_logprob, advantage, reward in zip(
-                        input_tokens, output_tokens, input_logprobs, output_logprobs, advantages, rewards
+                    for (
+                        in_token,
+                        out_token,
+                        in_logprob,
+                        out_logprob,
+                        advantage,
+                        reward,
+                        task_rew,
+                        len_pen,
+                        tgt_len,
+                    ) in zip(
+                        input_tokens,
+                        output_tokens,
+                        input_logprobs,
+                        output_logprobs,
+                        advantages,
+                        rewards,
+                        task_rewards,
+                        length_penalties,
+                        target_lengths,
                     ):
                         counter += 1
-                        if not _should_skip_index(
+                        if _should_skip_index(
                             index=counter,
                             world_size=self._world_info.world_size,
                             rank=self._world_info.rank,
                             num_workers=num_workers,
                             workers_id=worker_id,
                         ):
-                            try:
-                                input_ids = torch.tensor(in_token.as_py())
-                                output_ids = torch.tensor(out_token.as_py())
-                                in_logprobs = torch.tensor(in_logprob.as_py())
-                                out_logprobs = torch.tensor(out_logprob.as_py())
+                            continue
 
-                                ids = torch.cat([input_ids, output_ids], dim=0)
-                                logprobs = torch.cat([in_logprobs, out_logprobs], dim=0)
+                        try:
+                            input_ids = torch.tensor(in_token.as_py())
+                            output_ids = torch.tensor(out_token.as_py())
+                            in_logprobs = torch.tensor(in_logprob.as_py())
+                            out_logprobs = torch.tensor(out_logprob.as_py())
 
-                                loss_mask = torch.cat([torch.zeros(len(input_ids)), torch.ones(len(output_ids))], dim=0).int()
-                                adv = torch.tensor(data=[advantage.as_py()] * len(ids))
-                                rew = torch.tensor(data=[reward.as_py()] * len(ids))
-                                data = {"input_ids": ids, "advantages": adv, "rewards": rew, "loss_mask": loss_mask, "logprobs": logprobs}
-                            except Exception as e:
-                                self._logger.warn(f"Error processing row {counter} sample {sample_count}: {str(e)}")
-                                data = None
+                            ids = torch.cat([input_ids, output_ids], dim=0)
+                            logprobs = torch.cat([in_logprobs, out_logprobs], dim=0)
+                            loss_mask = torch.cat([torch.zeros(len(input_ids)), torch.ones(len(output_ids))], dim=0).int()
 
-                            if data is not None:
-                                sample_count += 1
-                                yield data
+                            adv_value = advantage.as_py()
+                            reward_value = reward.as_py()
+                            task_value = task_rew.as_py()
+                            len_pen_value = len_pen.as_py()
 
-                            if sample_count >= target_sample_count_per_batch:
-                                break
+                            tgt_length_val = int(tgt_len.as_py())
+
+                            adv = torch.tensor([adv_value] * len(ids))  # advantage
+                            rew = torch.tensor([reward_value] * len(ids))  # reward
+                            t_rew = torch.tensor([task_value] * len(ids))  # task reward
+                            l_pen = torch.tensor([len_pen_value] * len(ids))  # length penalty
+
+                            data = {
+                                "input_ids": ids,
+                                "advantages": adv,
+                                "rewards": rew,
+                                "task_rewards": t_rew,
+                                "length_penalties": l_pen,
+                                "target_lengths": tgt_length_val,
+                                "loss_mask": loss_mask,
+                                "logprobs": logprobs,
+                            }
+                        except Exception as e:
+                            self._logger.warn(f"Error processing row {counter} sample {sample_count}: {str(e)}")
+                            data = None
+
+                        if data is not None:
+                            sample_count += 1
+                            yield data
+
+                        if sample_count >= target_sample_count_per_batch:
+                            break
                 else:
                     self._logger.warn(f"Batch {j} does not have the required columns")
 
                 if sample_count >= target_sample_count_per_batch:
-                    # need to break out of a second time because of the nested for loop
                     break
 
 
@@ -261,9 +310,24 @@ class SequencePackingDataset(IterableDataset):
         self._pad_token_id = pad_token_id
 
     def __iter__(self) -> Generator[dict[str, Any], Any, None]:
+        required_keys = {
+            "input_ids",
+            "advantages",
+            "rewards",
+            "task_rewards",
+            "length_penalties",
+            "target_lengths",
+            "loss_mask",
+            "logprobs",
+        }
+        
+
         input_ids = []
         advantages = []
         rewards = []
+        task_rewards = []
+        length_penalties = []
+        target_lens = []
         loss_masks = []
         logprobs = []
         seq_lens = []
@@ -288,6 +352,7 @@ class SequencePackingDataset(IterableDataset):
                 get_logger().debug(f"Sample {i} too long. seq_len: {seq_len} > {self._seq_len}. Skipping.")
                 continue
 
+            assert required_keys <= set(sample.keys()), f"Missing required keys. Found: {sample.keys()}, required: {required_keys}"
             assert len(sample["input_ids"]) == len(sample["advantages"]) == len(sample["rewards"]) == len(sample["loss_mask"]) == len(sample["logprobs"]), \
                 f"Sample {i} has different lengths: {len(sample['input_ids'])}, {len(sample['advantages'])}, {len(sample['rewards'])}, {len(sample['loss_mask'])}, {len(sample['logprobs'])}"
 
@@ -296,6 +361,9 @@ class SequencePackingDataset(IterableDataset):
                 input_ids.append(sample["input_ids"])
                 advantages.append(sample["advantages"])
                 rewards.append(sample["rewards"])
+                task_rewards.append(sample["task_rewards"])
+                length_penalties.append(sample["length_penalties"])
+                target_lens.append(sample["target_lengths"])
                 loss_masks.append(sample["loss_mask"])
                 logprobs.append(sample["logprobs"])
                 seq_lens.append(seq_len)
@@ -311,6 +379,9 @@ class SequencePackingDataset(IterableDataset):
                 input_ids.append(torch.full((padding_len,), fill_value=self._pad_token_id, dtype=input_dtype))
                 advantages.append(torch.zeros(padding_len, dtype=sample["advantages"].dtype))
                 rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
+                task_rewards.append(torch.zeros(padding_len, dtype=sample["task_rewards"].dtype))
+                length_penalties.append(torch.zeros(padding_len, dtype=sample["length_penalties"].dtype))
+                target_lens.append(sample["target_lengths"])
                 loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
                 logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
                 seq_lens.append(padding_len) # Append fake padding sequence b/c flash attention explodes otherwise or when it's all zeros.
@@ -321,6 +392,9 @@ class SequencePackingDataset(IterableDataset):
                     "input_ids": torch.cat(input_ids),
                     "advantages": torch.cat(advantages),
                     "rewards": torch.cat(rewards),
+                    "task_rewards": torch.cat(task_rewards),
+                    "length_penalties": torch.cat(length_penalties),
+                    "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
                     "loss_mask": torch.cat(loss_masks).int(),
                     "logprobs": torch.cat(logprobs),
                     "seq_lens": torch.tensor(seq_lens),
@@ -330,6 +404,9 @@ class SequencePackingDataset(IterableDataset):
                 input_ids = []
                 advantages = []
                 rewards = []
+                task_rewards = []
+                length_penalties = []
+                target_lens = []
                 loss_masks = []
                 logprobs = []
                 seq_lens = []

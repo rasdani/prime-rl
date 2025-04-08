@@ -16,6 +16,9 @@ def _create_one_pa_table(batch_size: int, seq_len: int):
     output_tokens_list = [[1] * seq_len for _ in range(batch_size)]  # Wrap in list
     input_logprobs_list = [[0] * seq_len for _ in range(batch_size)]  # Wrap in list
     output_logprobs_list = [[0] * seq_len for _ in range(batch_size)]  # Wrap in list
+    task_rewards_list = [0] * batch_size
+    length_penalty_list = [0] * batch_size
+    target_lengths_list = [seq_len] * batch_size
     advantages_list = [1] * batch_size
     rewards_list = [1] * batch_size
     proofs_list = [b"I am toploc proof, handcrafted by jack"] * batch_size
@@ -29,10 +32,12 @@ def _create_one_pa_table(batch_size: int, seq_len: int):
         pa.array(output_logprobs_list, type=pa.list_(pa.float32())),
         pa.array(advantages_list, type=pa.float32()),
         pa.array(rewards_list, type=pa.float32()),
+        pa.array(task_rewards_list, type=pa.float32()),
+        pa.array(length_penalty_list, type=pa.float32()),
         pa.array(proofs_list, type=pa.binary()),
         pa.array(steps_list, type=pa.int32()),
+        pa.array(target_lengths_list, type=pa.int32()),
     ]
-
     # Create and return table
     return pa.Table.from_arrays(arrays, schema=pa_schema)
 
