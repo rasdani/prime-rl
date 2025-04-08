@@ -401,7 +401,15 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
             input_dtype = sample["input_ids"].dtype
             if seq_len > batch_seq_len:
                 get_logger().info(f"Sample {i} too long. seq_len: {seq_len} > {batch_seq_len}. Skipping.")
-                continue
+                sample["input_ids"] = sample["input_ids"][:batch_seq_len]
+                sample["advantages"] = sample["advantages"][:batch_seq_len]
+                sample["rewards"] = sample["rewards"][:batch_seq_len]
+                sample["task_rewards"] = sample["task_rewards"][:batch_seq_len]
+                sample["length_penalties"] = sample["length_penalties"][:batch_seq_len]
+                #sample["target_lengths"] = ...
+                sample["loss_mask"] = sample["loss_mask"][:batch_seq_len]
+                sample["logprobs"] = sample["logprobs"][:batch_seq_len]
+                seq_len = len(sample["input_ids"])                
 
             assert required_keys <= set(sample.keys()), f"Missing required keys. Found: {sample.keys()}, required: {required_keys}"
             assert len(sample["input_ids"]) == len(sample["advantages"]) == len(sample["rewards"]) == len(sample["task_rewards"]) == len(sample["length_penalties"]) == len(sample["loss_mask"]) == len(sample["logprobs"]), \
