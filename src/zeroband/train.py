@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal
 import torch
 import torch.distributed as dist
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy  # type: ignore
+import torch.distributed.tensor
 import wandb
 import shardcast
 
@@ -127,7 +128,7 @@ def get_local_batch_size(batch_size: int, micro_bs: int, data_workers: int, worl
         f"The batch size ({batch_size}) must be divisible by the number of data workers ({data_workers})."
     )
 
-    return batch_size // micro_bs
+    return batch_size
 
 
 def apply_fsdp(model: ModelType, reshard_after_forward: bool):
@@ -230,7 +231,7 @@ def train(config: Config):
 
     train_dataloader, prefetcher = get_dataloader(
         tokenizer=tokenizer,
-        micro_batch_size=local_batch_size,
+        local_batch_size=local_batch_size,
         batch_size=config.optim.batch_size * config.optim.step_per_rollout,
         data_config=config.data,
         step_count_init=training_progress.step // config.optim.step_per_rollout,
@@ -252,11 +253,9 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
-
-                    batch_packed, num_grad_acc_steps = packed_batch(batch_rollout, config.data.seq_length)
+                    batch_packed, num_grad_acc_steps = packed_batch(batch_rollout, config.data.seq_length, tokenizer.pad_token_id, 1)
 
                     data_per_rollout = []
-
                     for grad_acc_step in range(num_grad_acc_steps):
                         time_data_loading = time.time()
 
@@ -267,7 +266,7 @@ def train(config: Config):
 
                         input_ids = batch["input_ids"].to("cuda")
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids, position_ids=batch["position_ids"]).logits.contiguous()
 
                         input_ids = input_ids[:, 1:]
                         logits = logits[:, :-1, :] / config.temperature
@@ -285,17 +284,20 @@ def train(config: Config):
                 time_logprob = time.time() - time_start
                 logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
             else:
-                # this branch should not be reach anymore imo
-                logprobs_aware_iterator = train_dataloader_iterator
+                data = []
+                for rollout_step in range(config.optim.step_per_rollout):
+                    batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
+                    data.append(packed_batch(batch_rollout, config.data.seq_length, tokenizer.pad_token_id, 1))
+                logprobs_aware_iterator = iter(data)
 
         for rollout_step in range(config.optim.step_per_rollout):
-            loss_batch = 0
-            pg_loss_batch = 0
-            entropy_loss_batch = 0
-            clip_ratio_batch = 0
-            seq_lens_batch = 0
-            clip_seq_lens = 0
-            sample_reward_batch = 0
+            loss_batch = torch.tensor(0.0, device="cuda")
+            pg_loss_batch = torch.tensor(0.0, device="cuda")
+            entropy_loss_batch = torch.tensor(0.0, device="cuda")
+            clip_ratio_batch = torch.tensor(0.0, device="cuda")
+            seq_lens_batch = torch.tensor(0.0)
+            clip_seq_lens = torch.tensor(0.0)
+            sample_reward_batch = torch.tensor(0.0)
 
             rewards_sum = torch.tensor(0.0)
             rewards_token_count = torch.tensor(0.0)
@@ -412,7 +414,9 @@ def train(config: Config):
             sample_task_rewards = sample_task_reward_batch / world_info.world_size
             sample_length_penalties = sample_length_penalty_batch / world_info.world_size
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
+            if isinstance(grad_norm, torch.distributed.tensor.DTensor):
+                grad_norm.full_tensor()
 
             optimizer.step()
             scheduler.step()

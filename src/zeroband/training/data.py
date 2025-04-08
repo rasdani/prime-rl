@@ -1,6 +1,6 @@
 from pathlib import Path
 import time
-from typing import Any, Generator, TypedDict
+from typing import Any, Generator, Iterator, TypedDict
 
 from pydantic_config import BaseConfig
 
@@ -312,8 +312,21 @@ def no_collate(batch: list[DatasetOutput]) -> list[DatasetOutput]:
     return batch
 
 
+class BatchOutput(TypedDict):
+    input_ids: Int[torch.Tensor, "batch seq"]
+    advantages: Float[torch.Tensor, "batch seq"]
+    rewards: Float[torch.Tensor, "batch seq"]
+    loss_mask: Int[torch.Tensor, "batch seq"]
+    logprobs: Float[torch.Tensor, "batch seq"]
+    seq_lens: Int[torch.Tensor, "batch"]
+    length_penalties: Float[torch.Tensor, "batch"]
+    #target_lengths: Int[torch.Tensor, "batch"]
+    task_rewards: Float[torch.Tensor, "batch"]
+    position_ids: Int[torch.Tensor, "batch seq"]
+
+
 def get_dataloader(
-    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int, ignore_zero_advantages: bool
+    tokenizer, local_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int, ignore_zero_advantages: bool
 ) -> tuple[DataLoader[BatchOutput], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
@@ -332,29 +345,154 @@ def get_dataloader(
 
     loader = DataLoader(
         train_dataset,
-        batch_size=micro_batch_size,
+        batch_size=local_batch_size,
         num_workers=data_config.num_workers,
         collate_fn=no_collate,
     )
     return loader, prefetcher
 
 
-class BatchOutput(TypedDict):
-    input_ids: Int[torch.Tensor, "batch seq"]
-    advantages: Float[torch.Tensor, "batch seq"]
-    rewards: Float[torch.Tensor, "batch seq"]
-    loss_mask: Int[torch.Tensor, "batch seq"]
-    logprobs: Float[torch.Tensor, "batch seq"]
-    seq_lens: Int[torch.Tensor, "batch"]
-    length_penalties: Float[torch.Tensor, "batch"]
-    target_lengths: Int[torch.Tensor, "batch"]
-    task_rewards: Float[torch.Tensor, "batch"]
-
-    positions_ids: Int[torch.Tensor, "batch seq"]
 
 
-def packed_batch(batch_optim: list[DatasetOutput], seq_len: int) -> tuple[list[BatchOutput], int]:
+def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int) -> tuple[list[BatchOutput], int]:
     """
     this function will pack the batch into [1, seq_len] tensors with positions ids for the calling fa2
     """
-    ...
+    def pack_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int) -> Generator[BatchOutput, Any, None]:
+        batch_seq_len = seq_len * micro_batch_size
+
+        required_keys = {
+            "input_ids",
+            "advantages",
+            "rewards",  
+            "task_rewards",
+            "length_penalties",
+            #"target_lengths",
+            "loss_mask",
+            "logprobs",
+        }
+        
+
+        input_ids = []
+        advantages = []
+        rewards = []
+        task_rewards = []
+        length_penalties = []
+        #target_lens = []
+        loss_masks = []
+        logprobs = []
+        seq_lens = []
+        seq_len_sum = 0
+
+        batch_iter: Iterator[tuple[int, DatasetOutput]] = enumerate(batch_optim)
+        pending_sample: tuple[int, DatasetOutput] | None = None
+        while True:
+            # Get the next sample
+            if pending_sample is not None:
+                i, sample = pending_sample
+                pending_sample = None
+            else:
+                try:
+                    i, sample = next(batch_iter)
+                except StopIteration:
+                    break
+
+            seq_len = len(sample["input_ids"])
+            input_dtype = sample["input_ids"].dtype
+            if seq_len > batch_seq_len:
+                ().info(f"Sample {i} too long. seq_len: {seq_len} > {batch_seq_len}. Skipping.")
+                continue
+
+            assert required_keys <= set(sample.keys()), f"Missing required keys. Found: {sample.keys()}, required: {required_keys}"
+            assert len(sample["input_ids"]) == len(sample["advantages"]) == len(sample["rewards"]) == len(sample["task_rewards"]) == len(sample["length_penalties"]) == len(sample["loss_mask"]) == len(sample["logprobs"]), \
+                f"Sample {i} has different lengths: {len(sample['input_ids'])}, {len(sample['advantages'])}, {len(sample['rewards'])}, {len(sample['task_rewards'])}, {len(sample['length_penalties'])}, {len(sample['loss_mask'])}, {len(sample['logprobs'])}"
+
+            # If the sample fits, add it to the batch.
+            if (seq_len_sum + seq_len) <= batch_seq_len:
+                input_ids.append(sample["input_ids"])
+                advantages.append(sample["advantages"])
+                rewards.append(sample["rewards"])
+                task_rewards.append(sample["task_rewards"])
+                length_penalties.append(sample["length_penalties"])
+                # target_lens.append(sample["target_lengths"])
+                loss_masks.append(sample["loss_mask"])
+                logprobs.append(sample["logprobs"])
+                seq_lens.append(seq_len)
+                seq_len_sum += seq_len
+
+            # Otherwise, pad the batch and yield what we've built.
+            # Then on the next iteration, we process the sample that was too long again.
+            else:
+                pending_sample = (i, sample)
+
+                # Pad. We don't append to seq_lens so not to attend to the padding.
+                padding_len = batch_seq_len - seq_len_sum
+                input_ids.append(torch.full((padding_len,), fill_value=pad_token_id, dtype=input_dtype))
+                advantages.append(torch.zeros(padding_len, dtype=sample["advantages"].dtype))
+                rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
+                task_rewards.append(torch.zeros(padding_len, dtype=sample["task_rewards"].dtype))
+                length_penalties.append(torch.zeros(padding_len, dtype=sample["length_penalties"].dtype))
+                #target_lens.append(padding_len)
+                loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
+                logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
+                seq_lens.append(padding_len) # Append fake padding sequence b/c flash attention explodes otherwise or when it's all zeros.
+
+                # Yield the batch and reset so we can make a new one.
+                position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
+                yield {
+                    "input_ids": torch.cat(input_ids),
+                    "advantages": torch.cat(advantages),
+                    "rewards": torch.cat(rewards),
+                    "task_rewards": torch.cat(task_rewards),
+                    "length_penalties": torch.cat(length_penalties),
+                    #"target_lengths": torch.tensor(target_lens, dtype=torch.int32),
+                    "loss_mask": torch.cat(loss_masks).int(),
+                    "logprobs": torch.cat(logprobs),
+                    "seq_lens": torch.tensor(seq_lens),
+                    "position_ids": position_ids,
+                }
+
+                input_ids = []
+                advantages = []
+                rewards = []
+                task_rewards = []
+                length_penalties = []
+                #target_lens = []
+                loss_masks = []
+                logprobs = []
+                seq_lens = []
+                seq_len_sum = 0
+            
+        padding_len = batch_seq_len - seq_len_sum
+        input_ids.append(torch.full((padding_len,), fill_value=pad_token_id, dtype=input_dtype))
+        advantages.append(torch.zeros(padding_len, dtype=sample["advantages"].dtype))
+        rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
+        task_rewards.append(torch.zeros(padding_len, dtype=sample["task_rewards"].dtype))
+        length_penalties.append(torch.zeros(padding_len, dtype=sample["length_penalties"].dtype))
+        #target_lens.append(padding_len)
+        loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
+        logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
+        seq_lens.append(padding_len)
+
+        # Yield the batch and reset so we can make a new one.
+        position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
+        yield {
+            "input_ids": torch.cat(input_ids),
+            "advantages": torch.cat(advantages),
+            "rewards": torch.cat(rewards),
+            "task_rewards": torch.cat(task_rewards),
+            "length_penalties": torch.cat(length_penalties),
+            #"target_lengths": torch.tensor(target_lens, dtype=torch.int32),
+            "loss_mask": torch.cat(loss_masks).int(),
+            "logprobs": torch.cat(logprobs),
+            "seq_lens": torch.tensor(seq_lens),
+            "position_ids": position_ids,
+        }
+
+        return # Batch exhausted
+
+    batch_outputs = []
+    for packed in pack_batch(batch_optim, seq_len, pad_token_id, micro_batch_size):
+        packed = {k: (v.unsqueeze(0) if isinstance(v, torch.Tensor) else v) for k, v in packed.items()}
+        batch_outputs.append(packed) # Re-coallated
+    return batch_outputs, len(batch_outputs)
