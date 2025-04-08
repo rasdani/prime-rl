@@ -29,6 +29,10 @@ jobs:
 
       - name: Install the project
         run: uv sync --all-extras --dev
+      
+      - name: Install flash-attn
+        run: uv pip install flash-attn --no-build-isolation
+
       - name: Run tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
