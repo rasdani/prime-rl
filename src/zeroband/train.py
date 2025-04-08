@@ -319,6 +319,8 @@ def train(config: Config):
 
             data_per_rollout, num_grad_acc_steps = next(logprobs_aware_iterator)
 
+            logger.info(f"rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
+
             for grad_acc_step in range(num_grad_acc_steps):
                 batch = data_per_rollout[grad_acc_step]
                 input_ids = batch["input_ids"].to("cuda")
