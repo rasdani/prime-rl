@@ -2,8 +2,9 @@ name_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 project = "rl-Qwen1.5B"
 
 [train]
-micro_bs = 32
+micro_bs = 8
 reshard_after_forward = true
+attn_impl = "flash_attention_2"
 
 [optim]
 batch_size = 128
@@ -13,3 +14,11 @@ step_per_rollout = 8
 
 [optim.optim]
 lr = 1e-6
+batch_size = 512
+step_per_rollout = 4
+
+
+
+[data]
+path = "data_rollout"
+seq_length = 2048

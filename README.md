@@ -59,43 +59,23 @@ inference
 uv run python src/zeroband/inference.py @ configs/inference/debug.toml
 ```
 
-## Larger run
-
-if you see error related to torch multiprocessing spawn method, you can set the following environment variable:
-
-```bash
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-```
-
-For now you need to generate fake rollout data for testing. 
-
-```bash
-uv run python generate_fake_rollout.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml --max-samples 10000 --sampling.max_tokens 8192
-```
-
-and then do the training on it
-
-```bash
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-uv run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/150M/A40.toml --data.path data/fake_rollout 
-```
-
-when using `on_policy_log_prob` you might need to do `ulimit -n 4096` to avoid crash.
-
-## manual 4k run
+## 2k seq length run
 
 on two different terminal do:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=6,7
-uv  run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/Qwen1.5B/Qwen1.5b.toml --data.path data_rollout --ckpt.rollout_path outputs --train.micro_bs 4 --data.seq_length 4096 --optim.batch_size 64 --optim.step_per_rollout 16 --train.attn_impl flash_attention_2
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+uv  run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/Qwen1.5B/Qwen1.5b.toml
 ```
+
+if running on h100 node instead of H200 you should add ` --train.micro_bs 4`
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
-uv run python src/zeroband/inference.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml --batch-size 22 --dp 6 --rollout_path outputs --output_path data_rollout  --max_model_len 4096 --seed 42
+ulimit -n 4096
+uv run python src/zeroband/inference.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml
 ```
-
 
 
 ## Checkpoints management
