@@ -400,7 +400,7 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
             seq_len = len(sample["input_ids"])
             input_dtype = sample["input_ids"].dtype
             if seq_len > batch_seq_len:
-                ().info(f"Sample {i} too long. seq_len: {seq_len} > {batch_seq_len}. Skipping.")
+                get_logger().info(f"Sample {i} too long. seq_len: {seq_len} > {batch_seq_len}. Skipping.")
                 continue
 
             assert required_keys <= set(sample.keys()), f"Missing required keys. Found: {sample.keys()}, required: {required_keys}"
