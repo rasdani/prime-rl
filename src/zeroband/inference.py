@@ -372,9 +372,8 @@ def inference(config: Config):
         ckpt_step = 0
         real_step = 0
 
-    current_step_batch_counter = (
-        1  # This is used by the seeding logic to make sure we dont generate the same samples twice if we do multiple batches for a step
-    )
+ # This is used by the seeding logic to make sure we dont generate the same samples twice if we do multiple batches for a step
+    current_step_batch_counter = 1 
     total_problems = 0
     total_tokens = 0
 
