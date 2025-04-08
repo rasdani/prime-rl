@@ -372,13 +372,14 @@ def inference(config: Config):
         ckpt_step = 0
         real_step = 0
 
- # This is used by the seeding logic to make sure we dont generate the same samples twice if we do multiple batches for a step
-    current_step_batch_counter = 1 
+    # This is used by the seeding logic to make sure we dont generate the same samples twice if we do multiple batches for a step
+    current_step_batch_counter = 1
     total_problems = 0
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         if config.step_endpoint is not None:
+            # We get the step from the endpoint at the start of each batch to know what to work on
             new_real_step = requests.get(config.step_endpoint).json()
             if new_real_step != real_step:
                 real_step = new_real_step
