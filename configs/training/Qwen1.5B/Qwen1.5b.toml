@@ -10,7 +10,7 @@ attn_impl = "flash_attention_2"
 batch_size = 512
 warmup_steps = 1
 total_steps = 100000000000000
-step_per_rollout = 8
+step_per_rollout = 4
 
 [optim.optim]
 lr = 1e-6
