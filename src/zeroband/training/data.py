@@ -1,6 +1,6 @@
 from pathlib import Path
 import time
-from typing import Any, Generator, TypedDict
+from typing import Any, Generator, Iterator, TypedDict
 
 from pydantic_config import BaseConfig
 
@@ -251,7 +251,7 @@ class BatchOutput(TypedDict):
     loss_mask: Int[torch.Tensor, "batch seq"]
     logprobs: Float[torch.Tensor, "batch seq"]
     seq_lens: Int[torch.Tensor, "batch"]
-    attn_mask: Float[torch.Tensor, "1 1 seq seq"]
+    position_ids: Float[torch.Tensor, "batch*seq"]
 
 
 class SequencePackingDataset(IterableDataset):
@@ -268,20 +268,31 @@ class SequencePackingDataset(IterableDataset):
         logprobs = []
         seq_lens = []
         seq_len_sum = 0
-        dataset_iter = enumerate(iter(self._dataset))
+
+        dataset_iter: Iterator[tuple[int, BatchOutput]] = enumerate(iter(self._dataset))
+        pending_sample: tuple[int, dict] | None = None
         while True:
-            try:
-                i, sample = next(dataset_iter)
-                seq_len = len(sample["input_ids"])
-                input_dtype = sample["input_ids"].dtype
-                if seq_len > self._seq_len:
-                    get_logger().debug(f"Sample {i} seq_len: {seq_len} > {self._seq_len}. Skipping sample.")
-                    continue
-            except StopIteration:
-                break
+            # Get the next sample
+            if pending_sample is not None:
+                i, sample = pending_sample
+                pending_sample = None
+            else:
+                try:
+                    i, sample = next(dataset_iter)
+                except StopIteration:
+                    break
+
+            seq_len = len(sample["input_ids"])
+            input_dtype = sample["input_ids"].dtype
+            if seq_len > self._seq_len:
+                get_logger().debug(f"Sample {i} too long. seq_len: {seq_len} > {self._seq_len}. Skipping.")
+                continue
+
+            assert len(sample["input_ids"]) == len(sample["advantages"]) == len(sample["rewards"]) == len(sample["loss_mask"]) == len(sample["logprobs"]), \
+                f"Sample {i} has different lengths: {len(sample['input_ids'])}, {len(sample['advantages'])}, {len(sample['rewards'])}, {len(sample['loss_mask'])}, {len(sample['logprobs'])}"
 
             # If the sample fits, add it to the batch.
-            if (seq_len_sum + seq_len) < self._seq_len:
+            if (seq_len_sum + seq_len) <= self._seq_len:
                 input_ids.append(sample["input_ids"])
                 advantages.append(sample["advantages"])
                 rewards.append(sample["rewards"])
@@ -289,11 +300,12 @@ class SequencePackingDataset(IterableDataset):
                 logprobs.append(sample["logprobs"])
                 seq_lens.append(seq_len)
                 seq_len_sum += seq_len
-                assert len(sample["input_ids"]) == len(sample["advantages"]) == len(sample["rewards"]) == len(sample["loss_mask"]) == len(sample["logprobs"]), \
-                    f"Sample {i} has different lengths: {len(sample['input_ids'])}, {len(sample['advantages'])}, {len(sample['rewards'])}, {len(sample['loss_mask'])}, {len(sample['logprobs'])}"
 
-            # Otherwise, pad the batch and yield it.
+            # Otherwise, pad the batch and yield what we've built.
+            # Then on the next iteration, we process the sample that was too long again.
             else:
+                pending_sample = (i, sample)
+
                 # Pad. We don't append to seq_lens so not to attend to the padding.
                 padding_len = self._seq_len - seq_len_sum
                 input_ids.append(torch.full((padding_len,), fill_value=self._pad_token_id, dtype=input_dtype))
@@ -301,10 +313,10 @@ class SequencePackingDataset(IterableDataset):
                 rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
                 loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
                 logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
+                seq_lens.append(padding_len) # Append fake padding sequence b/c flash attention explodes otherwise or when it's all zeros.
 
                 # Yield the batch and reset so we can make a new one.
-                position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens]
-                                       + [torch.zeros(padding_len, dtype=input_dtype)])
+                position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
                 yield {
                     "input_ids": torch.cat(input_ids),
                     "advantages": torch.cat(advantages),
@@ -331,8 +343,8 @@ class SequencePackingDataset(IterableDataset):
             rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
             loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
             logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
-            position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens]
-                                   + [torch.zeros(padding_len, dtype=input_dtype)])
+            seq_lens.append(padding_len)
+            position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
             yield {
                 "input_ids": torch.cat(input_ids).contiguous(),
                 "advantages": torch.cat(advantages),

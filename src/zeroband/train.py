@@ -208,8 +208,7 @@ def train(config: Config):
         wandb.init(project=config.project, config=config.model_dump())
 
     if config.train.torch_compile:
-        # model = torch.compile(model) if not TYPE_CHECKING else model
-        pass
+        model = torch.compile(model) if not TYPE_CHECKING else model
 
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.resume)
@@ -247,8 +246,7 @@ def train(config: Config):
                         assert len(input_ids.shape) == 2 and len(position_ids.shape) == 2, f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}"
                         assert input_ids.shape == position_ids.shape, f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}"
 
-                        #logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
-                        logits = model(input_ids=input_ids, position_ids=position_ids).logits.contiguous()
+                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
 
                         input_ids = input_ids[:, 1:]
                         logits = logits[:, :-1, :] / config.temperature
@@ -285,27 +283,18 @@ def train(config: Config):
                 position_ids = batch["position_ids"]
                 loss_mask = batch["loss_mask"]
 
-                logger.info(f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}")
                 assert len(input_ids.shape) == 2 and len(position_ids.shape) == 2, f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}"
                 assert input_ids.shape == position_ids.shape, f"input_ids shape: {input_ids.shape}, position_ids shape: {position_ids.shape}"
-
-                logger.info(f"position_ids device: {position_ids.device}")
-                d = (torch.diff(position_ids, dim=-1) >= 0).all()
-                logger.info(f"position_ids diff: {d}")
 
                 rewards = batch["rewards"][loss_mask.bool()]
                 rewards_sum += rewards.sum()
                 rewards_token_count += rewards.numel()
 
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
-                clip_seq_lens += (
-                    (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / gradient_accumulation_steps
-                )
+                clip_seq_lens += ((batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0]) / gradient_accumulation_steps
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids, position_ids=position_ids).logits.contiguous()
-
-                logger.info(f"logits shape: {logits.shape}")
 
                 # Gather args for grpo loss
                 advantages = batch["advantages"].to("cuda")
@@ -333,16 +322,12 @@ def train(config: Config):
                 loss = loss / gradient_accumulation_steps
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
-                logger.info(f"loss: {loss.item()}, pg_loss: {pg_loss.item()}, entropy: {entropy.item()}, clip_ratio: {clip_ratio.item()}")
-
                 sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
 
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
-                logger.info("Running backward")
                 loss.backward()
-                logger.info("Completed backward")
                 loss_batch += loss.detach().clone()
                 pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
                 entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
