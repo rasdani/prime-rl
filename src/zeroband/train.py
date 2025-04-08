@@ -12,7 +12,7 @@ import shardcast
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
-from zeroband.training.data import DataConfig, get_dataloader
+from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, get_dataloader, packed_batch
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
@@ -111,7 +111,7 @@ class Config(BaseConfig):
         return self
 
 
-def get_gradient_accumulation_steps(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
+def get_local_batch_size(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
     assert batch_size % world_info.world_size == 0
     batch_size = batch_size // world_info.world_size
 
@@ -169,9 +169,7 @@ def train(config: Config):
 
     torch.cuda.set_device(get_device_placement(config.gpus_ids, world_info))
 
-    gradient_accumulation_steps = get_gradient_accumulation_steps(
-        config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info
-    )
+    local_batch_size = get_local_batch_size(config.optim.batch_size, config.train.micro_bs, config.data.num_workers, world_info)
 
     if config.ckpt.rollout_path is not None and world_info.rank == 0:
         origin_data_dir = os.environ.get("SHARDCAST_OUTPUT_DIR", "./origin_data")
@@ -229,7 +227,7 @@ def train(config: Config):
 
     train_dataloader, prefetcher = get_dataloader(
         tokenizer=tokenizer,
-        micro_batch_size=config.train.micro_bs,
+        micro_batch_size=local_batch_size,
         batch_size=config.optim.batch_size * config.optim.step_per_rollout,
         data_config=config.data,
         step_count_init=training_progress.step // config.optim.step_per_rollout,
@@ -246,13 +244,19 @@ def train(config: Config):
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             if config.on_policy_log_prob:
-                data = []
+                data: list[tuple[list[BatchOutput], int]] = []
 
                 for rollout_step in range(config.optim.step_per_rollout):
-                    for grad_acc_step in range(gradient_accumulation_steps):
+                    batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
+
+                    batch_packed, num_grad_acc_steps = packed_batch(batch_rollout, config.data.seq_length)
+
+                    data_per_rollout = []
+
+                    for grad_acc_step in range(num_grad_acc_steps):
                         time_data_loading = time.time()
 
-                        batch = next(train_dataloader_iterator)
+                        batch = batch_packed[grad_acc_step]
 
                         time_data_loading = time.time() - time_data_loading
                         total_time_data_loading += time_data_loading
@@ -268,13 +272,16 @@ def train(config: Config):
                         batch["logprobs"] = per_token_logps.to("cpu")
 
                         del logits, per_token_logps
-                        data.append(batch)
+                        data_per_rollout.append(batch)
+
+                    data.append((data_per_rollout, num_grad_acc_steps))
 
                 logprobs_aware_iterator = iter(data)
 
                 time_logprob = time.time() - time_start
                 logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
             else:
+                # this branch should not be reach anymore imo
                 logprobs_aware_iterator = train_dataloader_iterator
 
         for rollout_step in range(config.optim.step_per_rollout):
@@ -301,8 +308,10 @@ def train(config: Config):
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            for _grad_acc_step in range(gradient_accumulation_steps):
-                batch = next(logprobs_aware_iterator)
+            data_per_rollout, num_grad_acc_steps = next(logprobs_aware_iterator)
+
+            for grad_acc_step in range(num_grad_acc_steps):
+                batch = data_per_rollout[grad_acc_step]
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
@@ -310,7 +319,7 @@ def train(config: Config):
                 rewards_sum += rewards_this.sum()
                 rewards_token_count += rewards_this.numel()
 
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
+                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / num_grad_acc_steps
 
                 task_this = batch["task_rewards"][loss_mask.bool()]
                 task_rewards_sum += task_this.sum()
@@ -320,16 +329,14 @@ def train(config: Config):
                 length_pen_sum += len_pen_this.sum()
                 length_pen_token_count += len_pen_this.numel()
 
-                sample_task_reward_batch += batch["task_rewards"][:, 0].sum() / batch["task_rewards"].shape[0] / gradient_accumulation_steps
+                sample_task_reward_batch += batch["task_rewards"][:, 0].sum() / batch["task_rewards"].shape[0] / num_grad_acc_steps
 
                 sample_length_penalty_batch += (
-                    batch["length_penalties"][:, 0].sum() / batch["length_penalties"].shape[0] / gradient_accumulation_steps
+                    batch["length_penalties"][:, 0].sum() / batch["length_penalties"].shape[0] / num_grad_acc_steps
                 )
 
-                seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
-                clip_seq_lens += (
-                    (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / gradient_accumulation_steps
-                )
+                seq_lens_batch += batch["seq_lens"].float().mean() / num_grad_acc_steps
+                clip_seq_lens += (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / num_grad_acc_steps
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
@@ -355,16 +362,16 @@ def train(config: Config):
                 entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
-                loss = loss / gradient_accumulation_steps
-                clip_ratio = clip_ratio / gradient_accumulation_steps
+                loss = loss / num_grad_acc_steps
+                clip_ratio = clip_ratio / num_grad_acc_steps
 
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
                 loss.backward()
                 loss_batch += loss.detach().clone()
-                pg_loss_batch += (pg_loss / gradient_accumulation_steps).detach().clone()
-                entropy_loss_batch += (entropy / gradient_accumulation_steps).detach().clone()
+                pg_loss_batch += (pg_loss / num_grad_acc_steps).detach().clone()
+                entropy_loss_batch += (entropy / num_grad_acc_steps).detach().clone()
                 clip_ratio_batch += clip_ratio.detach().clone()
                 del loss, clip_ratio, pg_loss, entropy
 
