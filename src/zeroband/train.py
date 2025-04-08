@@ -91,7 +91,9 @@ class Config(BaseConfig):
     gpus_ids: list[int] | None = None
 
     temperature: float = 0.6  # todo remove this and add this to the data
-    grpo_epsilon: float = 0.2
+
+    grpo_epsilon_low: float = 0.2
+    grpo_epsilon_high: float = 0.2
     entropy_loss_coeff: float = 0.001
 
     on_policy_log_prob: bool = True
@@ -351,7 +353,8 @@ def train(config: Config):
                     original_logprobs,
                     loss_mask,
                     config.temperature,
-                    config.grpo_epsilon,
+                    config.grpo_epsilon_low,
+                    config.grpo_epsilon_high,
                     config.masked_mean_axis,
                 )
                 entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
