@@ -64,18 +64,21 @@ uv run python src/zeroband/inference.py @ configs/inference/debug.toml
 on two different terminal do:
 
 ```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+ulimit -n 4096
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+uv run python src/zeroband/inference.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml
+```
+
+then start the trainer
+
+```bash
 export CUDA_VISIBLE_DEVICES=6,7
 uv  run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/Qwen1.5B/Qwen1.5b.toml
 ```
 
 if running on h100 node instead of H200 you should add ` --train.micro_bs 4`
 
-```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
-ulimit -n 4096
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-uv run python src/zeroband/inference.py @ configs/inference/Qwen1.5B/Qwen1.5B.toml
-```
 
 
 ## Checkpoints management
