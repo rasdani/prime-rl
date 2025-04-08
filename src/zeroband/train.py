@@ -57,6 +57,7 @@ class TrainConfig(BaseConfig):
     memory_profile: str | None = None
     torch_compile: bool = False  #  disabling torch compile because its too unstable for RL
     liger_qwen: bool = False
+    ignore_zero_advantages: bool = False
 
     attn_impl: AttnImpl = "flex_attention"
 
@@ -233,6 +234,7 @@ def train(config: Config):
         batch_size=config.optim.batch_size * config.optim.step_per_rollout,
         data_config=config.data,
         step_count_init=training_progress.step // config.optim.step_per_rollout,
+        ignore_zero_advantages=config.train.ignore_zero_advantages,
     )
     train_dataloader_iterator = iter(train_dataloader)
 
