@@ -358,8 +358,6 @@ def train(config: Config):
                 loss = loss / gradient_accumulation_steps
                 clip_ratio = clip_ratio / gradient_accumulation_steps
 
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / gradient_accumulation_steps
-
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
