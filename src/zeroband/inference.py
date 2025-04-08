@@ -368,9 +368,6 @@ def inference(config: Config):
         logger.info(f"Resuming from step {ckpt_step} at {path_file}")
         llm = reload_model_weights(llm, path_file)
         real_step = ckpt_step
-    elif config.step_endpoint is not None:
-        ckpt_step = 0
-        real_step = requests.get(config.step_endpoint).json()
     else:
         ckpt_step = 0
         real_step = 0
@@ -379,6 +376,8 @@ def inference(config: Config):
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
+        if config.step_endpoint is not None:
+            real_step = requests.get(config.step_endpoint).json()
         logger.info(
             f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.async_level: {config.async_level}"
         )
