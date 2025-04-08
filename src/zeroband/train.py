@@ -253,8 +253,9 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
-                    batch_packed, num_grad_acc_steps = packed_batch(batch_rollout, config.data.seq_length, tokenizer.pad_token_id, 1)
-
+                    batch_packed, num_grad_acc_steps = packed_batch(
+                        batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs
+                    )
                     data_per_rollout = []
                     for grad_acc_step in range(num_grad_acc_steps):
                         time_data_loading = time.time()
@@ -266,7 +267,9 @@ def train(config: Config):
 
                         input_ids = batch["input_ids"].to("cuda")
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids, position_ids=batch["position_ids"]).logits.contiguous()
+                        logits: Float[torch.Tensor, "batch seq vocab"] = model(
+                            input_ids=input_ids, position_ids=batch["position_ids"]
+                        ).logits.contiguous()
 
                         input_ids = input_ids[:, 1:]
                         logits = logits[:, :-1, :] / config.temperature
