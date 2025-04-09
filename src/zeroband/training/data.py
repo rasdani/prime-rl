@@ -551,8 +551,6 @@ def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token
         logprobs.append(logprob)
         position_ids.append(torch.arange(0, max_seq_len, dtype=torch.int32))
 
-    print(f"inputs_ids: {torch.stack(inputs_ids, dim=0).shape}")
-    print(f"position_ids: {torch.stack(position_ids, dim=0).shape}")
     return {
         "input_ids": torch.stack(inputs_ids, dim=0),
         "advantages": torch.stack(advantages, dim=0),
