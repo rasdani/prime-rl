@@ -257,14 +257,14 @@ def train(config: Config):
 
                     time_0 = time.time()
 
-                    batch_packed, num_grad_acc_steps, max_grad_steps = packed_batch(
+                    batch_packed, num_grad_acc_steps = packed_batch(
                         batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs
                     )
                     time_1 = time.time()
                     logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
                     logger.info(f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
-                    for grad_acc_step in range(max_grad_steps):
+                    for grad_acc_step in range(num_grad_acc_steps):
                         time_data_loading = time.time()
 
                         batch = batch_packed[grad_acc_step]
@@ -287,7 +287,7 @@ def train(config: Config):
 
                         del logits, per_token_logps
 
-                    data.append((batch_packed, num_grad_acc_steps, max_grad_steps))
+                    data.append((batch_packed, num_grad_acc_steps, num_grad_acc_steps))
 
                 logprobs_aware_iterator = iter(data)
 
@@ -360,8 +360,7 @@ def train(config: Config):
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(
-                    input_ids=input_ids,
-                    position_ids=batch["position_ids"]
+                    input_ids=input_ids, position_ids=batch["position_ids"]
                 ).logits.contiguous()
 
                 # Gather args for grpo loss

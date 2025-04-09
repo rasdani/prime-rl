@@ -357,9 +357,7 @@ def get_dataloader(
     return loader, prefetcher
 
 
-def packed_batch(
-    batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int
-) -> tuple[list[BatchOutput], int, int]:
+def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int) -> tuple[list[BatchOutput], int]:
     """
     this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
     """
@@ -531,11 +529,11 @@ def packed_batch(
         empty_batch = {}
 
         for key, value in batch_outputs[0].items():
-            if key in ("position_ids", "input_ids"):
+            if isinstance(value, torch.Tensor):
                 empty_batch[key] = value.clone()
             else:
-                empty_batch[key] = torch.zeros_like(value)
+                empty_batch[key] = value
 
         batch_outputs.append(empty_batch)
 
-    return batch_outputs, num_grad_acc_steps, max_grad_acc_step
+    return batch_outputs, max_grad_acc_step
