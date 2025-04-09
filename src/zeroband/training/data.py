@@ -357,7 +357,7 @@ def get_dataloader(
     return loader, prefetcher
 
 
-def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int) -> tuple[list[BatchOutput], int]:
+def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int) -> tuple[list[BatchOutput], int, int]:
     """
     this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
     """
@@ -533,4 +533,4 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
 
         batch_outputs.append(empty_batch)
 
-    return batch_outputs, max_grad_acc_step
+    return batch_outputs, max_grad_acc_step, num_grad_acc_steps

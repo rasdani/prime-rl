@@ -249,7 +249,7 @@ def train(config: Config):
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             if config.on_policy_log_prob:
-                data: list[tuple[list[BatchOutput], int]] = []
+                data: list[tuple[list[BatchOutput], int, int]] = []
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
@@ -257,15 +257,14 @@ def train(config: Config):
 
                     time_0 = time.time()
 
-                    batch_packed, num_grad_acc_steps = packed_batch(
+                    batch_packed, num_grad_acc_steps, max_grad_steps = packed_batch(
                         batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs
                     )
                     time_1 = time.time()
                     logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
                     logger.info(f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
-                    data_per_rollout = []
-                    for grad_acc_step in range(num_grad_acc_steps):
+                    for grad_acc_step in range(max_grad_steps):
                         time_data_loading = time.time()
 
                         batch = batch_packed[grad_acc_step]
@@ -287,9 +286,8 @@ def train(config: Config):
                         batch["logprobs"] = per_token_logps.to("cpu")
 
                         del logits, per_token_logps
-                        data_per_rollout.append(batch)
 
-                    data.append((data_per_rollout, num_grad_acc_steps))
+                    data.append((batch_packed, num_grad_acc_steps, max_grad_steps))
 
                 logprobs_aware_iterator = iter(data)
 
@@ -326,12 +324,12 @@ def train(config: Config):
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            data_per_rollout, num_grad_acc_steps = next(logprobs_aware_iterator)
+            data_per_rollout, max_grad_acc_steps, num_grad_acc_steps = next(logprobs_aware_iterator)
 
             logger.info(f"rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
 
-            for grad_acc_step in range(num_grad_acc_steps):
-                logger.info(f"grad_acc_step: {grad_acc_step}/{num_grad_acc_steps}")
+            for grad_acc_step in range(max_grad_acc_steps):
+                logger.info(f"grad_acc_step: {grad_acc_step}/{max_grad_acc_steps}")
                 batch = data_per_rollout[grad_acc_step]
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
