@@ -276,7 +276,7 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
             length_penalty = int(output_length > target_length)
 
             if length_penalty == 1:
-                total_reward *= 0
+                total_reward = -torch.clip((output_length - target_length) * len_reward_config.reward_coef, 0, 1)
 
     return dict(total_reward=total_reward, task_reward=math_reward, length_penalty=length_penalty)
 
