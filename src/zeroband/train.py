@@ -253,9 +253,16 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
+                    logger.info(f"{len(batch_rollout)}=")
+
+                    time_0 = time.time()
+
                     batch_packed, num_grad_acc_steps = packed_batch(
                         batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs
                     )
+                    time_1 = time.time()
+                    logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
+
                     logger.info(f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
                     data_per_rollout = []
                     for grad_acc_step in range(num_grad_acc_steps):
