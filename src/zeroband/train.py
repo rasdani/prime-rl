@@ -247,6 +247,7 @@ def train(config: Config):
         time_start = time.time()
 
         total_time_data_loading = 0
+        total_time_packing = 0
 
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
@@ -264,6 +265,7 @@ def train(config: Config):
                     num_grad_acc_steps = len(batch_packed)
 
                     time_1 = time.time()
+                    total_time_packing += time_1 - time_0
                     logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
                     logger.info(f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
@@ -534,7 +536,7 @@ def train(config: Config):
             if config.on_policy_log_prob:
                 new_metrics["time_logprob"] = time_logprob
                 new_metrics["time_data_loading"] = total_time_data_loading
-
+                new_metrics["time_packing"] = total_time_packing
             wandb.log(new_metrics)
 
         if training_progress.step >= config.optim.total_steps:
