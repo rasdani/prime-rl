@@ -2,7 +2,7 @@ import pytest
 from zeroband.training.data import (
     ParquetDataset,
     _should_skip_index,
-    pack_bin_sequence_packing,
+    collate_packing,
     FakeTokenizedDataset,
     pack_datatset_outputs_efficiently,
     collate_fn_padding,
@@ -67,7 +67,7 @@ def test_pack_bin_packing():
     for i in range(bin_size):
         bin.append(next(iter(dataset)))
 
-    micro_batch = pack_bin_sequence_packing(bin, 2048, 128)
+    micro_batch = collate_packing(bin, 2048, 128)
 
     assert micro_batch["input_ids"].shape == (1, 2048)
 

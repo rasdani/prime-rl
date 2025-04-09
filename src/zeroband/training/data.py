@@ -9,8 +9,7 @@ import torch
 from torch.utils.data import IterableDataset, DataLoader
 import torch.distributed as dist
 
-from jaxtyping import Float, Int, jaxtyped
-from beartype import beartype as typechecker
+from jaxtyping import Float, Int
 
 from pyarrow import dataset as ds
 
@@ -394,54 +393,53 @@ def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_
     return bins
 
 
-@jaxtyped(typechecker=typechecker)
-def pack_bin_sequence_packing(bin: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> BatchOutput:
+def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> BatchOutput:
     """
     This function will pack the bins into a single batch, if the bin is not full it will pad the end with the pad_token_id
     """
 
-    batch = {}
+    total_len = sum(len(sample["input_ids"]) for sample in samples)
 
-    cu_sum = sum(len(sample["input_ids"]) for sample in bin)
+    inputs_ids = [sample["input_ids"] for sample in samples]
+    advantages = [sample["advantages"] for sample in samples]
+    rewards = [sample["rewards"] for sample in samples]
+    task_rewards = [sample["task_rewards"] for sample in samples]
+    length_penalties = [sample["length_penalties"] for sample in samples]
+    target_lens = [sample["target_lengths"] for sample in samples]
+    loss_masks = [sample["loss_mask"] for sample in samples]
+    logprobs = [sample["logprobs"] for sample in samples]
 
-    padding_len = max_seq_len - cu_sum
+    seq_lens = [len(sample["input_ids"]) for sample in samples]
+    position_ids = [torch.arange(0, len(sample["input_ids"]), dtype=torch.int32) for sample in samples]
 
-    for key in bin[0].keys():
-        all_sample = [sample[key] for sample in bin]
+    if total_len < max_seq_len:
+        padding_len = max_seq_len - total_len
 
-        match key:
-            case "input_ids":
-                if padding_len > 0:
-                    padding_tensor = torch.full((padding_len,), pad_token_id, dtype=bin[0][key].dtype)
-                    all_sample.append(padding_tensor)
+        inputs_ids.append(torch.full((padding_len,), fill_value=pad_token_id, dtype=inputs_ids[0].dtype))
+        advantages.append(torch.zeros(padding_len, dtype=advantages[0].dtype))
+        rewards.append(torch.zeros(padding_len, dtype=rewards[0].dtype))
+        task_rewards.append(torch.zeros(padding_len, dtype=task_rewards[0].dtype))
+        length_penalties.append(torch.zeros(padding_len, dtype=length_penalties[0].dtype))
+        loss_masks.append(torch.zeros(padding_len, dtype=loss_masks[0].dtype).int())
+        logprobs.append(torch.zeros(padding_len, dtype=logprobs[0].dtype))
 
-                batch[key] = torch.cat(all_sample)[:max_seq_len]  # shape [MAX_SEQ_LEN]
+        seq_lens.append(padding_len)
+        position_ids.append(torch.arange(0, padding_len, dtype=torch.int32))
 
-                positions_ids_all = [torch.arange(0, len(sample), dtype=torch.int32) for sample in all_sample]
-                batch["position_ids"] = torch.cat(positions_ids_all)[:max_seq_len]
-                batch["seq_lens"] = torch.tensor([len(sample) for sample in all_sample])[:max_seq_len]
-
-            case "advantages" | "rewards" | "length_penalties" | "loss_mask" | "logprobs" | "task_rewards" | "length_penalties":
-                if padding_len > 0:
-                    padding_tensor = torch.zeros(padding_len, dtype=bin[0][key].dtype)
-                    all_sample.append(padding_tensor)
-
-                batch[key] = torch.cat(all_sample)[:max_seq_len]  # shape [MAX_SEQ_LEN]
-
-            case "target_lengths":
-                # ignore for now
-                ...
-
-            case _:
-                raise ValueError(f"batch should not have a key named {key}")
-
-    for key in batch.keys():
-        batch[key] = batch[key].unsqueeze(0)  # shape [1, MAX_SEQ_LEN]
-
-    return batch
+    return {
+        "input_ids": torch.cat(inputs_ids, dim=0)[:max_seq_len].unsqueeze(0),
+        "advantages": torch.cat(advantages, dim=0)[:max_seq_len].unsqueeze(0),
+        "rewards": torch.cat(rewards, dim=0)[:max_seq_len].unsqueeze(0),
+        "task_rewards": torch.cat(task_rewards, dim=0)[:max_seq_len].unsqueeze(0),
+        "length_penalties": torch.cat(length_penalties, dim=0)[:max_seq_len].unsqueeze(0),
+        "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
+        "loss_mask": torch.cat(loss_masks, dim=0)[:max_seq_len].unsqueeze(0),
+        "logprobs": torch.cat(logprobs, dim=0)[:max_seq_len].unsqueeze(0),
+        "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
+        "position_ids": torch.cat(position_ids, dim=0)[:max_seq_len].unsqueeze(0),
+    }
 
 
-@jaxtyped(typechecker=typechecker)
 def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
     """
     this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
@@ -450,7 +448,7 @@ def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad
 
     bins = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
 
-    micro_batches = [pack_bin_sequence_packing(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in bins]
+    micro_batches = [collate_packing(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in bins]
 
     num_grad_acc_steps = len(micro_batches)
 
