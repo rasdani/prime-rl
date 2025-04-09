@@ -1,5 +1,11 @@
 import pytest
-from zeroband.training.data import ParquetDataset, _should_skip_index
+from zeroband.training.data import (
+    ParquetDataset,
+    _should_skip_index,
+    pack_bin_sequence_packing,
+    FakeTokenizedDataset,
+    pack_datatset_outputs_efficiently,
+)
 from torch.utils.data import DataLoader
 
 
@@ -32,3 +38,34 @@ def test_should_skip_index(rank, workers_id):
             results.append(index)
 
     assert results == expected_results
+
+
+def test_pack_datatset_outputs_efficiently():
+    BS = 16
+
+    batch = []
+
+    dataset = FakeTokenizedDataset(64, 128)
+
+    for i in range(BS):
+        batch.append(next(iter(dataset)))
+
+    packed_batch = pack_datatset_outputs_efficiently(batch, 64)
+
+    assert len(packed_batch) >= 1
+
+
+def test_pack_bin_packing():
+    bin_size = 3
+    SEQ_LEN = 64
+
+    bin = []
+
+    dataset = FakeTokenizedDataset(seq_len=SEQ_LEN, vocab_size=128)
+
+    for i in range(bin_size):
+        bin.append(next(iter(dataset)))
+
+    micro_batch = pack_bin_sequence_packing(bin, 2048, 128)
+
+    assert micro_batch["input_ids"].shape == (1, 2048)

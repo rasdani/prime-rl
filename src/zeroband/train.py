@@ -258,7 +258,7 @@ def train(config: Config):
                     time_0 = time.time()
 
                     batch_packed, num_grad_acc_steps = packed_batch(
-                        batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs
+                        batch_rollout, config.data.seq_length * config.train.micro_bs, tokenizer.pad_token_id
                     )
                     time_1 = time.time()
                     logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
