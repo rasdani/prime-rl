@@ -329,8 +329,6 @@ def train(config: Config):
             data_per_rollout = next(logprobs_aware_iterator)
             num_grad_acc_steps = len(data_per_rollout)
 
-            logger.info(f"rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
-
             for grad_acc_step in range(num_grad_acc_steps):
                 is_padding_batch = grad_acc_step >= num_grad_acc_steps
                 is_padding_batch = 1.0 if is_padding_batch else 0.0
