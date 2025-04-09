@@ -13,7 +13,7 @@ import shardcast
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
-from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, get_dataloader, packed_batch
+from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, PackingMode, get_dataloader, packed_batch, packed_batch_packing
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
@@ -101,6 +101,8 @@ class Config(BaseConfig):
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
     masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
+
+    packing_mode: PackingMode = "padding"
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -257,9 +259,11 @@ def train(config: Config):
 
                     time_0 = time.time()
 
-                    batch_packed, num_grad_acc_steps = packed_batch(
-                        batch_rollout, config.data.seq_length * config.train.micro_bs, tokenizer.pad_token_id
+                    batch_packed = packed_batch(
+                        batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.packing_mode
                     )
+                    num_grad_acc_steps = len(batch_packed)
+
                     time_1 = time.time()
                     logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
@@ -287,7 +291,7 @@ def train(config: Config):
 
                         del logits, per_token_logps
 
-                    data.append((batch_packed, num_grad_acc_steps, num_grad_acc_steps))
+                    data.append(batch_packed)
 
                 logprobs_aware_iterator = iter(data)
 
@@ -297,7 +301,7 @@ def train(config: Config):
                 data = []
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
-                    data.append(packed_batch(batch_rollout, config.data.seq_length, tokenizer.pad_token_id, 1))
+                    data.append(packed_batch_packing(batch_rollout, config.data.seq_length, tokenizer.pad_token_id, 1))
                 logprobs_aware_iterator = iter(data)
 
         for rollout_step in range(config.optim.step_per_rollout):
@@ -324,11 +328,12 @@ def train(config: Config):
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            data_per_rollout, num_grad_acc_steps, max_grad_acc_steps = next(logprobs_aware_iterator)
+            data_per_rollout = next(logprobs_aware_iterator)
+            num_grad_acc_steps = len(data_per_rollout)
 
             logger.info(f"rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
 
-            for grad_acc_step in range(max_grad_acc_steps):
+            for grad_acc_step in range(num_grad_acc_steps):
                 is_padding_batch = grad_acc_step >= num_grad_acc_steps
                 is_padding_batch = 1.0 if is_padding_batch else 0.0
                 batch = data_per_rollout[grad_acc_step]

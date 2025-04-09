@@ -5,6 +5,7 @@ from zeroband.training.data import (
     pack_bin_sequence_packing,
     FakeTokenizedDataset,
     pack_datatset_outputs_efficiently,
+    collate_fn_padding,
 )
 from torch.utils.data import DataLoader
 
@@ -69,3 +70,20 @@ def test_pack_bin_packing():
     micro_batch = pack_bin_sequence_packing(bin, 2048, 128)
 
     assert micro_batch["input_ids"].shape == (1, 2048)
+
+
+def test_collate_fn_padding():
+    micro_bs = 16
+    SEQ_LEN = 64
+
+    dataset = FakeTokenizedDataset(seq_len=SEQ_LEN, vocab_size=128)
+
+    batch = []
+
+    for i in range(micro_bs):
+        batch.append(next(iter(dataset)))
+
+    batch = collate_fn_padding(batch, SEQ_LEN, 128)
+
+    assert batch["input_ids"].shape == (micro_bs, SEQ_LEN)
+    assert batch["position_ids"].shape == (micro_bs, SEQ_LEN)

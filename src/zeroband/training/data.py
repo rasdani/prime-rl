@@ -1,6 +1,6 @@
 from pathlib import Path
 import time
-from typing import Any, Generator, TypedDict
+from typing import Any, Generator, Literal, TypeAlias, TypedDict
 
 from pydantic_config import BaseConfig
 
@@ -413,6 +413,9 @@ class BatchOutput(TypedDict):
     position_ids: Int[torch.Tensor, "batch seq"]
 
 
+### sequence packing
+
+
 @jaxtyped(typechecker=typechecker)
 def pack_bin_sequence_packing(bin: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> BatchOutput:
     """
@@ -461,10 +464,11 @@ def pack_bin_sequence_packing(bin: list[DatasetOutput], max_seq_len: int, pad_to
 
 
 @jaxtyped(typechecker=typechecker)
-def packed_batch(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> tuple[list[BatchOutput], int]:
+def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
     """
     this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
     """
+    max_seq_len = max_seq_len * micro_bs
 
     bins = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
 
@@ -491,4 +495,107 @@ def packed_batch(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_i
 
         micro_batches.append(empty_batch)
 
-    return micro_batches, max_grad_acc_step
+    return micro_batches
+
+
+####### normal padding
+def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> BatchOutput:
+    inputs_ids = []
+    advantages = []
+    rewards = []
+    task_rewards = []
+    length_penalties = []
+    target_lens = []
+    loss_masks = []
+    logprobs = []
+    seq_lens = []
+    position_ids = []
+
+    for sample in samples:
+        ids = sample["input_ids"]
+        seq_len = len(ids)
+        # seq_len = self._seq_len
+
+        adv = sample["advantages"]
+        rew = sample["rewards"]
+        t_rew = sample["task_rewards"]
+        l_pen = sample["length_penalties"]
+        loss_mask = sample["loss_mask"]
+        logprob = sample["logprobs"]
+
+        if len(ids) >= max_seq_len:
+            ids = ids[:max_seq_len]
+            adv = adv[:max_seq_len]
+            rew = rew[:max_seq_len]
+            t_rew = t_rew[:max_seq_len]
+            l_pen = l_pen[:max_seq_len]
+            loss_mask = loss_mask[:max_seq_len]
+            logprob = logprob[:max_seq_len]
+        else:
+            ids = torch.cat([ids, torch.full((max_seq_len - len(ids),), fill_value=pad_token_id, dtype=ids.dtype)])
+            adv = torch.cat([adv, torch.zeros(max_seq_len - len(adv), dtype=adv.dtype)])
+            rew = torch.cat([rew, torch.zeros(max_seq_len - len(rew), dtype=rew.dtype)])
+            t_rew = torch.cat([t_rew, torch.zeros(max_seq_len - len(t_rew), dtype=t_rew.dtype)])
+            l_pen = torch.cat([l_pen, torch.zeros(max_seq_len - len(l_pen), dtype=l_pen.dtype)])
+            loss_mask = torch.cat([loss_mask, torch.zeros(max_seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
+            logprob = torch.cat([logprob, torch.zeros(max_seq_len - len(logprob), dtype=logprob.dtype)])
+
+        seq_lens.append(seq_len)
+        inputs_ids.append(ids)
+        advantages.append(adv)
+        rewards.append(rew)
+        task_rewards.append(t_rew)
+        length_penalties.append(l_pen)
+        target_lens.append(sample["target_lengths"])
+        loss_masks.append(loss_mask)
+        logprobs.append(logprob)
+        position_ids.append(torch.arange(0, max_seq_len, dtype=torch.int32))
+
+    print(f"inputs_ids: {torch.stack(inputs_ids, dim=0).shape}")
+    print(f"position_ids: {torch.stack(position_ids, dim=0).shape}")
+    return {
+        "input_ids": torch.stack(inputs_ids, dim=0),
+        "advantages": torch.stack(advantages, dim=0),
+        "rewards": torch.stack(rewards, dim=0),
+        "task_rewards": torch.stack(task_rewards, dim=0),
+        "length_penalties": torch.stack(length_penalties, dim=0),
+        "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
+        "loss_mask": torch.stack(loss_masks, dim=0).int(),
+        "logprobs": torch.stack(logprobs, dim=0),
+        "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
+        "position_ids": torch.stack(position_ids, dim=0),
+    }
+
+
+def packed_batch_padding(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
+    """
+    This function will pad the batch to the max_seq_len
+    """
+    assert len(batch_optim) % micro_bs == 0, "batch_optim must be divisible by micro_bs"
+
+    micro_batches = [
+        collate_fn_padding(batch_optim[i : i + micro_bs], max_seq_len, pad_token_id) for i in range(0, len(batch_optim), micro_bs)
+    ]
+
+    return micro_batches
+
+
+###########
+
+PackingMode: TypeAlias = Literal["packing", "padding"]
+
+
+def packed_batch(
+    batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int, packing_mode: PackingMode
+) -> list[BatchOutput]:
+    """
+    Take a list of sample and return a list of microbatches
+    """
+
+    match packing_mode:
+        case "packing":
+            return packed_batch_packing(batch_optim, max_seq_len, pad_token_id, micro_bs)
+        case "padding":
+            return packed_batch_padding(batch_optim, max_seq_len, pad_token_id, micro_bs)
+        case _:
+            raise ValueError("packing_mode should be one of packing or padding")
