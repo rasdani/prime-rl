@@ -255,7 +255,6 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
-                    logger.info(f"{len(batch_rollout)}=")
 
                     time_0 = time.time()
 
