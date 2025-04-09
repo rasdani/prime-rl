@@ -27,7 +27,9 @@ def main(servers: list[str], output_dir: Path, versions_to_keep: int = -1, backl
         # 1. Pick the version to download
         available_versions = sorted([int(x[1:]) for x in client.list_available_versions().keys()])
         if not available_versions:
-            logger.warning("No versions available")
+            if -1 not in logged_versions:
+                logger.warning("No versions available")
+                logged_versions.add(-1)
             time.sleep(POLL_INTERVAL)
             continue
         version = available_versions[-1]
