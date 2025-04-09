@@ -235,9 +235,16 @@ def generate_target_length_prompts(config: Config, batch_size: int):
         ).tolist()
 
     if config.len_reward.length_prompt_location == "system_prompt":
-        return [f"Think for {target} tokens before giving a response." for target in target_lengths], target_lengths
+        if config.len_reward.reward_type == "clip":
+            return [f"Think for maximally {target} tokens before giving a response." for target in target_lengths], target_lengths
+        else:
+            return [f"Think for {target} tokens before giving a response." for target in target_lengths], target_lengths
 
-    return [f"\n\nThink for {target} tokens before giving a response." for target in target_lengths], target_lengths
+    else:
+        if config.len_reward.reward_type == "clip":
+            return [f"\n\nThink for maximally {target} tokens before giving a response." for target in target_lengths], target_lengths
+        else:
+            return [f"\n\nThink for {target} tokens before giving a response." for target in target_lengths], target_lengths
 
 
 async def compute_reward_for_output(output, verification_info, len_reward_config):
