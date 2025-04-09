@@ -400,7 +400,7 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
             seq_len = len(sample["input_ids"])
             input_dtype = sample["input_ids"].dtype
             if seq_len > batch_seq_len:
-                get_logger().info(f"Sample {i} too long. seq_len: {seq_len} > {batch_seq_len}.")
+                get_logger().info(f"Sample {i} too long. Truncating. seq_len: {seq_len} > {batch_seq_len}.")
                 sample["input_ids"] = sample["input_ids"][:batch_seq_len]
                 sample["advantages"] = sample["advantages"][:batch_seq_len]
                 sample["rewards"] = sample["rewards"][:batch_seq_len]
