@@ -277,7 +277,6 @@ def train(config: Config):
                         total_time_data_loading += time_data_loading
 
                         input_ids = batch["input_ids"].to("cuda")
-                        logger.info(f"policy log prob grad_acc_step: {grad_acc_step} batch: {input_ids.shape}")
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(
                             input_ids=input_ids, position_ids=batch["position_ids"]
