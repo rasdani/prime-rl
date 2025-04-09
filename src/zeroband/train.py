@@ -476,10 +476,8 @@ def train(config: Config):
                 f"step: {training_progress.step}, "
                 f"rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
                 f"loss: {loss_batch.item():.4f}, "
-                f"average_rewards: {average_rewards.item():.4f}, "
                 f"clip_ratio: {clip_ratio_batch.item():.4f}, "
-                f"average_task_rewards: {average_task_rewards.item():.4f}, "
-                f"average_length_penalties: {average_length_penalties.item():.4f}"
+                f"sample_reward: {sample_reward_batch.item():.4f}, "
             )
 
             del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
