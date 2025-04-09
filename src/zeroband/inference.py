@@ -49,8 +49,10 @@ class LenRewardConfig(BaseConfig):
     min_length: int = 1000
     max_length: int = 24000
     reward_coef: float = 0.0003
-    reward_type: Literal["exact", "max"] = "max"
+    reward_type: Literal["exact", "max", "clip"] = "max"
     max_reward_delta: float = 0.5
+    len_clip_values: list[float] = [1000, 2000, 3000, 4000]
+    length_prompt_location: Literal["system_prompt", "instruction"]
 
 
 class Config(BaseConfig):
@@ -220,14 +222,22 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 
 
 def generate_target_length_prompts(config: Config, batch_size: int):
-    if config.len_reward is not None:
+    if config.len_reward is None:
+        return [""] * batch_size, [-1] * batch_size
+
+    if config.len_reward.reward_type == "clip":
+        indices = torch.randint(low=0, high=len(config.len_reward.len_clip_values), size=(batch_size,), device="cpu")
+        target_lengths = [int(config.len_reward.len_clip_values[i]) for i in indices]
+
+    else:
         target_lengths = torch.randint(
             low=config.len_reward.min_length, high=config.len_reward.max_length + 1, size=(batch_size,), device="cpu"
         ).tolist()
 
-        return [f"\n\nThink for {target} tokens." for target in target_lengths], target_lengths
+    if config.len_reward.length_prompt_location == "system_prompt":
+        return [f"Think for {target} tokens before giving a response." for target in target_lengths], target_lengths
 
-    return [""] * batch_size, [-1] * batch_size
+    return [f"\n\nThink for {target} tokens before giving a response." for target in target_lengths], target_lengths
 
 
 async def compute_reward_for_output(output, verification_info, len_reward_config):
@@ -252,6 +262,12 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
             diff = target_length - output_length
             length_penalty = torch.clip(len_reward_config.reward_coef * diff + len_reward_config.max_reward_delta, 0, 1)
             total_reward *= length_penalty
+
+        elif len_reward_config.reward_type == "clip":
+            length_penalty = int(output_length > target_length)
+
+            if length_penalty == 1:
+                total_reward *= 0
 
     return dict(total_reward=total_reward, task_reward=math_reward, length_penalty=length_penalty)
 
@@ -417,10 +433,26 @@ def inference(config: Config):
 
         length_prompt_additions, target_lengths = generate_target_length_prompts(config, len(batch))
 
-        messages = [
-            [{"role": "user", "content": item["prompt"] + length_prompt}, {"role": "assistant", "content": "<think>\n"}]
-            for item, length_prompt in zip(batch, length_prompt_additions)
-        ]
+        if config.len_reward:
+            if config.len_reward.length_prompt_location == "system_prompt":
+                messages = [
+                    [
+                        {"role": "system", "content": length_prompt},
+                        {"role": "user", "content": item["prompt"]},
+                        {"role": "assistant", "content": "<think>\n"},
+                    ]
+                    for item, length_prompt in zip(batch, length_prompt_additions)
+                ]
+            else:
+                messages = [
+                    [{"role": "user", "content": item["prompt"] + length_prompt}, {"role": "assistant", "content": "<think>\n"}]
+                    for item, length_prompt in zip(batch, length_prompt_additions)
+                ]
+        else:
+            messages = [
+                [{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}]
+                for item, length_prompt in zip(batch, length_prompt_additions)
+            ]
 
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
