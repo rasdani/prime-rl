@@ -11,6 +11,7 @@ import wandb
 import shardcast
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
+from zeroband.training import envs
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
@@ -219,8 +220,8 @@ def train(config: Config):
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
-    if config.prime_dashboard:
-        monitor = HttpMonitor(config=config.model_dump(), resume=False)
+    if envs.PRIME_DASHBOARD_BASE_URL is not None:
+        monitor = HttpMonitor()
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
@@ -471,7 +472,7 @@ def train(config: Config):
             if world_info.rank == 0:
                 if config.wandb:
                     wandb.log(metrics)
-                if config.prime_dashboard:
+                if envs.PRIME_DASHBOARD_BASE_URL is not None:
                     monitor.log(metrics)
 
             logger.info(log)
@@ -522,7 +523,7 @@ def train(config: Config):
     if prefetcher is not None:
         prefetcher.shutdown()
 
-    if world_info.rank == 0 and config.prime_dashboard:
+    if world_info.rank == 0 and envs.PRIME_DASHBOARD_BASE_URL is not None:
         monitor.finish()
 
     logger.info("Training finished, exiting ...")
