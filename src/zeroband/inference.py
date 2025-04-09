@@ -53,7 +53,7 @@ class LenRewardConfig(BaseConfig):
     reward_type: Literal["exact", "max", "clip"] = "max"
     max_reward_delta: float = 0.5
     len_clip_values: list[float] = [1000, 2000, 3000, 4000]
-    length_prompt_location: Literal["system_prompt", "instruction"]
+    length_prompt_location: Literal["system_prompt", "instruction"] = "system_prompt"
 
 
 class Config(BaseConfig):
