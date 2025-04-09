@@ -345,8 +345,20 @@ def get_dataloader(
     return loader, prefetcher
 
 
-def truncate_dataset_output(dataset_output: DatasetOutput, seq_len: int) -> DatasetOutput:
-    return {k: v[:seq_len] for k, v in dataset_output.items()}
+class BatchOutput(TypedDict):
+    input_ids: Int[torch.Tensor, "batch seq"]
+    advantages: Float[torch.Tensor, "batch seq"]
+    rewards: Float[torch.Tensor, "batch seq"]
+    loss_mask: Int[torch.Tensor, "batch seq"]
+    logprobs: Float[torch.Tensor, "batch seq"]
+    seq_lens: Int[torch.Tensor, "batch"]
+    length_penalties: Float[torch.Tensor, "batch seq"]
+    # target_lengths: Int[torch.Tensor, "batch"]
+    task_rewards: Float[torch.Tensor, "batch seq"]
+    position_ids: Int[torch.Tensor, "batch seq"]
+
+
+### sequence packing
 
 
 def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_len: int) -> list[list[DatasetOutput]]:
@@ -377,43 +389,9 @@ def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_
 
         # If no suitable bin found, create a new bin
         if not bin_found:
-            if seq_len > max_seq_len:
-                sample = truncate_dataset_output(sample, max_seq_len)
             bins.append([sample])
 
     return bins
-
-
-def pack_dataset_outputs_simple(batch_optim: list[DatasetOutput], max_seq_len: int) -> list[list[DatasetOutput]]:
-    """
-    put each sample in a bin and truncate if exceed max_seq_len
-    """
-
-    bins: list[list[DatasetOutput]] = []
-
-    for sample in batch_optim:
-        if len(sample) > max_seq_len:
-            sample = truncate_dataset_output(sample, max_seq_len)
-
-        bins.append([sample])
-
-    return bins
-
-
-class BatchOutput(TypedDict):
-    input_ids: Int[torch.Tensor, "batch seq"]
-    advantages: Float[torch.Tensor, "batch seq"]
-    rewards: Float[torch.Tensor, "batch seq"]
-    loss_mask: Int[torch.Tensor, "batch seq"]
-    logprobs: Float[torch.Tensor, "batch seq"]
-    seq_lens: Int[torch.Tensor, "batch"]
-    length_penalties: Float[torch.Tensor, "batch seq"]
-    # target_lengths: Int[torch.Tensor, "batch"]
-    task_rewards: Float[torch.Tensor, "batch seq"]
-    position_ids: Int[torch.Tensor, "batch seq"]
-
-
-### sequence packing
 
 
 @jaxtyped(typechecker=typechecker)
@@ -437,18 +415,18 @@ def pack_bin_sequence_packing(bin: list[DatasetOutput], max_seq_len: int, pad_to
                     padding_tensor = torch.full((padding_len,), pad_token_id, dtype=bin[0][key].dtype)
                     all_sample.append(padding_tensor)
 
-                batch[key] = torch.cat(all_sample)  # shape [MAX_SEQ_LEN]
+                batch[key] = torch.cat(all_sample)[:max_seq_len]  # shape [MAX_SEQ_LEN]
 
                 positions_ids_all = [torch.arange(0, len(sample), dtype=torch.int32) for sample in all_sample]
-                batch["position_ids"] = torch.cat(positions_ids_all)
-                batch["seq_lens"] = torch.tensor([len(sample) for sample in all_sample])
+                batch["position_ids"] = torch.cat(positions_ids_all)[:max_seq_len]
+                batch["seq_lens"] = torch.tensor([len(sample) for sample in all_sample])[:max_seq_len]
 
             case "advantages" | "rewards" | "length_penalties" | "loss_mask" | "logprobs" | "task_rewards" | "length_penalties":
                 if padding_len > 0:
                     padding_tensor = torch.zeros(padding_len, dtype=bin[0][key].dtype)
                     all_sample.append(padding_tensor)
 
-                batch[key] = torch.cat(all_sample)  # shape [MAX_SEQ_LEN]
+                batch[key] = torch.cat(all_sample)[:max_seq_len]  # shape [MAX_SEQ_LEN]
 
             case "target_lengths":
                 # ignore for now
