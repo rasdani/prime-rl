@@ -533,4 +533,4 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
 
         batch_outputs.append(empty_batch)
 
-    return batch_outputs, max_grad_acc_step, num_grad_acc_steps
+    return batch_outputs, num_grad_acc_steps, max_grad_acc_step

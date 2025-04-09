@@ -329,7 +329,8 @@ def train(config: Config):
             logger.info(f"rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
 
             for grad_acc_step in range(max_grad_acc_steps):
-                logger.info(f"grad_acc_step: {grad_acc_step}/{max_grad_acc_steps}")
+                is_padding_batch = grad_acc_step >= num_grad_acc_steps
+                is_padding_batch = 1.0 if is_padding_batch else 0.0
                 batch = data_per_rollout[grad_acc_step]
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
@@ -379,11 +380,16 @@ def train(config: Config):
                     config.grpo_epsilon_high,
                     config.masked_mean_axis,
                 )
-                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
+                pg_loss = pg_loss * is_padding_batch
+                clip_ratio = clip_ratio / num_grad_acc_steps
+                clip_ratio = clip_ratio * is_padding_batch
+
+                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis) * is_padding_batch
+                entropy = entropy * is_padding_batch
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / num_grad_acc_steps
-                clip_ratio = clip_ratio / num_grad_acc_steps
+                loss = loss * is_padding_batch
 
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
