@@ -531,10 +531,10 @@ def packed_batch(
         empty_batch = {}
 
         for key, value in batch_outputs[0].items():
-            if key != "position_ids":
-                empty_batch[key] = torch.zeros_like(value)
-            else:
+            if key in ("position_ids", "input_ids"):
                 empty_batch[key] = value.clone()
+            else:
+                empty_batch[key] = torch.zeros_like(value)
 
         batch_outputs.append(empty_batch)
 

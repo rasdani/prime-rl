@@ -140,6 +140,6 @@ def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, tempera
 def _apply_mask(tensor: torch.Tensor, mask: torch.Tensor, masked_mean_axis: int | None) -> torch.Tensor:
     # First sum over sequence dimension (dim=1), then mean over batch (dim=0)
     if masked_mean_axis is None:
-        return (tensor * mask).sum() / mask.sum()
+        return (tensor * mask).sum() / (mask.sum() + 1e-8)
     else:
-        return ((tensor * mask).sum(dim=masked_mean_axis) / mask.sum(dim=masked_mean_axis)).mean()
+        return ((tensor * mask).sum(dim=masked_mean_axis) / (mask.sum(dim=masked_mean_axis)).mean() + 1e-8)

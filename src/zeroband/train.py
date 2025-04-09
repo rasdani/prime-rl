@@ -359,7 +359,10 @@ def train(config: Config):
                 clip_seq_lens += (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / num_grad_acc_steps
 
                 # Forward
-                logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids).logits.contiguous()
+                logits: Float[torch.Tensor, "batch seq vocab"] = model(
+                    input_ids=input_ids,
+                    position_ids=batch["position_ids"]
+                ).logits.contiguous()
 
                 # Gather args for grpo loss
                 advantages = batch["advantages"].to("cuda")
@@ -433,9 +436,7 @@ def train(config: Config):
             sample_task_rewards = sample_task_reward_batch / world_info.world_size
             sample_length_penalties = sample_length_penalty_batch / world_info.world_size
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # type: ignore (is a dtensor)
-            if isinstance(grad_norm, torch.distributed.tensor.DTensor):
-                grad_norm.full_tensor()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
             optimizer.step()
             scheduler.step()
