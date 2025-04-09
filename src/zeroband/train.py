@@ -324,7 +324,7 @@ def train(config: Config):
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            data_per_rollout, max_grad_acc_steps, num_grad_acc_steps = next(logprobs_aware_iterator)
+            data_per_rollout, num_grad_acc_steps, max_grad_acc_steps = next(logprobs_aware_iterator)
 
             logger.info(f"rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
 
