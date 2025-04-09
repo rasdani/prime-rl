@@ -253,9 +253,17 @@ def train(config: Config):
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
+                    logger.info(f"{len(batch_rollout)}=")
+
+                    time_0 = time.time()
+
                     batch_packed, num_grad_acc_steps = packed_batch(
                         batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs
                     )
+                    time_1 = time.time()
+                    logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
+
+                    logger.info(f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
                     data_per_rollout = []
                     for grad_acc_step in range(num_grad_acc_steps):
                         time_data_loading = time.time()
@@ -266,6 +274,7 @@ def train(config: Config):
                         total_time_data_loading += time_data_loading
 
                         input_ids = batch["input_ids"].to("cuda")
+                        logger.info(f"policy log prob grad_acc_step: {grad_acc_step} batch: {input_ids.shape}")
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(
                             input_ids=input_ids, position_ids=batch["position_ids"]
@@ -319,7 +328,10 @@ def train(config: Config):
 
             data_per_rollout, num_grad_acc_steps = next(logprobs_aware_iterator)
 
+            logger.info(f"rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
+
             for grad_acc_step in range(num_grad_acc_steps):
+                logger.info(f"grad_acc_step: {grad_acc_step}/{num_grad_acc_steps}")
                 batch = data_per_rollout[grad_acc_step]
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
