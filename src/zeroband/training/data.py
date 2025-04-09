@@ -519,11 +519,11 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
 
     num_grad_acc_steps = len(batch_outputs)
 
-    max_grad_acc_step = torch.tensor(num_grad_acc_steps).to("cuda")
-
+    max_grad_acc_step = torch.tensor(num_grad_acc_steps, dtype=torch.int32).to("cuda")
     dist.all_reduce(max_grad_acc_step, op=dist.ReduceOp.MAX, group=None)
+    max_grad_acc_step = int(max_grad_acc_step.item())
 
-    empty_batch_count = (max_grad_acc_step - num_grad_acc_steps).item()
+    empty_batch_count = max_grad_acc_step - num_grad_acc_steps
 
     for _ in range(empty_batch_count):
         empty_batch = {}
@@ -533,4 +533,4 @@ def packed_batch(batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: i
 
         batch_outputs.append(empty_batch)
 
-    return batch_outputs, max_grad_acc_step.item()
+    return batch_outputs, max_grad_acc_step
