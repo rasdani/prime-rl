@@ -1,4 +1,5 @@
 from functools import lru_cache
+import requests
 import os
 import asyncio
 import json
@@ -48,7 +49,11 @@ class SamplingParamConfig(BaseConfig):
 class LenRewardConfig(BaseConfig):
     min_length: int = 1000
     max_length: int = 24000
-    reward_coef: int = 0.0003
+    reward_coef: float = 0.0003
+    reward_type: Literal["exact", "max", "clip"] = "max"
+    max_reward_delta: float = 0.5
+    len_clip_values: list[float] = [1000, 2000, 3000, 4000]
+    length_prompt_location: Literal["system_prompt", "instruction"] = "system_prompt"
 
 
 class DifficultyFilteringConfig(BaseConfig):
@@ -65,6 +70,7 @@ class Config(BaseConfig):
     output_path: str = "outputs"
     total_step: int | None = None
     rollout_path: str | None = None
+    step_endpoint: str | None = None
 
     quant: Literal["fp8"] | None = None
 
@@ -225,14 +231,29 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 
 
 def generate_target_length_prompts(config: Config, batch_size: int):
-    if config.len_reward is not None:
+    if config.len_reward is None:
+        return [""] * batch_size, [-1] * batch_size
+
+    if config.len_reward.reward_type == "clip":
+        indices = torch.randint(low=0, high=len(config.len_reward.len_clip_values), size=(batch_size,), device="cpu")
+        target_lengths = [int(config.len_reward.len_clip_values[i]) for i in indices]
+
+    else:
         target_lengths = torch.randint(
             low=config.len_reward.min_length, high=config.len_reward.max_length + 1, size=(batch_size,), device="cpu"
         ).tolist()
 
-        return [f"\n\nThink for {target} tokens." for target in target_lengths], target_lengths
+    if config.len_reward.length_prompt_location == "system_prompt":
+        if config.len_reward.reward_type == "clip":
+            return [f"Think for maximally {target} tokens before giving a response." for target in target_lengths], target_lengths
+        else:
+            return [f"Think for {target} tokens before giving a response." for target in target_lengths], target_lengths
 
-    return [""] * batch_size, [-1] * batch_size
+    else:
+        if config.len_reward.reward_type == "clip":
+            return [f"\n\nThink for maximally {target} tokens before giving a response." for target in target_lengths], target_lengths
+        else:
+            return [f"\n\nThink for {target} tokens before giving a response." for target in target_lengths], target_lengths
 
 
 async def compute_reward_for_output(output, verification_info, len_reward, task_type):
@@ -247,11 +268,22 @@ async def compute_reward_for_output(output, verification_info, len_reward, task_
         output_length = len(output.token_ids)
         target_length = verification_info["target_length"]
 
-        length_penalty = abs(output_length - target_length)
-        length_penalty = length_penalty * len_reward.reward_coef  # Scale factor to balance with math reward
-        length_penalty = min(1, length_penalty)
+        if len_reward_config.reward_type == "exact":
+            length_penalty = abs(output_length - target_length)
+            length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
+            length_penalty = min(1, length_penalty)
+            total_reward -= length_penalty
 
-        total_reward -= length_penalty
+        elif len_reward_config.reward_type == "max":
+            diff = target_length - output_length
+            length_penalty = torch.clip(len_reward_config.reward_coef * diff + len_reward_config.max_reward_delta, 0, 1)
+            total_reward *= length_penalty
+
+        elif len_reward_config.reward_type == "clip":
+            length_penalty = int(output_length > target_length)
+
+            if length_penalty == 1:
+                total_reward *= 0
 
     return dict(total_reward=total_reward, task_reward=task_reward, length_penalty=length_penalty)
 
@@ -387,15 +419,26 @@ def inference(config: Config):
         ckpt_step = 0
         real_step = 0
 
+    # This is used by the seeding logic to make sure we dont generate the same samples twice if we do multiple batches for a step
+    current_step_batch_counter = 1
     total_problems = 0
     total_tokens = 0
 
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
+        if config.step_endpoint is not None:
+            # We get the step from the endpoint at the start of each batch to know what to work on
+            new_real_step = requests.get(config.step_endpoint).json()
+            if new_real_step != real_step:
+                real_step = new_real_step
+                current_step_batch_counter = 1
+            else:
+                current_step_batch_counter += 1
+
         logger.info(
             f"real_step: {real_step}, ckpt_step: {ckpt_step}, real_step - ckpt_step: {real_step - ckpt_step}, config.async_level: {config.async_level}"
         )
         if config.rollout_path is not None and real_step - ckpt_step > config.async_level:
-            ckpt_step += 1
+            ckpt_step = real_step - config.async_level
             attempt_count = 0
             while True:
                 stable_file = Path(config.rollout_path) / f"step_{ckpt_step}/stable"
@@ -418,7 +461,7 @@ def inference(config: Config):
 
             # We reseed the generator here to make the sampling reproducible at each step.
             # This would work even if the node restarts and resumes from the current step.
-            generator = np.random.default_rng(node_address_int + real_step)
+            generator = np.random.default_rng(node_address_int * current_step_batch_counter + real_step)
             indexes = generator.integers(0, len(dataset), config.batch_size)
             batch = dataset.select(indexes)
         else:
@@ -427,10 +470,26 @@ def inference(config: Config):
 
         length_prompt_additions, target_lengths = generate_target_length_prompts(config, len(batch))
 
-        messages = [
-            [{"role": "user", "content": item["prompt"] + length_prompt}, {"role": "assistant", "content": "<think>\n"}]
-            for item, length_prompt in zip(batch, length_prompt_additions)
-        ]
+        if config.len_reward:
+            if config.len_reward.length_prompt_location == "system_prompt":
+                messages = [
+                    [
+                        {"role": "system", "content": length_prompt},
+                        {"role": "user", "content": item["prompt"]},
+                        {"role": "assistant", "content": "<think>\n"},
+                    ]
+                    for item, length_prompt in zip(batch, length_prompt_additions)
+                ]
+            else:
+                messages = [
+                    [{"role": "user", "content": item["prompt"] + length_prompt}, {"role": "assistant", "content": "<think>\n"}]
+                    for item, length_prompt in zip(batch, length_prompt_additions)
+                ]
+        else:
+            messages = [
+                [{"role": "user", "content": item["prompt"]}, {"role": "assistant", "content": "<think>\n"}]
+                for item, length_prompt in zip(batch, length_prompt_additions)
+            ]
 
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
@@ -572,6 +631,12 @@ if __name__ == "__main__":
     mp.set_start_method("spawn")
     config = Config(**parse_argv())  # type: ignore
 
+    if config.step_endpoint is not None:
+        current_step = requests.get(config.step_endpoint).json()
+        logger = get_logger("PRE-INFERENCE")
+        logger.info(f"Current step: {current_step}")
+        assert isinstance(current_step, int), "Current step must be an integer"
+
     # Maybe start shardcast downloader
     from zeroband.inferencing import envs as inference_envs
 
@@ -582,7 +647,9 @@ if __name__ == "__main__":
             inference_envs.SHARDCAST_SERVERS,
             config.rollout_path,
             config.async_level + 1,
-            inference_envs.SHARDCAST_BACKLOG_VERSION,
+            # TODO: maybe +1 because we most likely wont download the current step in time?
+            # We could deadlock though.
+            max(current_step - config.async_level, 1),
         )
     else:
         shardcast_process = None

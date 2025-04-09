@@ -13,7 +13,15 @@ def test_grpo_loss(masked_mean_axis, dtype):
     input_ids = torch.randint(0, 10, (10, 10)).cuda()
 
     loss, clip_ratio = grpo_loss(
-        logits, input_ids, advantages, original_logprobs, loss_mask, temperature=0.6, epsilon=0.2, masked_mean_axis=masked_mean_axis
+        logits,
+        input_ids,
+        advantages,
+        original_logprobs,
+        loss_mask,
+        temperature=0.6,
+        epsilon_low=0.2,
+        epsilon_high=0.2,
+        masked_mean_axis=masked_mean_axis,
     )
     assert loss.shape == ()
     assert loss.item() is not None
@@ -65,7 +73,8 @@ def test_grpo_loss_padding(masked_mean_axis, dtype):
             pad_original_logprobs,
             pad_loss_mask,
             temperature=0.6,
-            epsilon=0.2,
+            epsilon_low=0.2,
+            epsilon_high=0.2,
             masked_mean_axis=masked_mean_axis,
         )
         loss_list.append(loss)

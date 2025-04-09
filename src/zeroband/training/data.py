@@ -64,7 +64,7 @@ class FakeTokenizedDataset(IterableDataset):
             }
 
 
-def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, batch_size: int) -> ds.Dataset:
+def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, batch_size: int, ignore_zero_advantages: bool) -> ds.Dataset:
     """Get all the files for a given step. Waits until the step is created which is indicated by the stable file."""
     logger = get_logger()
     step_path = path / f"step_{step_count}"
@@ -86,6 +86,10 @@ def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, ba
         if len(files) > 0:
             try:
                 dataset = ds.dataset(files, format="parquet")
+
+                if ignore_zero_advantages:
+                    dataset = dataset.filter(ds.field("advantages") != 0)
+
                 rows = dataset.count_rows()
             except Exception as e:
                 logger.warn(f"Error loading dataset for step {step_count}: {e}, files: {files}")
@@ -146,12 +150,7 @@ class ParquetDataset(IterableDataset):
     """
 
     def __init__(
-        self,
-        path: Path,
-        batch_size: int,
-        timeout: float,
-        step_count_init: int,
-        pq_read_bs: int = 64,
+        self, path: Path, batch_size: int, timeout: float, step_count_init: int, ignore_zero_advantages: bool, pq_read_bs: int = 64
     ):
         self._logger = get_logger()
         self._path = path
@@ -162,6 +161,8 @@ class ParquetDataset(IterableDataset):
 
         self._step_count = step_count_init - 1  # we immediatly bump the step count by one later
         self._timeout = timeout
+
+        self._ignore_zero_advantages = ignore_zero_advantages
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -184,7 +185,9 @@ class ParquetDataset(IterableDataset):
 
             self._logger.debug(msg=f"data: Processing step {self._step_count}")
 
-            dataset = _get_dataset_from_files_step(self._step_count, self._path, self._timeout, self._batch_size)
+            dataset = _get_dataset_from_files_step(
+                self._step_count, self._path, self._timeout, self._batch_size, self._ignore_zero_advantages
+            )
 
             required_columns = [
                 "input_tokens",
@@ -390,7 +393,7 @@ class PaddingColate:
 
 
 def get_dataloader(
-    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int
+    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int, ignore_zero_advantages: bool
 ) -> tuple[DataLoader[BatchOutput], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
@@ -405,7 +408,7 @@ def get_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init)
+        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, ignore_zero_advantages)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)
     loader = DataLoader(

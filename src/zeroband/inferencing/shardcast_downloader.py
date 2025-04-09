@@ -83,6 +83,7 @@ def run_main_bg(servers: list[str], output_dir: Path, versions_to_keep: int = -1
         mp.Process: The created process running the main function
     """
     output_dir = Path(output_dir)
+    logger.info(f"Starting shardcast downloader with {servers=}, {output_dir=}, {versions_to_keep=}, {backlog_version=}")
     process = mp.Process(target=main, args=(servers, output_dir, versions_to_keep, backlog_version))
     process.start()
     return process

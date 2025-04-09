@@ -14,7 +14,8 @@ def grpo_loss(
     original_logprobs: Float[Tensor, "batch seq_minus_1"],
     loss_mask: Int[Tensor, "batch seq"],
     temperature: float,
-    epsilon: float,
+    epsilon_low: float,
+    epsilon_high: float,
     masked_mean_axis: int | None,
 ) -> tuple[Tensor, Tensor]:
     """
@@ -35,7 +36,8 @@ def grpo_loss(
         original_logprobs=original_logprobs,
         loss_mask=loss_mask,
         temperature=temperature,
-        epsilon=epsilon,
+        epsilon_low=epsilon_low,
+        epsilon_high=epsilon_high,
         masked_mean_axis=masked_mean_axis,
     )
 
@@ -85,7 +87,8 @@ def _compile_grpo_loss(
     original_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
     temperature: float,
-    epsilon: float,
+    epsilon_low: float,
+    epsilon_high: float,
     masked_mean_axis: int | None,
 ) -> tuple[Tensor, Tensor]:
     # we start by dropping the bos token because it does not have a corresponding logit
@@ -103,7 +106,7 @@ def _compile_grpo_loss(
     per_token_logps = selective_log_softmax(logits, input_ids)
 
     coef_1 = torch.exp(per_token_logps - original_logprobs)
-    coef_2 = torch.clamp(coef_1, 1 - epsilon, 1 + epsilon)
+    coef_2 = torch.clamp(coef_1, 1 - epsilon_low, 1 + epsilon_high)
     per_token_loss1 = -coef_1 * advantages
     per_token_loss2 = -coef_2 * advantages
     per_token_loss = torch.max(per_token_loss1, per_token_loss2)
