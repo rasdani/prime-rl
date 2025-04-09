@@ -256,7 +256,7 @@ def generate_target_length_prompts(config: Config, batch_size: int):
             return [f"\n\nThink for {target} tokens before giving a response." for target in target_lengths], target_lengths
 
 
-async def compute_reward_for_output(output, verification_info, len_reward, task_type):
+async def compute_reward_for_output(output, verification_info, len_reward_config, task_type):
     loop = asyncio.get_running_loop()
     reward_fn = REWARD_FUNCTIONS[task_type]
     task_reward = await loop.run_in_executor(get_process_executor(), reward_fn, output.text, verification_info)
