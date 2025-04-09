@@ -77,10 +77,12 @@ class CkptConfig(BaseConfig):
             raise ValueError("path and interval must be either both None or both not None")
         return self
 
+
 class MonitorConfig(BaseConfig):
     log_flush_interval: int = 10
     base_url: str | None = None
     auth_token: str | None = None
+
 
 class Config(BaseConfig):
     name_model: ModelName = "150M"
@@ -227,7 +229,6 @@ def train(config: Config):
 
     if config.monitor is not None:
         monitor = HttpMonitor(config=config.model_dump(), resume=False)
-        monitor.set_stage("init")
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
@@ -435,8 +436,8 @@ def train(config: Config):
                 "pg_loss": pg_loss_batch.item(),
                 "entropy_loss": entropy_loss_batch.item(),
                 "step": training_progress.step,
-                "rollout_step": rollout_step,
-                "seq_lens": seq_lens_batch.item(),
+                "rollout_step": rollout_step,  # 1
+                "seq_lens": seq_lens_batch.item(),  # 1
                 "inner_lr": inner_lr,
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
@@ -445,7 +446,7 @@ def train(config: Config):
                 "average_rewards": average_rewards.item(),
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
-                "sample_reward": sample_reward_batch.item(),
+                "sample_reward": sample_reward_batch.item(),  # 1 latest one
                 "clip_seq_lens": clip_seq_lens.item(),
                 "average_task_rewards": average_task_rewards.item(),
                 "average_length_penalties": average_length_penalties.item(),
@@ -480,7 +481,6 @@ def train(config: Config):
                     wandb.log(metrics)
                 if config.monitor is not None and monitor is not None:
                     monitor.log(metrics)
-
 
             logger.info(log)
 

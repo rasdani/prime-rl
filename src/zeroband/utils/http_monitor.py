@@ -8,7 +8,7 @@ async def _get_external_ip(max_retries=3, retry_delay=5):
     async with aiohttp.ClientSession() as session:
         for attempt in range(max_retries):
             try:
-                async with session.get('https://api.ipify.org', timeout=10) as response:
+                async with session.get("https://api.ipify.org", timeout=10) as response:
                     response.raise_for_status()
                     return await response.text()
             except aiohttp.ClientError:
@@ -53,13 +53,6 @@ class HttpMonitor:
                 seen.add(log_tuple)
         self.data = unique_logs
 
-    def set_stage(self, stage: str):
-        import time
-
-        # add a new log entry with the stage name
-        self.data.append({"stage": stage, "time": time.time()})
-        self._handle_send_batch(flush=True)  # it's useful to have the most up-to-date stage broadcasted
-
     def log(self, data: dict[str, Any]):
         # Lowercase the keys in the data dictionary
         lowercased_data = {k.lower(): v for k, v in data.items()}
@@ -86,16 +79,11 @@ class HttpMonitor:
         self._remove_duplicates()
         await self._set_node_ip_address()
 
-        batch = self.data[:self.log_flush_interval]
+        batch = self.data[: self.log_flush_interval]
         # set node_ip_address of batch
         batch = [{**log, "node_ip_address": self.node_ip_address} for log in batch]
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.auth_token}"
-        }
-        payload = {
-            "logs": batch
-        }
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.auth_token}"}
+        payload = {"logs": batch}
         api = f"{self.base_url}/metrics/{self.run_id}/logs"
 
         try:
@@ -120,7 +108,6 @@ class HttpMonitor:
         headers = {"Content-Type": "application/json"}
         api = f"{self.base_url}/metrics/{self.run_id}/finish"
         try:
-
             async with aiohttp.ClientSession() as session:
                 async with session.post(api, headers=headers) as response:
                     if response is not None:
@@ -131,6 +118,4 @@ class HttpMonitor:
             return False
 
     def finish(self):
-        self.set_stage("finishing")
-
         self.loop.run_until_complete(self._finish())
