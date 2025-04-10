@@ -7,7 +7,7 @@ reshard_after_forward = true
 attn_impl = "flash_attention_2"
 
 [data]
-seq_len = 32768
+seq_length = 32768
 ignore_zero_advantages = true
 
 [optim]
