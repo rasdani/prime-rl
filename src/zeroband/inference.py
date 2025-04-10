@@ -560,7 +560,7 @@ def inference(config: Config):
         start_reward_advantages = time.time()
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards, grouped_task_rewards, grouped_length_penalties, grouped_length_differences = asyncio.run(
-            compute_rewards_async(generated_tokens, verification_infos, target_lengths, config)
+            compute_rewards_async(generated_tokens, verification_infos, target_lengths, task_types, config)
         )
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
