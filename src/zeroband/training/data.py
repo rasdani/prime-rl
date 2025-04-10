@@ -346,7 +346,7 @@ def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_
         bin_found = False
         for bin_idx, bin_content in enumerate(bins):
             # Calculate current bin length
-            bin_len = sum(len(s) for s in bin_content)
+            bin_len = sum(len(s["input_ids"]) for s in bin_content)
             # Check if sequence fits in this bin
             if bin_len + seq_len <= max_seq_len:
                 bins[bin_idx].append(sample)

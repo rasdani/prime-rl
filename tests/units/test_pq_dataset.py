@@ -60,7 +60,7 @@ def test_pack_datatset_outputs_efficiently():
 
 def test_pack_dataset_2():
     BS = 16
-    SEQ_LEN = 64
+    SEQ_LEN = 2048
 
     batch = []
 
