@@ -10,6 +10,7 @@ from transformers import (
 
 from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
+import torch.distributed as dist
 
 
 def apply_ac_ckpt(model: ModelType, num: int):
@@ -144,3 +145,40 @@ class FakeTokenizer(object):
 
     def __len__(self):
         return self.vocab_size
+
+
+class MetricsAverager:
+    """
+    Simple class that keep track of metrics over multiple gradient accumulation steps and sync across gpu when calling sync()
+    """
+
+    def __init__(self):
+        self.metrics = {}
+        self.count = {}
+        self.world_info = get_world_info()
+
+    def update(self, key, value: torch.Tensor):
+        if key not in self.metrics:
+            self.metrics[key] = value
+            self.count[key] = 1
+        else:
+            self.metrics[key] += value
+            self.count[key] += 1
+
+    def sync(self):
+        for key in self.metrics:
+            value = self.metrics[key] / self.count[key]
+
+            if value.device == torch.device("cpu"):
+                dist.all_reduce(value, op=dist.ReduceOp.SUM)
+                value = value / self.world_info.world_size
+            else:
+                dist.all_reduce(value, op=dist.ReduceOp.AVG)
+
+            self.metrics[key] = value
+
+    def __getitem__(self, key):
+        return self.metrics[key]
+
+    def items(self):
+        return self.metrics.items()

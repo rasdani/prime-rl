@@ -16,7 +16,7 @@ from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_
 from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, PackingMode, get_dataloader, packed_batch
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
-from zeroband.training.utils import PerfCounter, apply_ac_ckpt
+from zeroband.training.utils import PerfCounter, apply_ac_ckpt, MetricsAverager
 
 from zeroband.logger import get_logger
 
@@ -300,13 +300,8 @@ def train(config: Config):
             logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
 
         for rollout_step in range(config.optim.step_per_rollout):
+            metric_averager = MetricsAverager()
             loss_batch = torch.tensor(0.0, device="cuda")
-            pg_loss_batch = torch.tensor(0.0, device="cuda")
-            entropy_loss_batch = torch.tensor(0.0, device="cuda")
-            clip_ratio_batch = torch.tensor(0.0, device="cuda")
-            seq_lens_batch = torch.tensor(0.0)
-            clip_seq_lens = torch.tensor(0.0)
-            sample_reward_batch = torch.tensor(0.0)
 
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
@@ -319,10 +314,9 @@ def train(config: Config):
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
-                sample_reward_batch += batch["rewards"].sum() / len(batch["rewards"]) / num_grad_acc_steps
-
-                seq_lens_batch += batch["seq_lens"].float().mean() / num_grad_acc_steps
-                clip_seq_lens += (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / num_grad_acc_steps
+                metric_averager.update("sample_reward", batch["rewards"].sum() / len(batch["rewards"]))
+                metric_averager.update("seq_lens", batch["seq_lens"].float().mean())
+                metric_averager.update("clip_seq_lens", (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0])
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(
@@ -346,8 +340,6 @@ def train(config: Config):
                     config.grpo_epsilon_high,
                     config.masked_mean_axis,
                 )
-                pg_loss = pg_loss
-                clip_ratio = clip_ratio / num_grad_acc_steps
 
                 entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
@@ -360,25 +352,16 @@ def train(config: Config):
                 # Backward
                 loss.backward()
                 loss_batch += loss.detach().clone()
-                pg_loss_batch += (pg_loss / num_grad_acc_steps).detach().clone()
-                entropy_loss_batch += (entropy / num_grad_acc_steps).detach().clone()
-                clip_ratio_batch += clip_ratio.detach().clone()
 
-                del loss, clip_ratio, pg_loss, entropy
+                metric_averager.update("pg_loss", pg_loss.detach().clone())
+                metric_averager.update("entropy_loss", entropy.detach().clone())
+                metric_averager.update("clip_ratio", clip_ratio.detach().clone())
+                metric_averager.update("clip_ratio_mean", clip_ratio.mean())
 
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
-            dist.all_reduce(tensor=pg_loss_batch, op=dist.ReduceOp.AVG)
-            dist.all_reduce(tensor=entropy_loss_batch, op=dist.ReduceOp.AVG)
-            dist.all_reduce(tensor=clip_ratio_batch, op=dist.ReduceOp.AVG)
+                del loss, pg_loss, entropy, clip_ratio
 
-            seq_lens_batch = seq_lens_batch / world_info.world_size
-            dist.all_reduce(tensor=seq_lens_batch, op=dist.ReduceOp.SUM)
-
-            clip_seq_lens = clip_seq_lens / world_info.world_size
-            dist.all_reduce(tensor=clip_seq_lens, op=dist.ReduceOp.SUM)
-
-            sample_reward_batch = sample_reward_batch / world_info.world_size
-            dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
+            metric_averager.sync()
+            dist.all_reduce(loss_batch, op=dist.ReduceOp.SUM)
 
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
@@ -394,35 +377,31 @@ def train(config: Config):
             perf_counter.count_tokens(new_tokens)
             training_progress.total_tokens += new_tokens
 
-            padding_proportion = (config.data.seq_length - seq_lens_batch.item() - 1) / config.data.seq_length
+            padding_proportion = (config.data.seq_length - metric_averager["seq_lens"].item() - 1) / config.data.seq_length
 
             metrics = {
                 "Loss": loss_batch.item(),
-                "pg_loss": pg_loss_batch.item(),
-                "entropy_loss": entropy_loss_batch.item(),
                 "step": training_progress.step,
                 "rollout_step": rollout_step,
-                "seq_lens": seq_lens_batch.item(),
                 "inner_lr": inner_lr,
-                "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
                 "grad_norm": grad_norm.item(),
-                "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
-                "sample_reward": sample_reward_batch.item(),
-                "clip_seq_lens": clip_seq_lens.item(),
             }
+
+            for key, value in metric_averager.items():
+                metrics[key] = value.item()
 
             log = (
                 f"step: {training_progress.step}, "
                 f"rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
                 f"loss: {loss_batch.item():.4f}, "
-                f"clip_ratio: {clip_ratio_batch.item():.4f}, "
-                f"sample_reward: {sample_reward_batch.item():.4f}, "
+                f"clip_ratio: {metric_averager['clip_ratio'].item():.4f}, "
+                f"sample_reward: {metric_averager['sample_reward'].item():.4f}, "
             )
 
-            del loss_batch, grad_norm, pg_loss_batch, entropy_loss_batch
+            del loss_batch, grad_norm
 
             tokens_per_second = perf_counter.get_tokens_per_second()
             if tokens_per_second is not None:
