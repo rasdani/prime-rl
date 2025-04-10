@@ -276,6 +276,7 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
 
     total_reward = task_reward
     length_penalty = 0
+    length_difference = 0
     if verification_info["target_length"] > 0:
         output_length = len(output.token_ids)
         target_length = verification_info["target_length"]

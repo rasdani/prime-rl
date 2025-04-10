@@ -18,6 +18,7 @@ def _create_one_pa_table(batch_size: int, seq_len: int):
     output_logprobs_list = [[0] * seq_len for _ in range(batch_size)]  # Wrap in list
     task_rewards_list = [0] * batch_size
     length_penalty_list = [0] * batch_size
+    length_difference_list = [0] * batch_size
     target_lengths_list = [seq_len] * batch_size
     advantages_list = [1] * batch_size
     rewards_list = [1] * batch_size
@@ -34,6 +35,7 @@ def _create_one_pa_table(batch_size: int, seq_len: int):
         pa.array(rewards_list, type=pa.float32()),
         pa.array(task_rewards_list, type=pa.float32()),
         pa.array(length_penalty_list, type=pa.float32()),
+        pa.array(length_difference_list, type=pa.float32()),
         pa.array(proofs_list, type=pa.binary()),
         pa.array(steps_list, type=pa.int32()),
         pa.array(target_lengths_list, type=pa.int32()),
