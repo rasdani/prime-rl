@@ -5,19 +5,6 @@ import asyncio
 from zeroband.training import envs
 
 
-async def _get_external_ip(max_retries=3, retry_delay=5):
-    async with aiohttp.ClientSession() as session:
-        for attempt in range(max_retries):
-            try:
-                async with session.get("https://api.ipify.org", timeout=10) as response:
-                    response.raise_for_status()
-                    return await response.text()
-            except aiohttp.ClientError:
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-    return None
-
-
 class HttpMonitor:
     """
     Logs the status of nodes, and training progress to an API
