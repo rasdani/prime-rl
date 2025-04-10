@@ -252,13 +252,14 @@ def train(config: Config):
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             if config.on_policy_log_prob:
-                data: list[tuple[list[BatchOutput], int, int]] = []
+                data: list[list[BatchOutput]] = []
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
 
                     time_0 = time.time()
 
+                    logger.info(f"batch_rollout: {len(batch_rollout)}m local_batch_size: {local_batch_size}")
                     batch_packed = packed_batch(
                         batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.packing_mode
                     )
