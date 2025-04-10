@@ -49,6 +49,7 @@ class FakeTokenizedDataset(IterableDataset):
             rewards = torch.clamp(torch.randn(len_), min=0.0, max=1.0)
             task_rewards = torch.rand(len_)
             length_penalties = torch.rand(len_)
+            length_differences = torch.rand(len_)
             target_length_value = torch.randint(1, self.seq_len + 1, (1,)).item()
             target_lengths = torch.tensor(target_length_value, dtype=torch.int32)
             self.step += 1
@@ -58,6 +59,7 @@ class FakeTokenizedDataset(IterableDataset):
                 "rewards": rewards,
                 "task_rewards": task_rewards,
                 "length_penalties": length_penalties,
+                "length_differences": length_differences,
                 "target_lengths": target_lengths,
                 "loss_mask": torch.ones(len_).int(),
                 "logprobs": torch.randn(len_),
@@ -196,6 +198,7 @@ class ParquetDataset(IterableDataset):
                 "rewards",
                 "task_rewards",
                 "length_penalties",
+                "length_differences",
                 "target_lengths",
                 "input_logprobs",
                 "output_logprobs",
@@ -212,6 +215,7 @@ class ParquetDataset(IterableDataset):
                     rewards = batch["rewards"]
                     task_rewards = batch["task_rewards"]
                     length_penalties = batch["length_penalties"]
+                    length_differences = batch["length_differences"]
                     target_lengths = batch["target_lengths"]
                     input_logprobs = batch["input_logprobs"]
                     output_logprobs = batch["output_logprobs"]
@@ -225,6 +229,7 @@ class ParquetDataset(IterableDataset):
                         reward,
                         task_rew,
                         len_pen,
+                        len_diff,
                         tgt_len,
                     ) in zip(
                         input_tokens,
@@ -235,6 +240,7 @@ class ParquetDataset(IterableDataset):
                         rewards,
                         task_rewards,
                         length_penalties,
+                        length_differences,
                         target_lengths,
                     ):
                         counter += 1
@@ -261,6 +267,7 @@ class ParquetDataset(IterableDataset):
                             reward_value = reward.as_py()
                             task_value = task_rew.as_py()
                             len_pen_value = len_pen.as_py()
+                            len_diff_value = len_diff.as_py()
 
                             tgt_length_val = int(tgt_len.as_py())
 
@@ -268,6 +275,7 @@ class ParquetDataset(IterableDataset):
                             rew = torch.tensor([reward_value] * len(ids))  # reward
                             t_rew = torch.tensor([task_value] * len(ids))  # task reward
                             l_pen = torch.tensor([len_pen_value] * len(ids))  # length penalty
+                            l_diff = torch.tensor([len_diff_value] * len(ids))
 
                             data = {
                                 "input_ids": ids,
@@ -275,6 +283,7 @@ class ParquetDataset(IterableDataset):
                                 "rewards": rew,
                                 "task_rewards": t_rew,
                                 "length_penalties": l_pen,
+                                "length_differencey": l_diff,
                                 "target_lengths": tgt_length_val,
                                 "loss_mask": loss_mask,
                                 "logprobs": logprobs,
@@ -317,6 +326,7 @@ class PaddingColate:
             "rewards",
             "task_rewards",
             "length_penalties",
+            "length_differences",
             "target_lengths",
             "loss_mask",
             "logprobs",
@@ -329,6 +339,7 @@ class PaddingColate:
         rewards = []
         task_rewards = []
         length_penalties = []
+        length_differences = []
         target_lens = []
         loss_masks = []
         logprobs = []
@@ -343,6 +354,7 @@ class PaddingColate:
             rew = sample["rewards"]
             t_rew = sample["task_rewards"]
             l_pen = sample["length_penalties"]
+            l_diff = sample["length_differences"]
             loss_mask = sample["loss_mask"]
             logprob = sample["logprobs"]
 
@@ -352,6 +364,7 @@ class PaddingColate:
                 rew = rew[: self._seq_len]
                 t_rew = t_rew[: self._seq_len]
                 l_pen = l_pen[: self._seq_len]
+                l_diff = l_diff[: self._seq_len]
                 loss_mask = loss_mask[: self._seq_len]
                 logprob = logprob[: self._seq_len]
             else:
@@ -365,6 +378,8 @@ class PaddingColate:
 
                 l_pen = torch.cat([l_pen, torch.zeros(self._seq_len - len(l_pen), dtype=l_pen.dtype)])
 
+                l_diff = torch.cat([l_diff, torch.zeros(self._seq_len - len(l_diff), dtype=l_diff.dtype)])
+
                 loss_mask = torch.cat([loss_mask, torch.zeros(self._seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
 
                 logprob = torch.cat([logprob, torch.zeros(self._seq_len - len(logprob), dtype=logprob.dtype)])
@@ -375,6 +390,7 @@ class PaddingColate:
             rewards.append(rew)
             task_rewards.append(t_rew)
             length_penalties.append(l_pen)
+            length_differences.append(l_diff)
             target_lens.append(sample["target_lengths"])
             loss_masks.append(loss_mask)
             logprobs.append(logprob)
@@ -385,6 +401,7 @@ class PaddingColate:
             "rewards": torch.stack(rewards, dim=0),
             "task_rewards": torch.stack(task_rewards, dim=0),
             "length_penalties": torch.stack(length_penalties, dim=0),
+            "length_differences": torch.stack(length_differences, dim=0),
             "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
             "loss_mask": torch.stack(loss_masks, dim=0).int(),
             "logprobs": torch.stack(logprobs, dim=0),

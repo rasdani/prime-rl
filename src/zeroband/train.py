@@ -302,6 +302,10 @@ def train(config: Config):
             sample_task_reward_batch = torch.tensor(0.0)
             sample_length_penalty_batch = torch.tensor(0.0)
 
+            length_diff_sum = torch.tensor(0.0)
+            length_diff_token_count = torch.tensor(0.0)
+            sample_length_diff_batch = torch.tensor(0.0)
+
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
@@ -333,6 +337,14 @@ def train(config: Config):
                 seq_lens_batch += batch["seq_lens"].float().mean() / gradient_accumulation_steps
                 clip_seq_lens += (
                     (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / gradient_accumulation_steps
+                )
+
+                ldiff_this = batch["length_differences"][loss_mask.bool()]
+                length_diff_sum += ldiff_this.sum()
+                length_diff_token_count += ldiff_this.numel()
+
+                sample_length_diff_batch += (
+                    batch["length_differences"][:, 0].sum() / batch["length_differences"].shape[0] / gradient_accumulation_steps
                 )
 
                 # Forward
@@ -398,12 +410,18 @@ def train(config: Config):
 
             dist.all_reduce(sample_task_reward_batch, op=dist.ReduceOp.SUM)
             dist.all_reduce(sample_length_penalty_batch, op=dist.ReduceOp.SUM)
+            dist.all_reduce(length_diff_sum, op=dist.ReduceOp.SUM)
+            dist.all_reduce(length_diff_token_count, op=dist.ReduceOp.SUM)
+            dist.all_reduce(sample_length_diff_batch, op=dist.ReduceOp.SUM)
 
             average_task_rewards = task_rewards_sum / task_rewards_token_count
             average_length_penalties = length_pen_sum / length_pen_token_count
 
             sample_task_rewards = sample_task_reward_batch / world_info.world_size
             sample_length_penalties = sample_length_penalty_batch / world_info.world_size
+
+            average_length_diff = length_diff_sum / length_diff_token_count
+            sample_length_diff = sample_length_diff_batch / world_info.world_size
 
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
@@ -441,6 +459,8 @@ def train(config: Config):
                 "average_length_penalties": average_length_penalties.item(),
                 "sample_task_rewards": sample_task_rewards.item(),
                 "sample_length_penalties": sample_length_penalties.item(),
+                "average_length_diff": average_length_diff.item(),
+                "sample_length_diff": sample_length_diff.item(),
             }
 
             log = (
