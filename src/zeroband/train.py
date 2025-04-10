@@ -13,7 +13,7 @@ import shardcast
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
-from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, get_dataloader, packed_batch
+from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, PackingMode, get_dataloader, packed_batch, packed_batch_packing
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
@@ -101,6 +101,8 @@ class Config(BaseConfig):
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
     masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
+
+    packing_mode: PackingMode = "padding"
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -245,26 +247,32 @@ def train(config: Config):
         time_start = time.time()
 
         total_time_data_loading = 0
+        total_time_packing = 0
 
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
             if config.on_policy_log_prob:
-                data: list[tuple[list[BatchOutput], int, int]] = []
+                data: list[list[BatchOutput]] = []
 
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
-                    logger.info(f"{len(batch_rollout)}=")
 
                     time_0 = time.time()
 
-                    batch_packed, num_grad_acc_steps, max_grad_steps = packed_batch(
-                        batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs
+                    logger.info(f"batch_rollout: {len(batch_rollout)}m local_batch_size: {local_batch_size}")
+                    batch_packed = packed_batch(
+                        batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.packing_mode
                     )
+                    num_grad_acc_steps = len(batch_packed)
+
                     time_1 = time.time()
+                    total_time_packing += time_1 - time_0
                     logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
-                    logger.info(f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
-                    for grad_acc_step in range(max_grad_steps):
+                    logger.info(
+                        f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}, batch size: {batch_packed[0]['input_ids'].shape}"
+                    )
+                    for grad_acc_step in range(num_grad_acc_steps):
                         time_data_loading = time.time()
 
                         batch = batch_packed[grad_acc_step]
@@ -273,7 +281,6 @@ def train(config: Config):
                         total_time_data_loading += time_data_loading
 
                         input_ids = batch["input_ids"].to("cuda")
-                        logger.info(f"policy log prob grad_acc_step: {grad_acc_step} batch: {input_ids.shape}")
 
                         logits: Float[torch.Tensor, "batch seq vocab"] = model(
                             input_ids=input_ids, position_ids=batch["position_ids"]
@@ -287,7 +294,7 @@ def train(config: Config):
 
                         del logits, per_token_logps
 
-                    data.append((batch_packed, num_grad_acc_steps, max_grad_steps))
+                    data.append(batch_packed)
 
                 logprobs_aware_iterator = iter(data)
 
@@ -297,7 +304,7 @@ def train(config: Config):
                 data = []
                 for rollout_step in range(config.optim.step_per_rollout):
                     batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
-                    data.append(packed_batch(batch_rollout, config.data.seq_length, tokenizer.pad_token_id, 1))
+                    data.append(packed_batch_packing(batch_rollout, config.data.seq_length, tokenizer.pad_token_id, 1))
                 logprobs_aware_iterator = iter(data)
 
         for rollout_step in range(config.optim.step_per_rollout):
@@ -309,59 +316,25 @@ def train(config: Config):
             clip_seq_lens = torch.tensor(0.0)
             sample_reward_batch = torch.tensor(0.0)
 
-            rewards_sum = torch.tensor(0.0)
-            rewards_token_count = torch.tensor(0.0)
-
-            task_rewards_sum = torch.tensor(0.0)
-            task_rewards_token_count = torch.tensor(0.0)
-
-            length_pen_sum = torch.tensor(0.0)
-            length_pen_token_count = torch.tensor(0.0)
-
-            sample_task_reward_batch = torch.tensor(0.0)
-            sample_length_penalty_batch = torch.tensor(0.0)
-
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
-            data_per_rollout, num_grad_acc_steps, max_grad_acc_steps = next(logprobs_aware_iterator)
+            data_per_rollout = next(logprobs_aware_iterator)
+            num_grad_acc_steps = len(data_per_rollout)
 
-            logger.info(f"rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
-
-            for grad_acc_step in range(max_grad_acc_steps):
-                is_padding_batch = grad_acc_step >= num_grad_acc_steps
-                is_padding_batch = 1.0 if is_padding_batch else 0.0
+            for grad_acc_step in range(num_grad_acc_steps):
                 batch = data_per_rollout[grad_acc_step]
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
-                rewards_this = batch["rewards"][loss_mask.bool()]
-                rewards_sum += rewards_this.sum()
-                rewards_token_count += rewards_this.numel()
-
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / num_grad_acc_steps
-
-                task_this = batch["task_rewards"][loss_mask.bool()]
-                task_rewards_sum += task_this.sum()
-                task_rewards_token_count += task_this.numel()
-
-                len_pen_this = batch["length_penalties"][loss_mask.bool()]
-                length_pen_sum += len_pen_this.sum()
-                length_pen_token_count += len_pen_this.numel()
-
-                sample_task_reward_batch += batch["task_rewards"][:, 0].sum() / batch["task_rewards"].shape[0] / num_grad_acc_steps
-
-                sample_length_penalty_batch += (
-                    batch["length_penalties"][:, 0].sum() / batch["length_penalties"].shape[0] / num_grad_acc_steps
-                )
+                sample_reward_batch += batch["rewards"].sum() / len(batch["rewards"]) / num_grad_acc_steps
 
                 seq_lens_batch += batch["seq_lens"].float().mean() / num_grad_acc_steps
                 clip_seq_lens += (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / num_grad_acc_steps
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(
-                    input_ids=input_ids,
-                    position_ids=batch["position_ids"]
+                    input_ids=input_ids, position_ids=batch["position_ids"]
                 ).logits.contiguous()
 
                 # Gather args for grpo loss
@@ -383,17 +356,15 @@ def train(config: Config):
                     config.grpo_epsilon_high,
                     config.masked_mean_axis,
                 )
-                pg_loss = pg_loss * is_padding_batch
+                pg_loss = pg_loss
                 clip_ratio = clip_ratio / num_grad_acc_steps
-                clip_ratio = clip_ratio * is_padding_batch
 
-                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis) * is_padding_batch
-                entropy = entropy * is_padding_batch
+                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / num_grad_acc_steps
-                loss = loss * is_padding_batch
 
+                inputs_ids_shape = input_ids.shape
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
@@ -402,6 +373,7 @@ def train(config: Config):
                 pg_loss_batch += (pg_loss / num_grad_acc_steps).detach().clone()
                 entropy_loss_batch += (entropy / num_grad_acc_steps).detach().clone()
                 clip_ratio_batch += clip_ratio.detach().clone()
+
                 del loss, clip_ratio, pg_loss, entropy
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
@@ -418,24 +390,6 @@ def train(config: Config):
             sample_reward_batch = sample_reward_batch / world_info.world_size
             dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
 
-            dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
-            average_rewards = rewards_sum / rewards_token_count
-
-            dist.all_reduce(task_rewards_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(task_rewards_token_count, op=dist.ReduceOp.SUM)
-            dist.all_reduce(length_pen_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(length_pen_token_count, op=dist.ReduceOp.SUM)
-
-            dist.all_reduce(sample_task_reward_batch, op=dist.ReduceOp.SUM)
-            dist.all_reduce(sample_length_penalty_batch, op=dist.ReduceOp.SUM)
-
-            average_task_rewards = task_rewards_sum / task_rewards_token_count
-            average_length_penalties = length_pen_sum / length_pen_token_count
-
-            sample_task_rewards = sample_task_reward_batch / world_info.world_size
-            sample_length_penalties = sample_length_penalty_batch / world_info.world_size
-
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
             optimizer.step()
@@ -445,7 +399,8 @@ def train(config: Config):
             training_progress.step += 1
             inner_lr = [group["lr"] for group in optimizer.param_groups][0]
 
-            new_tokens = config.data.seq_length * config.optim.batch_size
+            token_per_gpu = inputs_ids_shape[0] * inputs_ids_shape[1] * num_grad_acc_steps
+            new_tokens = world_info.world_size * token_per_gpu
             perf_counter.count_tokens(new_tokens)
             training_progress.total_tokens += new_tokens
 
@@ -463,28 +418,21 @@ def train(config: Config):
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
                 "grad_norm": grad_norm.item(),
-                "average_rewards": average_rewards.item(),
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
                 "sample_reward": sample_reward_batch.item(),
                 "clip_seq_lens": clip_seq_lens.item(),
-                "average_task_rewards": average_task_rewards.item(),
-                "average_length_penalties": average_length_penalties.item(),
-                "sample_task_rewards": sample_task_rewards.item(),
-                "sample_length_penalties": sample_length_penalties.item(),
             }
 
             log = (
                 f"step: {training_progress.step}, "
                 f"rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
                 f"loss: {loss_batch.item():.4f}, "
-                f"average_rewards: {average_rewards.item():.4f}, "
                 f"clip_ratio: {clip_ratio_batch.item():.4f}, "
-                f"average_task_rewards: {average_task_rewards.item():.4f}, "
-                f"average_length_penalties: {average_length_penalties.item():.4f}"
+                f"sample_reward: {sample_reward_batch.item():.4f}, "
             )
 
-            del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
+            del loss_batch, grad_norm, pg_loss_batch, entropy_loss_batch
 
             tokens_per_second = perf_counter.get_tokens_per_second()
             if tokens_per_second is not None:
@@ -538,7 +486,7 @@ def train(config: Config):
             if config.on_policy_log_prob:
                 new_metrics["time_logprob"] = time_logprob
                 new_metrics["time_data_loading"] = total_time_data_loading
-
+                new_metrics["time_packing"] = total_time_packing
             wandb.log(new_metrics)
 
         if training_progress.step >= config.optim.total_steps:

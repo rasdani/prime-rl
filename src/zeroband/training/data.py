@@ -1,6 +1,6 @@
 from pathlib import Path
 import time
-from typing import Any, Generator, Iterator, TypedDict
+from typing import Any, Generator, Literal, TypeAlias, TypedDict
 
 from pydantic_config import BaseConfig
 
@@ -35,13 +35,10 @@ class DataConfig(BaseConfig):
 class DatasetOutput(TypedDict):
     input_ids: Int[torch.Tensor, "seq"]
     advantages: Float[torch.Tensor, "seq"]
-    rewards: Float[torch.Tensor, "seq"]
+    rewards: Float[torch.Tensor, "1"]
     loss_mask: Int[torch.Tensor, "seq"]
     logprobs: Float[torch.Tensor, "seq"]
-    seq_lens: Int[torch.Tensor, "seq"]
-    length_penalties: Float[torch.Tensor, "seq"]
-    target_lengths: Int[torch.Tensor, "seq"]
-    task_rewards: Float[torch.Tensor, "seq"]
+    seq_lens: Int[torch.Tensor, "1"]
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -63,19 +60,11 @@ class FakeTokenizedDataset(IterableDataset):
             len_ = torch.randint(1, seq_len + 1, (1,)).item()
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
-            rewards = torch.clamp(torch.randn(len_), min=0.0, max=1.0)
-            task_rewards = torch.rand(len_)
-            length_penalties = torch.rand(len_)
-            target_length_value = torch.randint(1, self.seq_len + 1, (1,)).item()
-            target_lengths = torch.tensor(target_length_value, dtype=torch.int32)
             self.step += 1
             yield {
                 "input_ids": input_ids,
                 "advantages": advantages,
-                "rewards": rewards,
-                "task_rewards": task_rewards,
-                "length_penalties": length_penalties,
-                "target_lengths": target_lengths,
+                "rewards": 0.5,
                 "loss_mask": torch.ones(len_).int(),
                 "logprobs": torch.randn(len_),
             }
@@ -211,9 +200,6 @@ class ParquetDataset(IterableDataset):
                 "output_tokens",
                 "advantages",
                 "rewards",
-                "task_rewards",
-                "length_penalties",
-                "target_lengths",
                 "input_logprobs",
                 "output_logprobs",
             ]
@@ -227,9 +213,6 @@ class ParquetDataset(IterableDataset):
                     output_tokens = batch["output_tokens"]
                     advantages = batch["advantages"]
                     rewards = batch["rewards"]
-                    task_rewards = batch["task_rewards"]
-                    length_penalties = batch["length_penalties"]
-                    target_lengths = batch["target_lengths"]
                     input_logprobs = batch["input_logprobs"]
                     output_logprobs = batch["output_logprobs"]
 
@@ -240,9 +223,6 @@ class ParquetDataset(IterableDataset):
                         out_logprob,
                         advantage,
                         reward,
-                        task_rew,
-                        len_pen,
-                        tgt_len,
                     ) in zip(
                         input_tokens,
                         output_tokens,
@@ -250,9 +230,6 @@ class ParquetDataset(IterableDataset):
                         output_logprobs,
                         advantages,
                         rewards,
-                        task_rewards,
-                        length_penalties,
-                        target_lengths,
                     ):
                         counter += 1
                         if _should_skip_index(
@@ -276,26 +253,17 @@ class ParquetDataset(IterableDataset):
 
                             adv_value = advantage.as_py()
                             reward_value = reward.as_py()
-                            task_value = task_rew.as_py()
-                            len_pen_value = len_pen.as_py()
-
-                            tgt_length_val = int(tgt_len.as_py())
 
                             adv = torch.tensor([adv_value] * len(ids))  # advantage
-                            rew = torch.tensor([reward_value] * len(ids))  # reward
-                            t_rew = torch.tensor([task_value] * len(ids))  # task reward
-                            l_pen = torch.tensor([len_pen_value] * len(ids))  # length penalty
 
                             data = {
                                 "input_ids": ids,
                                 "advantages": adv,
-                                "rewards": rew,
-                                "task_rewards": t_rew,
-                                "length_penalties": l_pen,
-                                "target_lengths": tgt_length_val,
+                                "rewards": reward_value,
                                 "loss_mask": loss_mask,
                                 "logprobs": logprobs,
                             }
+
                         except Exception as e:
                             self._logger.warn(f"Error processing row {counter} sample {sample_count}: {str(e)}")
                             data = None
@@ -317,22 +285,9 @@ def no_collate(batch: list[DatasetOutput]) -> list[DatasetOutput]:
     return batch
 
 
-class BatchOutput(TypedDict):
-    input_ids: Int[torch.Tensor, "batch seq"]
-    advantages: Float[torch.Tensor, "batch seq"]
-    rewards: Float[torch.Tensor, "batch seq"]
-    loss_mask: Int[torch.Tensor, "batch seq"]
-    logprobs: Float[torch.Tensor, "batch seq"]
-    seq_lens: Int[torch.Tensor, "batch"]
-    length_penalties: Float[torch.Tensor, "batch"]
-    # target_lengths: Int[torch.Tensor, "batch"]
-    task_rewards: Float[torch.Tensor, "batch"]
-    position_ids: Int[torch.Tensor, "batch seq"]
-
-
 def get_dataloader(
     tokenizer, local_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int, ignore_zero_advantages: bool
-) -> tuple[DataLoader[BatchOutput], GCPPrefetcher | None]:
+) -> tuple[DataLoader[list[DatasetOutput]], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
     prefetcher = None
@@ -357,169 +312,107 @@ def get_dataloader(
     return loader, prefetcher
 
 
-def packed_batch(
-    batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int
-) -> tuple[list[BatchOutput], int, int]:
+class BatchOutput(TypedDict):
+    input_ids: Int[torch.Tensor, "batch seq"]
+    advantages: Float[torch.Tensor, "batch seq"]
+    rewards: Float[torch.Tensor, "sample"]
+    loss_mask: Int[torch.Tensor, "batch seq"]
+    logprobs: Float[torch.Tensor, "batch seq"]
+    seq_lens: Int[torch.Tensor, "sample"]
+    position_ids: Int[torch.Tensor, "batch seq"]
+
+
+### sequence packing
+
+
+def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_len: int) -> list[list[DatasetOutput]]:
+    """
+    This function will pack the bins into a single batch in a efficient manner
+    """
+    ## we sorted by inputs_ids
+
+    batch_with_len = [(len(sample["input_ids"]), sample) for sample in batch_optim]
+
+    get_logger().info(f"all tokens in batch: {sum(len(sample['input_ids']) for sample in batch_optim)}")
+    sorted_batch = sorted(batch_with_len, key=lambda x: x[0], reverse=True)
+
+    ## we create bins
+    bins: list[list[DatasetOutput]] = []
+
+    ## we pack the bins
+
+    for seq_len, sample in sorted_batch:
+        # Try to find a bin that can fit this sequence
+        bin_found = False
+        for bin_idx, bin_content in enumerate(bins):
+            # Calculate current bin length
+            bin_len = sum(len(s["input_ids"]) for s in bin_content)
+            # Check if sequence fits in this bin
+            if bin_len + seq_len <= max_seq_len:
+                bins[bin_idx].append(sample)
+                bin_found = True
+                break
+
+        # If no suitable bin found, create a new bin
+        if not bin_found:
+            bins.append([sample])
+
+    return bins
+
+
+def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> BatchOutput:
+    """
+    This function will pack the bins into a single batch, if the bin is not full it will pad the end with the pad_token_id
+    """
+
+    total_len = sum(len(sample["input_ids"]) for sample in samples)
+
+    inputs_ids = [sample["input_ids"] for sample in samples]
+    advantages = [sample["advantages"] for sample in samples]
+    rewards = [sample["rewards"] for sample in samples]
+    loss_masks = [sample["loss_mask"] for sample in samples]
+    logprobs = [sample["logprobs"] for sample in samples]
+
+    seq_lens = [len(sample["input_ids"]) for sample in samples]
+    position_ids = [torch.arange(0, len(sample["input_ids"]), dtype=torch.int32) for sample in samples]
+
+    if total_len < max_seq_len:
+        padding_len = max_seq_len - total_len
+
+        inputs_ids.append(torch.full((padding_len,), fill_value=pad_token_id, dtype=inputs_ids[0].dtype))
+        advantages.append(torch.zeros(padding_len, dtype=advantages[0].dtype))
+        loss_masks.append(torch.zeros(padding_len, dtype=loss_masks[0].dtype).int())
+        logprobs.append(torch.zeros(padding_len, dtype=logprobs[0].dtype))
+
+        seq_lens.append(padding_len)
+        position_ids.append(torch.arange(0, padding_len, dtype=torch.int32))
+
+    return {
+        "input_ids": torch.cat(inputs_ids, dim=0)[:max_seq_len].unsqueeze(0),
+        "advantages": torch.cat(advantages, dim=0)[:max_seq_len].unsqueeze(0),
+        "rewards": torch.tensor(rewards),
+        "loss_mask": torch.cat(loss_masks, dim=0)[:max_seq_len].unsqueeze(0),
+        "logprobs": torch.cat(logprobs, dim=0)[:max_seq_len].unsqueeze(0),
+        "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
+        "position_ids": torch.cat(position_ids, dim=0)[:max_seq_len].unsqueeze(0),
+    }
+
+
+def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
     """
     this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
     """
+    max_seq_len = max_seq_len * micro_bs
 
-    def pack_batch(
-        batch_optim: list[DatasetOutput], seq_len: int, pad_token_id: int, micro_batch_size: int
-    ) -> Generator[BatchOutput, Any, None]:
-        batch_seq_len = seq_len * micro_batch_size
+    bins = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
 
-        required_keys = {
-            "input_ids",
-            "advantages",
-            "rewards",
-            "task_rewards",
-            "length_penalties",
-            # "target_lengths",
-            "loss_mask",
-            "logprobs",
-        }
+    get_logger().info(f"num bins: {len(bins)}, batch_optim: {len(batch_optim)}")
 
-        input_ids = []
-        advantages = []
-        rewards = []
-        task_rewards = []
-        length_penalties = []
-        # target_lens = []
-        loss_masks = []
-        logprobs = []
-        seq_lens = []
-        seq_len_sum = 0
+    micro_batches = [collate_packing(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in bins]
 
-        batch_iter: Iterator[tuple[int, DatasetOutput]] = enumerate(batch_optim)
-        pending_sample: tuple[int, DatasetOutput] | None = None
-        while True:
-            # Get the next sample
-            if pending_sample is not None:
-                i, sample = pending_sample
-                pending_sample = None
-            else:
-                try:
-                    i, sample = next(batch_iter)
-                except StopIteration:
-                    break
+    num_grad_acc_steps = len(micro_batches)
 
-            seq_len = len(sample["input_ids"])
-            input_dtype = sample["input_ids"].dtype
-            if seq_len > batch_seq_len:
-                get_logger().info(f"Sample {i} too long. Truncating by {seq_len - batch_seq_len}. seq_len: {seq_len} > {batch_seq_len}.")
-                sample["input_ids"] = sample["input_ids"][:batch_seq_len]
-                sample["advantages"] = sample["advantages"][:batch_seq_len]
-                sample["rewards"] = sample["rewards"][:batch_seq_len]
-                sample["task_rewards"] = sample["task_rewards"][:batch_seq_len]
-                sample["length_penalties"] = sample["length_penalties"][:batch_seq_len]
-                # sample["target_lengths"] = ...
-                sample["loss_mask"] = sample["loss_mask"][:batch_seq_len]
-                sample["logprobs"] = sample["logprobs"][:batch_seq_len]
-                seq_len = len(sample["input_ids"])
-
-            assert required_keys <= set(sample.keys()), f"Missing required keys. Found: {sample.keys()}, required: {required_keys}"
-            assert (
-                len(sample["input_ids"])
-                == len(sample["advantages"])
-                == len(sample["rewards"])
-                == len(sample["task_rewards"])
-                == len(sample["length_penalties"])
-                == len(sample["loss_mask"])
-                == len(sample["logprobs"])
-            ), (
-                f"Sample {i} has different lengths: {len(sample['input_ids'])}, {len(sample['advantages'])}, {len(sample['rewards'])}, {len(sample['task_rewards'])}, {len(sample['length_penalties'])}, {len(sample['loss_mask'])}, {len(sample['logprobs'])}"
-            )
-
-            # If the sample fits, add it to the batch.
-            if (seq_len_sum + seq_len) <= batch_seq_len:
-                input_ids.append(sample["input_ids"])
-                advantages.append(sample["advantages"])
-                rewards.append(sample["rewards"])
-                task_rewards.append(sample["task_rewards"])
-                length_penalties.append(sample["length_penalties"])
-                # target_lens.append(sample["target_lengths"])
-                loss_masks.append(sample["loss_mask"])
-                logprobs.append(sample["logprobs"])
-                seq_lens.append(seq_len)
-                seq_len_sum += seq_len
-
-            # Otherwise, pad the batch and yield what we've built.
-            # Then on the next iteration, we process the sample that was too long again.
-            else:
-                pending_sample = (i, sample)
-
-                # Pad. We don't append to seq_lens so not to attend to the padding.
-                padding_len = batch_seq_len - seq_len_sum
-                input_ids.append(torch.full((padding_len,), fill_value=pad_token_id, dtype=input_dtype))
-                advantages.append(torch.zeros(padding_len, dtype=sample["advantages"].dtype))
-                rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
-                task_rewards.append(torch.zeros(padding_len, dtype=sample["task_rewards"].dtype))
-                length_penalties.append(torch.zeros(padding_len, dtype=sample["length_penalties"].dtype))
-                # target_lens.append(padding_len)
-                loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
-                logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
-                seq_lens.append(padding_len)  # Append fake padding sequence b/c flash attention explodes otherwise or when it's all zeros.
-
-                # Yield the microbatch and reset so we can make a new one.
-                position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
-                yield {
-                    "input_ids": torch.cat(input_ids),
-                    "advantages": torch.cat(advantages),
-                    "rewards": torch.cat(rewards),
-                    "task_rewards": torch.cat(task_rewards),
-                    "length_penalties": torch.cat(length_penalties),
-                    # "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
-                    "loss_mask": torch.cat(loss_masks).int(),
-                    "logprobs": torch.cat(logprobs),
-                    "seq_lens": torch.tensor(seq_lens),
-                    "position_ids": position_ids,
-                }
-
-                input_ids = []
-                advantages = []
-                rewards = []
-                task_rewards = []
-                length_penalties = []
-                # target_lens = []
-                loss_masks = []
-                logprobs = []
-                seq_lens = []
-                seq_len_sum = 0
-
-        padding_len = batch_seq_len - seq_len_sum
-        input_ids.append(torch.full((padding_len,), fill_value=pad_token_id, dtype=input_dtype))
-        advantages.append(torch.zeros(padding_len, dtype=sample["advantages"].dtype))
-        rewards.append(torch.zeros(padding_len, dtype=sample["rewards"].dtype))
-        task_rewards.append(torch.zeros(padding_len, dtype=sample["task_rewards"].dtype))
-        length_penalties.append(torch.zeros(padding_len, dtype=sample["length_penalties"].dtype))
-        # target_lens.append(padding_len)
-        loss_masks.append(torch.zeros(padding_len, dtype=sample["loss_mask"].dtype))
-        logprobs.append(torch.zeros(padding_len, dtype=sample["logprobs"].dtype))
-        seq_lens.append(padding_len)
-
-        position_ids = torch.cat([torch.arange(0, sl, dtype=input_dtype) for sl in seq_lens])
-        yield {
-            "input_ids": torch.cat(input_ids),
-            "advantages": torch.cat(advantages),
-            "rewards": torch.cat(rewards),
-            "task_rewards": torch.cat(task_rewards),
-            "length_penalties": torch.cat(length_penalties),
-            # "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
-            "loss_mask": torch.cat(loss_masks).int(),
-            "logprobs": torch.cat(logprobs),
-            "seq_lens": torch.tensor(seq_lens),
-            "position_ids": position_ids,
-        }
-
-        return  # Batch exhausted
-
-    batch_outputs = []
-    for packed in pack_batch(batch_optim, seq_len, pad_token_id, micro_batch_size):
-        packed = {k: (v.unsqueeze(0) if isinstance(v, torch.Tensor) else v) for k, v in packed.items()}
-        batch_outputs.append(packed)  # Re-coallated
-
-    num_grad_acc_steps = len(batch_outputs)
+    ### duplicate batch in case of unbalanced between gpus
 
     max_grad_acc_step = torch.tensor(num_grad_acc_steps, dtype=torch.int32).to("cuda")
     dist.all_reduce(max_grad_acc_step, op=dist.ReduceOp.MAX, group=None)
@@ -530,12 +423,95 @@ def packed_batch(
     for _ in range(empty_batch_count):
         empty_batch = {}
 
-        for key, value in batch_outputs[0].items():
-            if key in ("position_ids", "input_ids"):
+        for key, value in micro_batches[0].items():
+            if isinstance(value, torch.Tensor):
                 empty_batch[key] = value.clone()
             else:
-                empty_batch[key] = torch.zeros_like(value)
+                empty_batch[key] = value
 
-        batch_outputs.append(empty_batch)
+        micro_batches.append(empty_batch)
 
-    return batch_outputs, num_grad_acc_steps, max_grad_acc_step
+    return micro_batches
+
+
+####### normal padding
+def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> BatchOutput:
+    inputs_ids = []
+    advantages = []
+    rewards = []
+    loss_masks = []
+    logprobs = []
+    seq_lens = []
+    position_ids = []
+
+    for sample in samples:
+        ids = sample["input_ids"]
+        seq_len = len(ids)
+        # seq_len = self._seq_len
+
+        adv = sample["advantages"]
+        loss_mask = sample["loss_mask"]
+        logprob = sample["logprobs"]
+
+        if len(ids) >= max_seq_len:
+            ids = ids[:max_seq_len]
+            adv = adv[:max_seq_len]
+            loss_mask = loss_mask[:max_seq_len]
+            logprob = logprob[:max_seq_len]
+        else:
+            ids = torch.cat([ids, torch.full((max_seq_len - len(ids),), fill_value=pad_token_id, dtype=ids.dtype)])
+            adv = torch.cat([adv, torch.zeros(max_seq_len - len(adv), dtype=adv.dtype)])
+            loss_mask = torch.cat([loss_mask, torch.zeros(max_seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
+            logprob = torch.cat([logprob, torch.zeros(max_seq_len - len(logprob), dtype=logprob.dtype)])
+
+        seq_lens.append(seq_len)
+        inputs_ids.append(ids)
+        advantages.append(adv)
+        rewards.append(sample["rewards"])
+        loss_masks.append(loss_mask)
+        logprobs.append(logprob)
+        position_ids.append(torch.arange(0, max_seq_len, dtype=torch.int32))
+
+    return {
+        "input_ids": torch.stack(inputs_ids, dim=0),
+        "advantages": torch.stack(advantages, dim=0),
+        "rewards": torch.tensor(rewards),
+        "loss_mask": torch.stack(loss_masks, dim=0).int(),
+        "logprobs": torch.stack(logprobs, dim=0),
+        "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
+        "position_ids": torch.stack(position_ids, dim=0),
+    }
+
+
+def packed_batch_padding(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
+    """
+    This function will pad the batch to the max_seq_len
+    """
+    assert len(batch_optim) % micro_bs == 0, "batch_optim must be divisible by micro_bs"
+
+    micro_batches = [
+        collate_fn_padding(batch_optim[i : i + micro_bs], max_seq_len, pad_token_id) for i in range(0, len(batch_optim), micro_bs)
+    ]
+
+    return micro_batches
+
+
+###########
+
+PackingMode: TypeAlias = Literal["packing", "padding"]
+
+
+def packed_batch(
+    batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int, packing_mode: PackingMode
+) -> list[BatchOutput]:
+    """
+    Take a list of sample and return a list of microbatches
+    """
+
+    match packing_mode:
+        case "packing":
+            return packed_batch_packing(batch_optim, max_seq_len, pad_token_id, micro_bs)
+        case "padding":
+            return packed_batch_padding(batch_optim, max_seq_len, pad_token_id, micro_bs)
+        case _:
+            raise ValueError("packing_mode should be one of packing or padding")
