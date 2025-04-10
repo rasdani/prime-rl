@@ -212,6 +212,9 @@ class ParquetDataset(IterableDataset):
                 "rewards",
                 "input_logprobs",
                 "output_logprobs",
+                "task_rewards",
+                "length_penalties",
+                "target_lengths",
             ]
 
             scanner = dataset.scanner(columns=required_columns, batch_size=self._pq_read_bs)
