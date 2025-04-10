@@ -31,6 +31,8 @@ class DataConfig(BaseConfig):
 
     local_dir: str = "/dev/shm/zeroband/data"  # only used if path is gcp
 
+    ignore_zero_advantages: bool = False  # don't use in local setup
+
 
 class DatasetOutput(TypedDict):
     input_ids: Int[torch.Tensor, "seq"]
@@ -286,7 +288,7 @@ def no_collate(batch: list[DatasetOutput]) -> list[DatasetOutput]:
 
 
 def get_dataloader(
-    tokenizer, local_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int, ignore_zero_advantages: bool
+    tokenizer, local_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int
 ) -> tuple[DataLoader[list[DatasetOutput]], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
@@ -301,7 +303,7 @@ def get_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, ignore_zero_advantages)
+        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, data_config.ignore_zero_advantages)
 
     loader = DataLoader(
         train_dataset,

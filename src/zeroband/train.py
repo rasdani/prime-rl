@@ -58,7 +58,6 @@ class TrainConfig(BaseConfig):
     memory_profile: str | None = None
     torch_compile: bool = False  #  disabling torch compile because its too unstable for RL
     liger_qwen: bool = False
-    ignore_zero_advantages: bool = False  # don't use in local setup
 
     attn_impl: AttnImpl = "flex_attention"
 
@@ -182,6 +181,8 @@ def train(config: Config):
         shardcast.initialize(origin_data_dir, max_distribution_folders=config.max_async_level)
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
+    assert hasattr(tokenizer, "pad_token_id")
+    assert type(tokenizer.pad_token_id) is int, "Tokenizer must have a pad_token_id"
 
     perf_counter = PerfCounter(window_size=min(10, 2 * config.optim.step_per_rollout), model=model, seq_len=config.data.seq_length)
 
@@ -237,7 +238,6 @@ def train(config: Config):
         batch_size=config.optim.batch_size * config.optim.step_per_rollout,
         data_config=config.data,
         step_count_init=training_progress.step // config.optim.step_per_rollout,
-        ignore_zero_advantages=config.train.ignore_zero_advantages,
     )
     train_dataloader_iterator = iter(train_dataloader)
 

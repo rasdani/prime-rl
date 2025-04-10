@@ -53,11 +53,11 @@ COPY ./README.md ./README.md
 COPY ./src/ ./src/
 
 # Create venv and install dependencies
-RUN uv venv .venv
+RUN uv venv --python 3.10 .venv
 RUN . .venv/bin/activate && uv sync && uv pip install flash-attn --no-build-isolation
 
 # Runtime stage
-FROM python:3.11-slim
+FROM python:3.10-slim
 WORKDIR /root/prime-rl
 
 RUN apt-get update && apt-get install -y --no-install-recommends --force-yes build-essential
