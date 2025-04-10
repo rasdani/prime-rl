@@ -359,7 +359,6 @@ def train(config: Config):
                 metric_averager.update("pg_loss", pg_loss.detach().clone())
                 metric_averager.update("entropy_loss", entropy.detach().clone())
                 metric_averager.update("clip_ratio", clip_ratio.detach().clone())
-                metric_averager.update("clip_ratio_mean", clip_ratio.mean())
 
                 del loss, pg_loss, entropy, clip_ratio
 
