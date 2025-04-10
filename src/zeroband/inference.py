@@ -47,13 +47,22 @@ class SamplingParamConfig(BaseConfig):
 
 
 class LenRewardConfig(BaseConfig):
+    reward_type: Literal["exact", "max", "clip"] = "max"
+    target_length_sampling: Literal["discrete", "range"] = "discrete"
+    length_prompt_location: Literal["system_prompt", "instruction"] = "system_prompt"
+
+    # applicable if target_length_sampling == "range"
     min_length: int = 1000
     max_length: int = 24000
+
+    # applicable if target_length_sampling == "discrete"
+    target_lengths: list[float] = [500, 1000, 2000, 3000]
+
+    # applicable for reward_type max and exact
     reward_coef: float = 0.0003
-    reward_type: Literal["exact", "max", "clip"] = "max"
+
+    # only applicable for reward_type == "max"
     max_reward_delta: float = 0.5
-    len_clip_values: list[float] = [1000, 2000, 3000, 4000]
-    length_prompt_location: Literal["system_prompt", "instruction"] = "system_prompt"
 
 
 class Config(BaseConfig):
@@ -227,26 +236,22 @@ def generate_target_length_prompts(config: Config, batch_size: int):
     if config.len_reward is None:
         return [""] * batch_size, [-1] * batch_size
 
-    if config.len_reward.reward_type == "clip":
+    if config.len_reward.length_target_sampling == "discrete":
         indices = torch.randint(low=0, high=len(config.len_reward.len_clip_values), size=(batch_size,), device="cpu")
         target_lengths = [int(config.len_reward.len_clip_values[i]) for i in indices]
 
-    else:
+    elif config.len_reward.length_target_sampling == "range":
         target_lengths = torch.randint(
             low=config.len_reward.min_length, high=config.len_reward.max_length + 1, size=(batch_size,), device="cpu"
         ).tolist()
 
-    if config.len_reward.length_prompt_location == "system_prompt":
-        if config.len_reward.reward_type == "clip":
-            return [f"Think for maximally {target} tokens before giving a response." for target in target_lengths], target_lengths
-        else:
-            return [f"Think for {target} tokens before giving a response." for target in target_lengths], target_lengths
-
     else:
-        if config.len_reward.reward_type == "clip":
-            return [f"\n\nThink for maximally {target} tokens before giving a response." for target in target_lengths], target_lengths
-        else:
-            return [f"\n\nThink for {target} tokens before giving a response." for target in target_lengths], target_lengths
+        raise ValueError("'length_target_sampling' has to be 'discrete' or 'range'")
+
+    prompt_prefix = " " if config.len_reward.length_prompt_location == "instruction" else " "
+    max_word = " maximally " if config.len_reward.reward_type == "clip" else ""
+
+    return [f"{prompt_prefix}Think for{max_word}{target} tokens before giving a response." for target in target_lengths], target_lengths
 
 
 async def compute_reward_for_output(output, verification_info, len_reward_config):
@@ -257,7 +262,6 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
     total_reward = math_reward
     length_penalty = 0
     if verification_info["target_length"] > 0:
-        # Calculate length reward - this could be a separate function
         output_length = len(output.token_ids)
         target_length = verification_info["target_length"]
 
@@ -278,10 +282,7 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
             length_penalty = int(output_length > target_length)
 
             if length_penalty == 1:
-                if math_reward == 0:
-                    total_reward = -torch.clip(torch.tensor((output_length - target_length) * len_reward_config.reward_coef), 0, 1).item()
-                else:
-                    total_reward = 0
+                total_reward = 0
 
     return dict(total_reward=total_reward, task_reward=math_reward, length_penalty=length_penalty)
 
