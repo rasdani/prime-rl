@@ -13,7 +13,7 @@ import shardcast
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
-from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, PackingMode, get_dataloader, packed_batch, packed_batch_packing
+from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, PackingMode, get_dataloader, packed_batch
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt
@@ -97,7 +97,6 @@ class Config(BaseConfig):
     grpo_epsilon_high: float = 0.2
     entropy_loss_coeff: float = 0.001
 
-    on_policy_log_prob: bool = True
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
     masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
@@ -251,61 +250,54 @@ def train(config: Config):
 
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
-            if config.on_policy_log_prob:
-                data: list[list[BatchOutput]] = []
+            data: list[list[BatchOutput]] = []
 
-                for rollout_step in range(config.optim.step_per_rollout):
-                    batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
+            for rollout_step in range(config.optim.step_per_rollout):
+                batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
 
-                    time_0 = time.time()
+                time_0 = time.time()
 
-                    logger.info(f"batch_rollout: {len(batch_rollout)}m local_batch_size: {local_batch_size}")
-                    batch_packed = packed_batch(
-                        batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.packing_mode
-                    )
-                    num_grad_acc_steps = len(batch_packed)
+                logger.info(f"batch_rollout: {len(batch_rollout)}m local_batch_size: {local_batch_size}")
+                batch_packed = packed_batch(
+                    batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.packing_mode
+                )
+                num_grad_acc_steps = len(batch_packed)
 
-                    time_1 = time.time()
-                    total_time_packing += time_1 - time_0
-                    logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
+                time_1 = time.time()
+                total_time_packing += time_1 - time_0
+                logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
-                    logger.info(
-                        f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}, batch size: {batch_packed[0]['input_ids'].shape}"
-                    )
-                    for grad_acc_step in range(num_grad_acc_steps):
-                        time_data_loading = time.time()
+                logger.info(
+                    f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}, batch size: {batch_packed[0]['input_ids'].shape}"
+                )
+                for grad_acc_step in range(num_grad_acc_steps):
+                    time_data_loading = time.time()
 
-                        batch = batch_packed[grad_acc_step]
+                    batch = batch_packed[grad_acc_step]
 
-                        time_data_loading = time.time() - time_data_loading
-                        total_time_data_loading += time_data_loading
+                    time_data_loading = time.time() - time_data_loading
+                    total_time_data_loading += time_data_loading
 
-                        input_ids = batch["input_ids"].to("cuda")
+                    input_ids = batch["input_ids"].to("cuda")
 
-                        logits: Float[torch.Tensor, "batch seq vocab"] = model(
-                            input_ids=input_ids, position_ids=batch["position_ids"]
-                        ).logits.contiguous()
+                    logits: Float[torch.Tensor, "batch seq vocab"] = model(
+                        input_ids=input_ids, position_ids=batch["position_ids"]
+                    ).logits.contiguous()
 
-                        input_ids = input_ids[:, 1:]
-                        logits = logits[:, :-1, :] / config.temperature
+                    input_ids = input_ids[:, 1:]
+                    logits = logits[:, :-1, :] / config.temperature
 
-                        per_token_logps = selective_log_softmax(logits, input_ids)
-                        batch["logprobs"] = per_token_logps.to("cpu")
+                    per_token_logps = selective_log_softmax(logits, input_ids)
+                    batch["logprobs"] = per_token_logps.to("cpu")
 
-                        del logits, per_token_logps
+                    del logits, per_token_logps
 
-                    data.append(batch_packed)
+                data.append(batch_packed)
 
-                logprobs_aware_iterator = iter(data)
+            logprobs_aware_iterator = iter(data)
 
-                time_logprob = time.time() - time_start
-                logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
-            else:
-                data = []
-                for rollout_step in range(config.optim.step_per_rollout):
-                    batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
-                    data.append(packed_batch_packing(batch_rollout, config.data.seq_length, tokenizer.pad_token_id, 1))
-                logprobs_aware_iterator = iter(data)
+            time_logprob = time.time() - time_start
+            logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
 
         for rollout_step in range(config.optim.step_per_rollout):
             loss_batch = torch.tensor(0.0, device="cuda")
@@ -341,8 +333,6 @@ def train(config: Config):
                 advantages = batch["advantages"].to("cuda")
                 loss_mask = loss_mask.to("cuda")
                 original_logprobs = batch["logprobs"].to("cuda")
-                if not config.on_policy_log_prob:
-                    original_logprobs = original_logprobs[:, 1:]
 
                 # Loss
                 pg_loss, clip_ratio = grpo_loss(
@@ -483,10 +473,9 @@ def train(config: Config):
         logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
         if world_info.rank == 0 and config.wandb:
             new_metrics = {"rollout_step": rollout_step, "step": training_progress.step, "time_rollout_step": time_rollout_step}
-            if config.on_policy_log_prob:
-                new_metrics["time_logprob"] = time_logprob
-                new_metrics["time_data_loading"] = total_time_data_loading
-                new_metrics["time_packing"] = total_time_packing
+            new_metrics["time_logprob"] = time_logprob
+            new_metrics["time_data_loading"] = total_time_data_loading
+            new_metrics["time_packing"] = total_time_packing
             wandb.log(new_metrics)
 
         if training_progress.step >= config.optim.total_steps:
