@@ -300,7 +300,7 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
             if length_penalty == 1:
                 total_reward = 0
 
-    return dict(total_reward=total_reward, task_reward=math_reward, length_penalty=length_penalty, length_difference=length_difference)
+    return dict(total_reward=total_reward, task_reward=task_reward, length_penalty=length_penalty, length_difference=length_difference)
 
 
 async def compute_rewards_async(
