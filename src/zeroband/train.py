@@ -364,6 +364,7 @@ def train(config: Config):
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / num_grad_acc_steps
 
+                inputs_ids_shape = input_ids.shape
                 del batch, logits, input_ids, advantages, loss_mask, original_logprobs
 
                 # Backward
@@ -372,6 +373,7 @@ def train(config: Config):
                 pg_loss_batch += (pg_loss / num_grad_acc_steps).detach().clone()
                 entropy_loss_batch += (entropy / num_grad_acc_steps).detach().clone()
                 clip_ratio_batch += clip_ratio.detach().clone()
+
                 del loss, clip_ratio, pg_loss, entropy
 
             dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG)
@@ -397,7 +399,8 @@ def train(config: Config):
             training_progress.step += 1
             inner_lr = [group["lr"] for group in optimizer.param_groups][0]
 
-            new_tokens = config.data.seq_length * config.optim.batch_size
+            token_per_gpu = inputs_ids_shape[0] * inputs_ids_shape[1] * num_grad_acc_steps
+            new_tokens = world_info.world_size * token_per_gpu
             perf_counter.count_tokens(new_tokens)
             training_progress.total_tokens += new_tokens
 
