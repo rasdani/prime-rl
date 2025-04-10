@@ -1,14 +1,21 @@
 name_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
-project = "qwen_32_rl"
+project = "intellect-2"
 
 [train]
-micro_bs = 32
+micro_bs = 1
 reshard_after_forward = true
+attn_impl = "flash_attention_2"
+
+[data]
+seq_length = 32768
+ignore_zero_advantages = true
 
 [optim]
-batch_size = 1024
-warmup_steps = 1000
-total_steps = 8192
+batch_size = 512
+warmup_steps = 1
+total_steps = 10000000000000000000
+step_per_rollout = 4
+
 
 [optim.optim]
-lr = 7e-4
+lr = 1e-6
