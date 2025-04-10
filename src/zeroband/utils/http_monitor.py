@@ -34,9 +34,6 @@ class HttpMonitor:
         if self.run_id is None:
             raise ValueError("run_id must be set for HttpMonitor")
 
-        self.node_ip_address = None
-        self.node_ip_address_fetch_status = None
-
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
@@ -64,24 +61,10 @@ class HttpMonitor:
         if len(self.data) >= self.log_flush_interval or flush:
             self.loop.run_until_complete(self._send_batch())
 
-    async def _set_node_ip_address(self):
-        if self.node_ip_address is None and self.node_ip_address_fetch_status != "failed":
-            ip_address = await _get_external_ip()
-            if ip_address is None:
-                self._logger.error("Failed to get external IP address")
-                # set this to "failed" so we keep trying again
-                self.node_ip_address_fetch_status = "failed"
-            else:
-                self.node_ip_address = ip_address
-                self.node_ip_address_fetch_status = "success"
-
     async def _send_batch(self):
         self._remove_duplicates()
-        await self._set_node_ip_address()
 
         batch = self.data[: self.log_flush_interval]
-        # set node_ip_address of batch
-        batch = [{**log, "node_ip_address": self.node_ip_address} for log in batch]
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.auth_token}"}
         payload = {"logs": batch}
         api = f"{self.base_url}/metrics/{self.run_id}/logs"
@@ -99,23 +82,11 @@ class HttpMonitor:
         return True
 
     async def _finish(self):
-        import requests
-
         # Send any remaining logs
         while self.data:
             await self._send_batch()
 
-        headers = {"Content-Type": "application/json"}
-        api = f"{self.base_url}/metrics/{self.run_id}/finish"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api, headers=headers) as response:
-                    if response is not None:
-                        response.raise_for_status()
-                    return True
-        except requests.RequestException as e:
-            self._logger.debug(f"Failed to send finish signal to http monitor: {e}")
-            return False
+        return True
 
     def finish(self):
         self.loop.run_until_complete(self._finish())
