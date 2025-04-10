@@ -404,6 +404,8 @@ def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad
 
     bins = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
 
+    get_logger().info(f"num bins: {len(bins)}, batch_optim: {len(batch_optim)}")
+
     micro_batches = [collate_packing(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in bins]
 
     num_grad_acc_steps = len(micro_batches)
