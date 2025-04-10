@@ -429,8 +429,8 @@ def train(config: Config):
                 "pg_loss": pg_loss_batch.item(),
                 "entropy_loss": entropy_loss_batch.item(),
                 "step": training_progress.step,
-                "rollout_step": rollout_step,  # 1
-                "seq_lens": seq_lens_batch.item(),  # 1
+                "rollout_step": rollout_step,
+                "seq_lens": seq_lens_batch.item(),
                 "inner_lr": inner_lr,
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
@@ -439,7 +439,7 @@ def train(config: Config):
                 "average_rewards": average_rewards.item(),
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
-                "sample_reward": sample_reward_batch.item(),  # 1 latest one
+                "sample_reward": sample_reward_batch.item(),
                 "clip_seq_lens": clip_seq_lens.item(),
                 "average_task_rewards": average_task_rewards.item(),
                 "average_length_penalties": average_length_penalties.item(),
