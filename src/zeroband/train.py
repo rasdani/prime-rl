@@ -269,11 +269,10 @@ def train(config: Config):
                     total_time_packing += time_1 - time_0
                     logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
-                    logger.info(f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}")
+                    logger.info(
+                        f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}, batch size: {batch_packed[0]['input_ids'].shape}"
+                    )
                     for grad_acc_step in range(num_grad_acc_steps):
-                        logger.info(
-                            f"policy log prob grad_acc_step: {grad_acc_step} batch: {batch_packed[grad_acc_step]['input_ids'].shape}"
-                        )
                         time_data_loading = time.time()
 
                         batch = batch_packed[grad_acc_step]
