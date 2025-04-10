@@ -30,6 +30,8 @@ class DataConfig(BaseConfig):
 
     local_dir: str = "/dev/shm/zeroband/data"  # only used if path is gcp
 
+    ignore_zero_advantages: bool = False  # don't use in local setup
+
 
 class FakeTokenizedDataset(IterableDataset):
     """A dummy dataset that generates random sequences with the full schema including new columns."""
@@ -410,7 +412,7 @@ class PaddingColate:
 
 
 def get_dataloader(
-    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int, ignore_zero_advantages: bool
+    tokenizer, micro_batch_size: int, batch_size: int, data_config: DataConfig, step_count_init: int
 ) -> tuple[DataLoader[BatchOutput], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
@@ -425,7 +427,7 @@ def get_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, ignore_zero_advantages)
+        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, data_config.ignore_zero_advantages)
 
     collate_fn = PaddingColate(data_config.seq_length, tokenizer.pad_token_id)
     loader = DataLoader(

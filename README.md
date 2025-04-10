@@ -59,6 +59,26 @@ inference
 uv run python src/zeroband/inference.py @ configs/inference/debug.toml
 ```
 
+
+## Debug math run
+
+on two different terminal do:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+uv run python src/zeroband/inference.py @ configs/inference/Qwen1.5B/debug_math.toml
+```
+
+then start the trainer
+
+```bash
+ulimit -n 4096
+export CUDA_VISIBLE_DEVICES=6,7
+uv  run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/Qwen1.5B/debug_math.toml
+```
+
+
 ## 2k seq length run
 
 on two different terminal do:

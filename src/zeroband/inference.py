@@ -24,7 +24,7 @@ from vllm.model_executor.layers.logits_processor import _prune_hidden_states
 
 from zeroband.logger import get_logger
 from zeroband.models import ModelName
-from zeroband.rewards.math import compute_math_reward
+from zeroband.rewards.registry import REWARD_FUNCTIONS
 
 from datasets import load_dataset
 import pyarrow as pa
@@ -65,6 +65,12 @@ class LenRewardConfig(BaseConfig):
     max_reward_delta: float = 0.5
 
 
+class DifficultyFilteringConfig(BaseConfig):
+    solve_rate_field: str = "solve_rate_qwen_r1_distill_7b"
+    min_solve_rate: float = 0.0
+    max_solve_rate: float = 0.5
+
+
 class Config(BaseConfig):
     name_model: ModelName = "150M"
     dataset: str = "justus27/deepscaler-math-genesys-format"
@@ -98,6 +104,7 @@ class Config(BaseConfig):
     toploc: bool = False
 
     len_reward: LenRewardConfig | None = None
+    difficulty_filtering: DifficultyFilteringConfig | None = None
 
 
 def fake_chat_template(messages):
@@ -135,7 +142,7 @@ pa_schema = pa.schema(
 
 @lru_cache(maxsize=1)
 def get_process_executor():
-    return concurrent.futures.ProcessPoolExecutor(max_workers=8)
+    return concurrent.futures.ProcessPoolExecutor(max_workers=32)
 
 
 def get_own_logprobs(sample_logprobs: SampleLogprobs) -> float:
@@ -262,12 +269,12 @@ def generate_target_length_prompts(config: Config, batch_size: int):
     return [f"{prompt_prefix}Think for{max_word}{target} tokens before giving a response." for target in target_lengths], target_lengths
 
 
-async def compute_reward_for_output(output, verification_info, len_reward_config):
+async def compute_reward_for_output(output, verification_info, len_reward_config, task_type):
     loop = asyncio.get_running_loop()
-    # Run compute_math_reward in a separate process via our ProcessPoolExecutor.
-    math_reward = await loop.run_in_executor(get_process_executor(), compute_math_reward, output.text, verification_info)
+    reward_fn = REWARD_FUNCTIONS[task_type]
+    task_reward = await loop.run_in_executor(get_process_executor(), reward_fn, output.text, verification_info)
 
-    total_reward = math_reward
+    total_reward = task_reward
     length_penalty = 0
     if verification_info["target_length"] > 0:
         output_length = len(output.token_ids)
@@ -297,7 +304,11 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
 
 
 async def compute_rewards_async(
-    generated_tokens: list[vllm.RequestOutput], verification_infos: list[str], target_lengths: list[int], config: Config
+    generated_tokens: list[vllm.RequestOutput],
+    verification_infos: list[str],
+    target_lengths: list[int],
+    task_types: list[str],
+    config: Config,
 ) -> tuple[dict[int, torch.FloatTensor], dict[int, torch.FloatTensor], dict[int, torch.FloatTensor]]:
     parsed_infos = [json.loads(ver) for ver in verification_infos]
 
@@ -307,9 +318,9 @@ async def compute_rewards_async(
     tasks = []
     mapping = []
 
-    for req_idx, (request, verification_info) in enumerate(zip(generated_tokens, parsed_infos)):
+    for req_idx, (request, verification_info, task_type) in enumerate(zip(generated_tokens, parsed_infos, task_types)):
         for output in request.outputs:
-            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.len_reward)))
+            tasks.append(asyncio.create_task(compute_reward_for_output(output, verification_info, config.len_reward, task_type)))
             mapping.append(req_idx)
 
     all_results = await asyncio.gather(*tasks)
@@ -378,6 +389,12 @@ def inference(config: Config):
         generator = np.random.default_rng(config.seed + rank) if config.seed is not None else np.random.default_rng()
         dataset = load_dataset(config.dataset, split="train").shuffle(generator=generator)
         node_address_int = None
+
+    if config.difficulty_filtering:
+        dataset = dataset.filter(
+            lambda x: x[config.difficulty_filtering.solve_rate_field] >= config.difficulty_filtering.min_solve_rate
+            and x[config.difficulty_filtering.solve_rate_field] <= config.difficulty_filtering.max_solve_rate
+        )
 
     max_samples = config.max_samples or len(dataset)
 
@@ -495,6 +512,7 @@ def inference(config: Config):
 
         # Assume verification_info is stored as a JSON string in the dataset.
         verification_infos = [item["verification_info"] for item in batch]
+        task_types = [item["task_type"] for item in batch]
 
         if tokenizer.chat_template:
             prompts = tokenizer.apply_chat_template(messages, tokenize=False, continue_final_message=True)
@@ -539,12 +557,17 @@ def inference(config: Config):
         proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
         toploc_cache.reset_cache()
 
+        start_reward_advantages = time.time()
         # Compute rewards asynchronously, grouped as a dictionary.
         grouped_rewards, grouped_task_rewards, grouped_length_penalties, grouped_length_differences = asyncio.run(
             compute_rewards_async(generated_tokens, verification_infos, target_lengths, config)
         )
         # Compute normalized advantages per prompt.
         grouped_advantages = compute_advantages_grpo(grouped_rewards)
+        end_reward_advantages = time.time()
+
+        elapsed_time = end_reward_advantages - start_reward_advantages
+        logger.info(f"Computed rewards and advantages in in {elapsed_time:.2f}s")
 
         table = get_parquet_table(
             generated_tokens,
