@@ -408,8 +408,6 @@ def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id
         advantages.append(torch.zeros(padding_len, dtype=advantages[0].dtype))
         loss_masks.append(torch.zeros(padding_len, dtype=loss_masks[0].dtype).int())
         logprobs.append(torch.zeros(padding_len, dtype=logprobs[0].dtype))
-
-        seq_lens.append(padding_len)
         position_ids.append(torch.arange(0, padding_len, dtype=torch.int32))
 
     return {
