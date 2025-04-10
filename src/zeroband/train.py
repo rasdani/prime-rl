@@ -85,7 +85,6 @@ class Config(BaseConfig):
 
     project: str = "prime_simple"
     wandb: bool = True
-    prime_dashboard: bool = False
 
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
