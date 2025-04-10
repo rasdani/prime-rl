@@ -269,7 +269,9 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
 
         elif len_reward_config.reward_type == "max":
             diff = target_length - output_length
-            length_penalty = torch.clip(len_reward_config.reward_coef * diff + len_reward_config.max_reward_delta, 0, 1)
+            length_penalty = torch.clip(
+                torch.tensor(len_reward_config.reward_coef * diff + len_reward_config.max_reward_delta), 0, 1
+            ).item()
             total_reward *= length_penalty
 
         elif len_reward_config.reward_type == "clip":
@@ -277,7 +279,7 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
 
             if length_penalty == 1:
                 if math_reward == 0:
-                    total_reward = -torch.clip((output_length - target_length) * len_reward_config.reward_coef, 0, 1)
+                    total_reward = -torch.clip(torch.tensor((output_length - target_length) * len_reward_config.reward_coef), 0, 1).item()
                 else:
                     total_reward = 0
 
