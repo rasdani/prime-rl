@@ -26,12 +26,12 @@ class HttpMonitor:
     def __init__(self, log_flush_interval: int = 10):
         self.data = []
         self.log_flush_interval = log_flush_interval
-        self.base_url = envs.PRIME_DASHBOARD_BASE_URL
+        self.base_url = envs.PRIME_API_BASE_URL
         self.auth_token = envs.PRIME_DASHBOARD_AUTH_TOKEN
 
         self._logger = get_logger()
 
-        self.run_id = "prime_run"
+        self.run_id = "b396001defcf4a3d9181b893de80573b"
         if self.run_id is None:
             raise ValueError("run_id must be set for HttpMonitor")
 

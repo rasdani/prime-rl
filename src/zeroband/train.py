@@ -220,7 +220,7 @@ def train(config: Config):
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
-    if envs.PRIME_DASHBOARD_BASE_URL is not None:
+    if envs.PRIME_API_BASE_URL is not None:
         monitor = HttpMonitor()
 
     if config.train.torch_compile:
@@ -472,7 +472,7 @@ def train(config: Config):
             if world_info.rank == 0:
                 if config.wandb:
                     wandb.log(metrics)
-                if envs.PRIME_DASHBOARD_BASE_URL is not None:
+                if envs.PRIME_API_BASE_URL is not None:
                     monitor.log(metrics)
 
             logger.info(log)
@@ -523,7 +523,7 @@ def train(config: Config):
     if prefetcher is not None:
         prefetcher.shutdown()
 
-    if world_info.rank == 0 and envs.PRIME_DASHBOARD_BASE_URL is not None:
+    if world_info.rank == 0 and envs.PRIME_API_BASE_URL is not None:
         monitor.finish()
 
     logger.info("Training finished, exiting ...")
