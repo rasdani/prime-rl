@@ -33,12 +33,18 @@ class DataConfig(BaseConfig):
 
 
 class DatasetOutput(TypedDict):
+    # token level
     input_ids: Int[torch.Tensor, "seq"]
     advantages: Float[torch.Tensor, "seq"]
-    rewards: Float[torch.Tensor, "1"]
     loss_mask: Int[torch.Tensor, "seq"]
     logprobs: Float[torch.Tensor, "seq"]
+
+    # sample level
     seq_lens: Int[torch.Tensor, "1"]
+    rewards: Float[torch.Tensor, "1"]
+    task_rewards: Float[torch.Tensor, "1"]
+    length_penalties: Float[torch.Tensor, "1"]
+    target_lengths: Int[torch.Tensor, "1"]
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -61,12 +67,16 @@ class FakeTokenizedDataset(IterableDataset):
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
             self.step += 1
+
             yield {
                 "input_ids": input_ids,
                 "advantages": advantages,
                 "rewards": 0.5,
                 "loss_mask": torch.ones(len_).int(),
                 "logprobs": torch.randn(len_),
+                "task_rewards": 0.5,
+                "length_penalties": 0.5,
+                "target_lengths": seq_len,
             }
 
 
@@ -209,13 +219,6 @@ class ParquetDataset(IterableDataset):
 
             for j, batch in enumerate(scanner.to_batches()):
                 if all(col in batch.column_names for col in required_columns):
-                    input_tokens = batch["input_tokens"]
-                    output_tokens = batch["output_tokens"]
-                    advantages = batch["advantages"]
-                    rewards = batch["rewards"]
-                    input_logprobs = batch["input_logprobs"]
-                    output_logprobs = batch["output_logprobs"]
-
                     for (
                         in_token,
                         out_token,
@@ -223,13 +226,19 @@ class ParquetDataset(IterableDataset):
                         out_logprob,
                         advantage,
                         reward,
+                        task_reward,
+                        length_penalty,
+                        target_length,
                     ) in zip(
-                        input_tokens,
-                        output_tokens,
-                        input_logprobs,
-                        output_logprobs,
-                        advantages,
-                        rewards,
+                        batch["input_tokens"],
+                        batch["output_tokens"],
+                        batch["input_logprobs"],
+                        batch["output_logprobs"],
+                        batch["advantages"],
+                        batch["rewards"],
+                        batch["task_rewards"],
+                        batch["length_penalties"],
+                        batch["target_lengths"],
                     ):
                         counter += 1
                         if _should_skip_index(
@@ -262,6 +271,9 @@ class ParquetDataset(IterableDataset):
                                 "rewards": reward_value,
                                 "loss_mask": loss_mask,
                                 "logprobs": logprobs,
+                                "task_rewards": task_reward.as_py(),
+                                "length_penalties": length_penalty.as_py(),
+                                "target_lengths": target_length.as_py(),
                             }
 
                         except Exception as e:
@@ -313,13 +325,17 @@ def get_dataloader(
 
 
 class BatchOutput(TypedDict):
+    # token level
     input_ids: Int[torch.Tensor, "batch seq"]
     advantages: Float[torch.Tensor, "batch seq"]
-    rewards: Float[torch.Tensor, "sample"]
     loss_mask: Int[torch.Tensor, "batch seq"]
     logprobs: Float[torch.Tensor, "batch seq"]
-    seq_lens: Int[torch.Tensor, "sample"]
     position_ids: Int[torch.Tensor, "batch seq"]
+
+    # sample level
+    seq_lens: Int[torch.Tensor, "sample"]
+    rewards: Float[torch.Tensor, "sample"]
+    task_rewards: Float[torch.Tensor, "sample"]
 
 
 ### sequence packing
@@ -372,6 +388,9 @@ def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id
     rewards = [sample["rewards"] for sample in samples]
     loss_masks = [sample["loss_mask"] for sample in samples]
     logprobs = [sample["logprobs"] for sample in samples]
+    task_rewards = [sample["task_rewards"] for sample in samples]
+    length_penalties = [sample["length_penalties"] for sample in samples]
+    target_lengths = [sample["target_lengths"] for sample in samples]
 
     seq_lens = [len(sample["input_ids"]) for sample in samples]
     position_ids = [torch.arange(0, len(sample["input_ids"]), dtype=torch.int32) for sample in samples]
@@ -395,6 +414,9 @@ def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id
         "logprobs": torch.cat(logprobs, dim=0)[:max_seq_len].unsqueeze(0),
         "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
         "position_ids": torch.cat(position_ids, dim=0)[:max_seq_len].unsqueeze(0),
+        "task_rewards": torch.tensor(task_rewards),
+        "length_penalties": torch.tensor(length_penalties),
+        "target_lengths": torch.tensor(target_lengths),
     }
 
 
@@ -443,6 +465,9 @@ def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token
     logprobs = []
     seq_lens = []
     position_ids = []
+    task_rewards = []
+    length_penalties = []
+    target_lengths = []
 
     for sample in samples:
         ids = sample["input_ids"]
@@ -468,6 +493,9 @@ def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token
         inputs_ids.append(ids)
         advantages.append(adv)
         rewards.append(sample["rewards"])
+        task_rewards.append(sample["task_rewards"])
+        length_penalties.append(sample["length_penalties"])
+        target_lengths.append(sample["target_lengths"])
         loss_masks.append(loss_mask)
         logprobs.append(logprob)
         position_ids.append(torch.arange(0, max_seq_len, dtype=torch.int32))
@@ -480,6 +508,9 @@ def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token
         "logprobs": torch.stack(logprobs, dim=0),
         "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
         "position_ids": torch.stack(position_ids, dim=0),
+        "task_rewards": torch.tensor(task_rewards),
+        "length_penalties": torch.tensor(length_penalties),
+        "target_lengths": torch.tensor(target_lengths),
     }
 
 
