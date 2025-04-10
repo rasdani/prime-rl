@@ -35,13 +35,10 @@ class DataConfig(BaseConfig):
 class DatasetOutput(TypedDict):
     input_ids: Int[torch.Tensor, "seq"]
     advantages: Float[torch.Tensor, "seq"]
-    rewards: Float[torch.Tensor, "seq"]
+    rewards: Float[torch.Tensor, "1"]
     loss_mask: Int[torch.Tensor, "seq"]
     logprobs: Float[torch.Tensor, "seq"]
-    seq_lens: Int[torch.Tensor, "seq"]
-    length_penalties: Float[torch.Tensor, "seq"]
-    target_lengths: Int[torch.Tensor, "seq"]
-    task_rewards: Float[torch.Tensor, "seq"]
+    seq_lens: Int[torch.Tensor, "1"]
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -63,19 +60,11 @@ class FakeTokenizedDataset(IterableDataset):
             len_ = torch.randint(1, seq_len + 1, (1,)).item()
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
-            rewards = torch.clamp(torch.randn(len_), min=0.0, max=1.0)
-            task_rewards = torch.rand(len_)
-            length_penalties = torch.rand(len_)
-            target_length_value = torch.randint(1, self.seq_len + 1, (1,)).item()
-            target_lengths = torch.tensor(target_length_value, dtype=torch.int32)
             self.step += 1
             yield {
                 "input_ids": input_ids,
                 "advantages": advantages,
-                "rewards": rewards,
-                "task_rewards": task_rewards,
-                "length_penalties": length_penalties,
-                "target_lengths": target_lengths,
+                "rewards": 0.5,
                 "loss_mask": torch.ones(len_).int(),
                 "logprobs": torch.randn(len_),
             }
@@ -211,9 +200,6 @@ class ParquetDataset(IterableDataset):
                 "output_tokens",
                 "advantages",
                 "rewards",
-                "task_rewards",
-                "length_penalties",
-                "target_lengths",
                 "input_logprobs",
                 "output_logprobs",
             ]
@@ -227,9 +213,6 @@ class ParquetDataset(IterableDataset):
                     output_tokens = batch["output_tokens"]
                     advantages = batch["advantages"]
                     rewards = batch["rewards"]
-                    task_rewards = batch["task_rewards"]
-                    length_penalties = batch["length_penalties"]
-                    target_lengths = batch["target_lengths"]
                     input_logprobs = batch["input_logprobs"]
                     output_logprobs = batch["output_logprobs"]
 
@@ -240,9 +223,6 @@ class ParquetDataset(IterableDataset):
                         out_logprob,
                         advantage,
                         reward,
-                        task_rew,
-                        len_pen,
-                        tgt_len,
                     ) in zip(
                         input_tokens,
                         output_tokens,
@@ -250,9 +230,6 @@ class ParquetDataset(IterableDataset):
                         output_logprobs,
                         advantages,
                         rewards,
-                        task_rewards,
-                        length_penalties,
-                        target_lengths,
                     ):
                         counter += 1
                         if _should_skip_index(
@@ -276,26 +253,17 @@ class ParquetDataset(IterableDataset):
 
                             adv_value = advantage.as_py()
                             reward_value = reward.as_py()
-                            task_value = task_rew.as_py()
-                            len_pen_value = len_pen.as_py()
-
-                            tgt_length_val = int(tgt_len.as_py())
 
                             adv = torch.tensor([adv_value] * len(ids))  # advantage
-                            rew = torch.tensor([reward_value] * len(ids))  # reward
-                            t_rew = torch.tensor([task_value] * len(ids))  # task reward
-                            l_pen = torch.tensor([len_pen_value] * len(ids))  # length penalty
 
                             data = {
                                 "input_ids": ids,
                                 "advantages": adv,
-                                "rewards": rew,
-                                "task_rewards": t_rew,
-                                "length_penalties": l_pen,
-                                "target_lengths": tgt_length_val,
+                                "rewards": reward_value,
                                 "loss_mask": loss_mask,
                                 "logprobs": logprobs,
                             }
+
                         except Exception as e:
                             self._logger.warn(f"Error processing row {counter} sample {sample_count}: {str(e)}")
                             data = None
@@ -347,13 +315,10 @@ def get_dataloader(
 class BatchOutput(TypedDict):
     input_ids: Int[torch.Tensor, "batch seq"]
     advantages: Float[torch.Tensor, "batch seq"]
-    rewards: Float[torch.Tensor, "batch seq"]
+    rewards: Float[torch.Tensor, "sample"]
     loss_mask: Int[torch.Tensor, "batch seq"]
     logprobs: Float[torch.Tensor, "batch seq"]
-    seq_lens: Int[torch.Tensor, "batch"]
-    length_penalties: Float[torch.Tensor, "batch seq"]
-    # target_lengths: Int[torch.Tensor, "batch"]
-    task_rewards: Float[torch.Tensor, "batch seq"]
+    seq_lens: Int[torch.Tensor, "sample"]
     position_ids: Int[torch.Tensor, "batch seq"]
 
 
@@ -403,9 +368,6 @@ def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id
     inputs_ids = [sample["input_ids"] for sample in samples]
     advantages = [sample["advantages"] for sample in samples]
     rewards = [sample["rewards"] for sample in samples]
-    task_rewards = [sample["task_rewards"] for sample in samples]
-    length_penalties = [sample["length_penalties"] for sample in samples]
-    target_lens = [sample["target_lengths"] for sample in samples]
     loss_masks = [sample["loss_mask"] for sample in samples]
     logprobs = [sample["logprobs"] for sample in samples]
 
@@ -417,9 +379,6 @@ def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id
 
         inputs_ids.append(torch.full((padding_len,), fill_value=pad_token_id, dtype=inputs_ids[0].dtype))
         advantages.append(torch.zeros(padding_len, dtype=advantages[0].dtype))
-        rewards.append(torch.zeros(padding_len, dtype=rewards[0].dtype))
-        task_rewards.append(torch.zeros(padding_len, dtype=task_rewards[0].dtype))
-        length_penalties.append(torch.zeros(padding_len, dtype=length_penalties[0].dtype))
         loss_masks.append(torch.zeros(padding_len, dtype=loss_masks[0].dtype).int())
         logprobs.append(torch.zeros(padding_len, dtype=logprobs[0].dtype))
 
@@ -429,10 +388,7 @@ def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id
     return {
         "input_ids": torch.cat(inputs_ids, dim=0)[:max_seq_len].unsqueeze(0),
         "advantages": torch.cat(advantages, dim=0)[:max_seq_len].unsqueeze(0),
-        "rewards": torch.cat(rewards, dim=0)[:max_seq_len].unsqueeze(0),
-        "task_rewards": torch.cat(task_rewards, dim=0)[:max_seq_len].unsqueeze(0),
-        "length_penalties": torch.cat(length_penalties, dim=0)[:max_seq_len].unsqueeze(0),
-        "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
+        "rewards": torch.tensor(rewards),
         "loss_mask": torch.cat(loss_masks, dim=0)[:max_seq_len].unsqueeze(0),
         "logprobs": torch.cat(logprobs, dim=0)[:max_seq_len].unsqueeze(0),
         "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),
@@ -479,9 +435,6 @@ def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token
     inputs_ids = []
     advantages = []
     rewards = []
-    task_rewards = []
-    length_penalties = []
-    target_lens = []
     loss_masks = []
     logprobs = []
     seq_lens = []
@@ -493,36 +446,24 @@ def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token
         # seq_len = self._seq_len
 
         adv = sample["advantages"]
-        rew = sample["rewards"]
-        t_rew = sample["task_rewards"]
-        l_pen = sample["length_penalties"]
         loss_mask = sample["loss_mask"]
         logprob = sample["logprobs"]
 
         if len(ids) >= max_seq_len:
             ids = ids[:max_seq_len]
             adv = adv[:max_seq_len]
-            rew = rew[:max_seq_len]
-            t_rew = t_rew[:max_seq_len]
-            l_pen = l_pen[:max_seq_len]
             loss_mask = loss_mask[:max_seq_len]
             logprob = logprob[:max_seq_len]
         else:
             ids = torch.cat([ids, torch.full((max_seq_len - len(ids),), fill_value=pad_token_id, dtype=ids.dtype)])
             adv = torch.cat([adv, torch.zeros(max_seq_len - len(adv), dtype=adv.dtype)])
-            rew = torch.cat([rew, torch.zeros(max_seq_len - len(rew), dtype=rew.dtype)])
-            t_rew = torch.cat([t_rew, torch.zeros(max_seq_len - len(t_rew), dtype=t_rew.dtype)])
-            l_pen = torch.cat([l_pen, torch.zeros(max_seq_len - len(l_pen), dtype=l_pen.dtype)])
             loss_mask = torch.cat([loss_mask, torch.zeros(max_seq_len - len(loss_mask), dtype=loss_mask.dtype)]).int()
             logprob = torch.cat([logprob, torch.zeros(max_seq_len - len(logprob), dtype=logprob.dtype)])
 
         seq_lens.append(seq_len)
         inputs_ids.append(ids)
         advantages.append(adv)
-        rewards.append(rew)
-        task_rewards.append(t_rew)
-        length_penalties.append(l_pen)
-        target_lens.append(sample["target_lengths"])
+        rewards.append(sample["rewards"])
         loss_masks.append(loss_mask)
         logprobs.append(logprob)
         position_ids.append(torch.arange(0, max_seq_len, dtype=torch.int32))
@@ -530,10 +471,7 @@ def collate_fn_padding(samples: list[DatasetOutput], max_seq_len: int, pad_token
     return {
         "input_ids": torch.stack(inputs_ids, dim=0),
         "advantages": torch.stack(advantages, dim=0),
-        "rewards": torch.stack(rewards, dim=0),
-        "task_rewards": torch.stack(task_rewards, dim=0),
-        "length_penalties": torch.stack(length_penalties, dim=0),
-        "target_lengths": torch.tensor(target_lens, dtype=torch.int32),
+        "rewards": torch.tensor(rewards),
         "loss_mask": torch.stack(loss_masks, dim=0).int(),
         "logprobs": torch.stack(logprobs, dim=0),
         "seq_lens": torch.tensor(seq_lens, dtype=torch.int32),

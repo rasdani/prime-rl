@@ -316,18 +316,6 @@ def train(config: Config):
             clip_seq_lens = torch.tensor(0.0)
             sample_reward_batch = torch.tensor(0.0)
 
-            rewards_sum = torch.tensor(0.0)
-            rewards_token_count = torch.tensor(0.0)
-
-            task_rewards_sum = torch.tensor(0.0)
-            task_rewards_token_count = torch.tensor(0.0)
-
-            length_pen_sum = torch.tensor(0.0)
-            length_pen_token_count = torch.tensor(0.0)
-
-            sample_task_reward_batch = torch.tensor(0.0)
-            sample_length_penalty_batch = torch.tensor(0.0)
-
             if config.train.memory_profile and world_info.rank == 0:
                 torch.cuda.memory._record_memory_history()
 
@@ -339,25 +327,7 @@ def train(config: Config):
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
-                rewards_this = batch["rewards"][loss_mask.bool()]
-                rewards_sum += rewards_this.sum()
-                rewards_token_count += rewards_this.numel()
-
-                sample_reward_batch += batch["rewards"][:, 0].sum() / batch["rewards"].shape[0] / num_grad_acc_steps
-
-                task_this = batch["task_rewards"][loss_mask.bool()]
-                task_rewards_sum += task_this.sum()
-                task_rewards_token_count += task_this.numel()
-
-                len_pen_this = batch["length_penalties"][loss_mask.bool()]
-                length_pen_sum += len_pen_this.sum()
-                length_pen_token_count += len_pen_this.numel()
-
-                sample_task_reward_batch += batch["task_rewards"][:, 0].sum() / batch["task_rewards"].shape[0] / num_grad_acc_steps
-
-                sample_length_penalty_batch += (
-                    batch["length_penalties"][:, 0].sum() / batch["length_penalties"].shape[0] / num_grad_acc_steps
-                )
+                sample_reward_batch += batch["rewards"].sum() / len(batch["rewards"]) / num_grad_acc_steps
 
                 seq_lens_batch += batch["seq_lens"].float().mean() / num_grad_acc_steps
                 clip_seq_lens += (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0] / num_grad_acc_steps
@@ -418,24 +388,6 @@ def train(config: Config):
             sample_reward_batch = sample_reward_batch / world_info.world_size
             dist.all_reduce(tensor=sample_reward_batch, op=dist.ReduceOp.SUM)
 
-            dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(rewards_token_count, op=dist.ReduceOp.SUM)
-            average_rewards = rewards_sum / rewards_token_count
-
-            dist.all_reduce(task_rewards_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(task_rewards_token_count, op=dist.ReduceOp.SUM)
-            dist.all_reduce(length_pen_sum, op=dist.ReduceOp.SUM)
-            dist.all_reduce(length_pen_token_count, op=dist.ReduceOp.SUM)
-
-            dist.all_reduce(sample_task_reward_batch, op=dist.ReduceOp.SUM)
-            dist.all_reduce(sample_length_penalty_batch, op=dist.ReduceOp.SUM)
-
-            average_task_rewards = task_rewards_sum / task_rewards_token_count
-            average_length_penalties = length_pen_sum / length_pen_token_count
-
-            sample_task_rewards = sample_task_reward_batch / world_info.world_size
-            sample_length_penalties = sample_length_penalty_batch / world_info.world_size
-
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
 
             optimizer.step()
@@ -463,15 +415,10 @@ def train(config: Config):
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
                 "grad_norm": grad_norm.item(),
-                "average_rewards": average_rewards.item(),
                 "clip_ratio": clip_ratio_batch.item(),
                 "padding_proportion": padding_proportion,
                 "sample_reward": sample_reward_batch.item(),
                 "clip_seq_lens": clip_seq_lens.item(),
-                "average_task_rewards": average_task_rewards.item(),
-                "average_length_penalties": average_length_penalties.item(),
-                "sample_task_rewards": sample_task_rewards.item(),
-                "sample_length_penalties": sample_length_penalties.item(),
             }
 
             log = (
@@ -482,7 +429,7 @@ def train(config: Config):
                 f"sample_reward: {sample_reward_batch.item():.4f}, "
             )
 
-            del loss_batch, average_rewards, grad_norm, pg_loss_batch, entropy_loss_batch
+            del loss_batch, grad_norm, pg_loss_batch, entropy_loss_batch
 
             tokens_per_second = perf_counter.get_tokens_per_second()
             if tokens_per_second is not None:
