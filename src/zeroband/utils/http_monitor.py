@@ -2,6 +2,7 @@ from typing import Any
 import aiohttp
 from zeroband.logger import get_logger
 import asyncio
+from zeroband.training import envs
 
 
 async def _get_external_ip(max_retries=3, retry_delay=5):
@@ -22,15 +23,15 @@ class HttpMonitor:
     Logs the status of nodes, and training progress to an API
     """
 
-    def __init__(self, config, *args, **kwargs):
+    def __init__(self, log_flush_interval: int = 10):
         self.data = []
-        self.log_flush_interval = config["monitor"]["log_flush_interval"]
-        self.base_url = config["monitor"]["base_url"]
-        self.auth_token = config["monitor"]["auth_token"]
+        self.log_flush_interval = log_flush_interval
+        self.base_url = envs.PRIME_DASHBOARD_BASE_URL
+        self.auth_token = envs.PRIME_DASHBOARD_AUTH_TOKEN
 
         self._logger = get_logger()
 
-        self.run_id = config.get("run_id", None)
+        self.run_id = "prime_run"
         if self.run_id is None:
             raise ValueError("run_id must be set for HttpMonitor")
 

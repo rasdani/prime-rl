@@ -11,6 +11,7 @@ import wandb
 import shardcast
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
+from zeroband.training import envs
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
@@ -78,12 +79,6 @@ class CkptConfig(BaseConfig):
         return self
 
 
-class MonitorConfig(BaseConfig):
-    log_flush_interval: int = 10
-    base_url: str | None = None
-    auth_token: str | None = None
-
-
 class Config(BaseConfig):
     name_model: ModelName = "150M"
 
@@ -91,8 +86,7 @@ class Config(BaseConfig):
 
     project: str = "prime_simple"
     wandb: bool = True
-    monitor: MonitorConfig | None = None
-    run_id: str | None = None
+    prime_dashboard: bool = False
 
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
@@ -164,7 +158,6 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
 
 def train(config: Config):
-    monitor = None
     if "ZERO_BAND_DEV" not in os.environ:
         torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
         torch_log.setLevel(logging.CRITICAL)
@@ -227,8 +220,8 @@ def train(config: Config):
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
 
-    if config.monitor is not None:
-        monitor = HttpMonitor(config=config.model_dump(), resume=False)
+    if envs.PRIME_DASHBOARD_BASE_URL is not None:
+        monitor = HttpMonitor()
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
@@ -479,7 +472,7 @@ def train(config: Config):
             if world_info.rank == 0:
                 if config.wandb:
                     wandb.log(metrics)
-                if config.monitor is not None and monitor is not None:
+                if envs.PRIME_DASHBOARD_BASE_URL is not None:
                     monitor.log(metrics)
 
             logger.info(log)
@@ -530,7 +523,7 @@ def train(config: Config):
     if prefetcher is not None:
         prefetcher.shutdown()
 
-    if world_info.rank == 0 and config.monitor is not None:
+    if world_info.rank == 0 and envs.PRIME_DASHBOARD_BASE_URL is not None:
         monitor.finish()
 
     logger.info("Training finished, exiting ...")
