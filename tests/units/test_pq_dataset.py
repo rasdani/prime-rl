@@ -9,6 +9,8 @@ from zeroband.training.data import (
 )
 from torch.utils.data import DataLoader
 
+import torch
+
 
 def test_pq_dataset(fake_rollout_files_dir):
     path = fake_rollout_files_dir(steps=[0, 1, 2, 3], num_files=4, batch_size=8)
@@ -54,6 +56,30 @@ def test_pack_datatset_outputs_efficiently():
     packed_batch = pack_datatset_outputs_efficiently(batch, 64)
 
     assert len(packed_batch) >= 1
+
+
+def test_pack_dataset_2():
+    BS = 16
+    SEQ_LEN = 64
+
+    batch = []
+
+    for i in range(BS):
+        seq_len = SEQ_LEN - 1
+        input_ids = torch.randint(3, 128, (seq_len,))
+        advantages = torch.randn(seq_len)
+        batch.append(
+            {
+                "input_ids": input_ids,
+                "advantages": advantages,
+                "rewards": 0.5,
+                "loss_mask": torch.ones(seq_len).int(),
+                "logprobs": torch.randn(seq_len),
+            }
+        )
+    packed_batch = pack_datatset_outputs_efficiently(batch, max_seq_len=seq_len)
+
+    assert len(packed_batch) == BS
 
 
 def test_pack_bin_packing():
