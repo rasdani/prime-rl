@@ -332,6 +332,8 @@ def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_
     ## we sorted by inputs_ids
 
     batch_with_len = [(len(sample["input_ids"]), sample) for sample in batch_optim]
+
+    get_logger().info(f"all tokens in batch: {sum(len(sample['input_ids']) for sample in batch_optim)}")
     sorted_batch = sorted(batch_with_len, key=lambda x: x[0], reverse=True)
 
     ## we create bins
