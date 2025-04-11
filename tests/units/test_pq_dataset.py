@@ -10,6 +10,7 @@ from zeroband.training.data import (
 from torch.utils.data import DataLoader
 
 import torch
+import random
 
 
 def test_pq_dataset(fake_rollout_files_dir):
@@ -109,24 +110,25 @@ def test_packing_vs_padding():
 
     batch_rollout = []
 
-    for seq_len in [SEQ_LEN, SEQ_LEN // 8]:
-        for i in range(BS // 2):
-            data = {
-                "input_ids": torch.ones(seq_len).int(),
-                "advantages": torch.ones(seq_len),
-                "loss_mask": torch.ones(seq_len).int(),
-                "logprobs": torch.ones(seq_len),
-                "seq_lens": torch.ones(seq_len),
-                "rewards": torch.ones(1),
-                "task_rewards": torch.ones(1),
-                "length_penalties": torch.ones(1),
-                "target_lengths": torch.ones(1),
-            }
+    seq_lens = [random.randint(1, SEQ_LEN) for _ in range(BS)]
+    for i in range(BS):
+        seq_len = seq_lens[i]
+        data = {
+            "input_ids": torch.ones(seq_len).int(),
+            "advantages": torch.ones(seq_len),
+            "loss_mask": torch.ones(seq_len).int(),
+            "logprobs": torch.ones(seq_len),
+            "seq_lens": torch.ones(seq_len),
+            "rewards": torch.ones(1),
+            "task_rewards": torch.ones(1),
+            "length_penalties": torch.ones(1),
+            "target_lengths": torch.ones(1),
+        }
 
-            batch_rollout.append(data)
+        batch_rollout.append(data)
 
-    batch_packed = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, packing_mode="packing", micro_bs=MICRO_BS, pad_token_id=0)
-    batch_padded = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, packing_mode="padding", micro_bs=MICRO_BS, pad_token_id=0)
+    batch_packed = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, sequence_packing=True, micro_bs=MICRO_BS, pad_token_id=0)
+    batch_padded = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, sequence_packing=False, micro_bs=MICRO_BS, pad_token_id=0)
 
     total_rewards_packed = sum(batch["rewards"].sum().item() for batch in batch_packed)
     total_rewards_padded = sum(batch["rewards"].sum().item() for batch in batch_padded)

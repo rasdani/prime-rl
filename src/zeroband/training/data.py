@@ -1,6 +1,6 @@
 from pathlib import Path
 import time
-from typing import Any, Generator, Literal, TypeAlias, TypedDict
+from typing import Any, Generator, TypedDict
 
 from pydantic_config import BaseConfig
 
@@ -496,20 +496,14 @@ def packed_batch_padding(batch_optim: list[DatasetOutput], max_seq_len: int, pad
 
 ###########
 
-PackingMode: TypeAlias = Literal["packing", "padding"]
-
 
 def packed_batch(
-    batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int, packing_mode: PackingMode
+    batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int, sequence_packing: bool
 ) -> list[BatchOutput]:
     """
     Take a list of sample and return a list of microbatches
     """
-
-    match packing_mode:
-        case "packing":
-            return packed_batch_packing(batch_optim, max_seq_len, pad_token_id, micro_bs)
-        case "padding":
-            return packed_batch_padding(batch_optim, max_seq_len, pad_token_id, micro_bs)
-        case _:
-            raise ValueError("packing_mode should be one of packing or padding")
+    if sequence_packing:
+        return packed_batch_packing(batch_optim, max_seq_len, pad_token_id, micro_bs)
+    else:
+        return packed_batch_padding(batch_optim, max_seq_len, pad_token_id, micro_bs)
