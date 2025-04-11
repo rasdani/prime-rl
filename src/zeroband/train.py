@@ -159,7 +159,8 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
 
 def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
-        torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
+        logging.getLogger("transformers.modeling_utils").setLevel(logging.CRITICAL) # Silence dtype and device warnings
+        torch._logging.set_logs(dynamo=logging.CRITICAL)  # type: ignore (silence flex attn error)
         torch_log.setLevel(logging.CRITICAL)
 
     logger = get_logger()
