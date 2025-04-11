@@ -244,8 +244,8 @@ def generate_target_length_prompts(config: Config, batch_size: int):
         return [""] * batch_size, [-1] * batch_size
 
     if config.len_reward.target_length_sampling == "discrete":
-        indices = torch.randint(low=0, high=len(config.len_reward.len_clip_values), size=(batch_size,), device="cpu")
-        target_lengths = [int(config.len_reward.len_clip_values[i]) for i in indices]
+        indices = torch.randint(low=0, high=len(config.len_reward.target_lengths), size=(batch_size,), device="cpu")
+        target_lengths = [int(config.len_reward.target_lengths[i]) for i in indices]
 
     elif config.len_reward.target_length_sampling == "range":
         target_lengths = torch.randint(
