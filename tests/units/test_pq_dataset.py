@@ -5,7 +5,7 @@ from zeroband.training.data import (
     collate_packing,
     FakeTokenizedDataset,
     pack_datatset_outputs_efficiently,
-    collate_fn_padding,
+    packed_batch,
 )
 from torch.utils.data import DataLoader
 
@@ -98,18 +98,51 @@ def test_pack_bin_packing():
     assert micro_batch["input_ids"].shape == (1, 2048)
 
 
-def test_collate_fn_padding():
-    micro_bs = 16
+def test_packing_vs_padding():
+    """
+    Here we test that we don't lose any rewards or data when doing the different packing modes
+    """
+
+    BS = 32
+    MICRO_BS = 4
     SEQ_LEN = 64
 
-    dataset = FakeTokenizedDataset(seq_len=SEQ_LEN, vocab_size=128)
+    batch_rollout = []
 
-    batch = []
+    for seq_len in [SEQ_LEN, SEQ_LEN // 8]:
+        for i in range(BS // 2):
+            data = {
+                "input_ids": torch.ones(seq_len).int(),
+                "advantages": torch.ones(seq_len),
+                "loss_mask": torch.ones(seq_len).int(),
+                "logprobs": torch.ones(seq_len),
+                "seq_lens": torch.ones(seq_len),
+                "rewards": torch.ones(1),
+                "task_rewards": torch.ones(1),
+                "length_penalties": torch.ones(1),
+                "target_lengths": torch.ones(1),
+            }
 
-    for i in range(micro_bs):
-        batch.append(next(iter(dataset)))
+            batch_rollout.append(data)
 
-    batch = collate_fn_padding(batch, SEQ_LEN, 128)
+    batch_packed = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, packing_mode="packing", micro_bs=MICRO_BS, pad_token_id=0)
+    batch_padded = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, packing_mode="padding", micro_bs=MICRO_BS, pad_token_id=0)
 
-    assert batch["input_ids"].shape == (micro_bs, SEQ_LEN)
-    assert batch["position_ids"].shape == (micro_bs, SEQ_LEN)
+    total_rewards_packed = sum(batch["rewards"].sum().item() for batch in batch_packed)
+    total_rewards_padded = sum(batch["rewards"].sum().item() for batch in batch_padded)
+
+    assert total_rewards_packed == total_rewards_padded
+
+    total_input_ids_packed = sum(batch["input_ids"].sum().item() for batch in batch_packed)
+    total_input_ids_padded = sum(batch["input_ids"].sum().item() for batch in batch_padded)
+
+    assert total_input_ids_packed == total_input_ids_padded
+
+    total_padded_tokens_packed = (
+        sum(batch["input_ids"].shape[0] * batch["input_ids"].shape[1] for batch in batch_packed) - total_input_ids_packed
+    )
+    total_padded_tokens_padded = (
+        sum(batch["input_ids"].shape[0] * batch["input_ids"].shape[1] for batch in batch_padded) - total_input_ids_padded
+    )
+
+    assert total_padded_tokens_packed < total_padded_tokens_padded

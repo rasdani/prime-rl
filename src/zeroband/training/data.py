@@ -442,9 +442,11 @@ def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad
 
     ### duplicate batch in case of unbalanced between gpus
 
-    max_grad_acc_step = torch.tensor(num_grad_acc_steps, dtype=torch.int32).to("cuda")
-    dist.all_reduce(max_grad_acc_step, op=dist.ReduceOp.MAX, group=None)
-    max_grad_acc_step = int(max_grad_acc_step.item())
+    max_grad_acc_step = num_grad_acc_steps
+    if dist.is_initialized():
+        max_grad_acc_step = torch.tensor(num_grad_acc_steps, dtype=torch.int32).to("cuda")
+        dist.all_reduce(max_grad_acc_step, op=dist.ReduceOp.MAX, group=None)
+        max_grad_acc_step = int(max_grad_acc_step.item())
 
     empty_batch_count = max_grad_acc_step - num_grad_acc_steps
 
