@@ -11,11 +11,13 @@ from torch.utils.data import IterableDataset, DataLoader
 from jaxtyping import Float, Int
 
 from pyarrow import dataset as ds
+import pyarrow.parquet as pq
 
 from zeroband.logger import get_logger
 from zeroband.training.data_prefetch import GCPPrefetcher
 from zeroband.training.world_info import get_world_info
 from zeroband.training import envs
+from zeroband.schema import pa_schema
 
 
 STABLE_FILE = "stable"
@@ -66,6 +68,16 @@ class FakeTokenizedDataset(IterableDataset):
             }
 
 
+def validate_schema_pa_file(file: Path):
+    """Check if the schema of the parquet file is the same as the schema of the pa_schema"""
+    try:
+        parquet_schema = pq.read_schema(file)
+        return parquet_schema.equals(pa_schema)
+    except Exception as e:
+        print(f"Error reading schema for file {file}: {e}")
+        return False
+
+
 def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, batch_size: int, ignore_zero_advantages: bool) -> ds.Dataset:
     """Get all the files for a given step. Waits until the step is created which is indicated by the stable file."""
     logger = get_logger()
@@ -87,6 +99,10 @@ def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, ba
         rows = 0
         if len(files) > 0:
             try:
+                for file in files:
+                    if not validate_schema_pa_file(file):
+                        raise ValueError(f"Schema of file {file} is not the same as the schema of the pa_schema")
+
                 dataset = ds.dataset(files, format="parquet")
 
                 if ignore_zero_advantages:
