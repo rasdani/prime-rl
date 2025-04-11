@@ -2,4 +2,6 @@ name_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 batch_size = 16
 tp = 8
 max_model_len = 24_000
+
+[sampling]
 n = 16
