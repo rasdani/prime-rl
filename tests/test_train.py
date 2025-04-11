@@ -18,9 +18,9 @@ def _test_torchrun(num_gpus, config, extra_args=[]):
 
 
 @pytest.mark.parametrize("num_gpus", [1, 2])
-@pytest.mark.parametrize("packing_mode", ["packing", "padding"])
-def test_train(num_gpus, packing_mode):
-    _test_torchrun(num_gpus=num_gpus, config="debug.toml", extra_args=["--train.packing_mode", packing_mode])
+@pytest.mark.parametrize("sequence_packing", ["True", "False"])
+def test_train(num_gpus, sequence_packing):
+    _test_torchrun(num_gpus=num_gpus, config="debug.toml", extra_args=["--train.sequence_packing", sequence_packing])
 
 
 def test_train_with_rollout_file(fake_rollout_files_dir):
