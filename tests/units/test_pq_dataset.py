@@ -130,16 +130,21 @@ def test_packing_vs_padding():
 
     batch_packed = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, collate_mode="packing", micro_bs=MICRO_BS, pad_token_id=0)
     batch_padded = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, collate_mode="padding", micro_bs=MICRO_BS, pad_token_id=0)
+    batch_balancing = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, collate_mode="balancing", micro_bs=MICRO_BS, pad_token_id=0)
 
     total_rewards_packed = sum(batch["rewards"].sum().item() for batch in batch_packed)
     total_rewards_padded = sum(batch["rewards"].sum().item() for batch in batch_padded)
+    total_rewards_balancing = sum(batch["rewards"].sum().item() for batch in batch_balancing)
 
-    assert total_rewards_packed == total_rewards_padded
+    assert total_rewards_padded == total_rewards_balancing
+    assert total_rewards_packed == total_rewards_balancing
 
     total_input_ids_packed = sum(batch["input_ids"].sum().item() for batch in batch_packed)
     total_input_ids_padded = sum(batch["input_ids"].sum().item() for batch in batch_padded)
+    total_input_ids_balancing = sum(batch["input_ids"].sum().item() for batch in batch_balancing)
 
     assert total_input_ids_packed == total_input_ids_padded
+    assert total_input_ids_balancing == total_input_ids_padded
 
     total_padded_tokens_packed = (
         sum(batch["input_ids"].shape[0] * batch["input_ids"].shape[1] for batch in batch_packed) - total_input_ids_packed
@@ -147,8 +152,12 @@ def test_packing_vs_padding():
     total_padded_tokens_padded = (
         sum(batch["input_ids"].shape[0] * batch["input_ids"].shape[1] for batch in batch_padded) - total_input_ids_padded
     )
+    total_padded_tokens_balancing = (
+        sum(batch["input_ids"].shape[0] * batch["input_ids"].shape[1] for batch in batch_balancing) - total_input_ids_balancing
+    )
 
     assert total_padded_tokens_packed < total_padded_tokens_padded
+    assert total_padded_tokens_balancing <= total_padded_tokens_padded
 
 
 @pytest.mark.parametrize(

@@ -549,6 +549,24 @@ def pack_datatset_outputs_balancing(
     return batches_and_max_seq_len
 
 
+def packed_batch_balancing(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
+    """
+    this function will take a list of sample and try to balance by seq len the microbatches to avoid too much padding
+    """
+
+    batches_and_max_seq_len = pack_datatset_outputs_balancing(batch_optim, max_seq_len, micro_bs)
+
+    micro_batches = []
+
+    for batch, max_seq_len_batch in batches_and_max_seq_len:
+        seq_len_padding = min(max_seq_len_batch, max_seq_len)
+        collate_batch = collate_fn(batch, seq_len_padding, pad_token_id)
+        micro_batch = merge_batches_padding(collate_batch)
+        micro_batches.append(micro_batch)
+
+    return micro_batches
+
+
 ###########
 
 
