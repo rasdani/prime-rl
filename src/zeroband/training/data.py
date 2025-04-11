@@ -351,45 +351,10 @@ class BatchOutput(TypedDict):
     target_lengths: Int[torch.Tensor, "sample"]
 
 
-### sequence packing
+### colate
 
 
-def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_len: int) -> list[list[DatasetOutput]]:
-    """
-    This function will pack the bins into a single batch in a efficient manner
-    """
-    ## we sorted by inputs_ids
-
-    batch_with_len = [(len(sample["input_ids"]), sample) for sample in batch_optim]
-
-    get_logger().info(f"all tokens in batch: {sum(len(sample['input_ids']) for sample in batch_optim)}")
-    sorted_batch = sorted(batch_with_len, key=lambda x: x[0], reverse=True)
-
-    ## we create bins
-    bins: list[list[DatasetOutput]] = []
-
-    ## we pack the bins
-
-    for seq_len, sample in sorted_batch:
-        # Try to find a bin that can fit this sequence
-        bin_found = False
-        for bin_idx, bin_content in enumerate(bins):
-            # Calculate current bin length
-            bin_len = sum(len(s["input_ids"]) for s in bin_content)
-            # Check if sequence fits in this bin
-            if bin_len + seq_len <= max_seq_len:
-                bins[bin_idx].append(sample)
-                bin_found = True
-                break
-
-        # If no suitable bin found, create a new bin
-        if not bin_found:
-            bins.append([sample])
-
-    return bins
-
-
-def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> BatchOutput:
+def collate_fn(samples: list[DatasetOutput], max_seq_len: int, pad_token_id: int) -> BatchOutput:
     """
     This take a list of samples that should be packed together along the sequence dimension. Will add padding at the end of needed and
     clipped to max_seq_len
@@ -434,17 +399,55 @@ def collate_packing(samples: list[DatasetOutput], max_seq_len: int, pad_token_id
     }
 
 
+### sequence packing
+
+
+def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_len: int) -> list[list[DatasetOutput]]:
+    """
+    This function will pack the batch into a single batch in a efficient manner
+    """
+    ## we sorted by inputs_ids
+
+    batch_with_len = [(len(sample["input_ids"]), sample) for sample in batch_optim]
+
+    get_logger().info(f"all tokens in batch: {sum(len(sample['input_ids']) for sample in batch_optim)}")
+    sorted_batch = sorted(batch_with_len, key=lambda x: x[0], reverse=True)
+
+    ## we create bins
+    batches: list[list[DatasetOutput]] = []
+
+    ## we pack the bins
+
+    for seq_len, sample in sorted_batch:
+        # Try to find a bin that can fit this sequence
+        bin_found = False
+        for bin_idx, bin_content in enumerate(batches):
+            # Calculate current bin length
+            bin_len = sum(len(s["input_ids"]) for s in bin_content)
+            # Check if sequence fits in this bin
+            if bin_len + seq_len <= max_seq_len:
+                batches[bin_idx].append(sample)
+                bin_found = True
+                break
+
+        # If no suitable bin found, create a new bin
+        if not bin_found:
+            batches.append([sample])
+
+    return batches
+
+
 def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
     """
     this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
     """
     max_seq_len = max_seq_len * micro_bs
 
-    bins = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
+    batches = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
 
-    get_logger().info(f"num bins: {len(bins)}, batch_optim: {len(batch_optim)}")
+    get_logger().info(f"num bins: {len(batches)}, batch_optim: {len(batch_optim)}")
 
-    micro_batches = [collate_packing(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in bins]
+    micro_batches = [collate_fn(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in batches]
 
     num_grad_acc_steps = len(micro_batches)
 
@@ -495,11 +498,55 @@ def packed_batch_padding(batch_optim: list[DatasetOutput], max_seq_len: int, pad
     """
     assert len(batch_optim) % micro_bs == 0, "batch_optim must be divisible by micro_bs"
 
-    sample_padded_batch = [collate_packing([sample_batch], max_seq_len, pad_token_id) for sample_batch in batch_optim]
+    sample_padded_batch = [collate_fn([sample_batch], max_seq_len, pad_token_id) for sample_batch in batch_optim]
 
     micro_batches = [merge_batches_padding(sample_padded_batch[i : i + micro_bs]) for i in range(0, len(sample_padded_batch), micro_bs)]
 
     return micro_batches
+
+
+### balancing
+
+
+def pack_datatset_outputs_balancing(
+    batch_optim: list[DatasetOutput], max_seq_len: int, micro_bs: int
+) -> list[tuple[list[DatasetOutput], int]]:
+    """
+    This function will pack by batch of balanced seq lenght and will padd up to the max seq len per batch.
+    Will create differentiely shaped batch per microbatch (and will break any compile step) but will reduce batch size
+    """
+
+    max_token_per_micro_batch = max_seq_len * micro_bs
+
+    batch_with_len = [(len(sample["input_ids"]), sample) for sample in batch_optim]
+    sorted_batch = sorted(batch_with_len, key=lambda x: x[0])
+
+    batches_and_max_seq_len: list[tuple[list[DatasetOutput], int]] = []
+
+    micro_batch = []
+    max_seq_len_current_batch = 0
+
+    for seq_len, sample in sorted_batch:
+        # first we check if we can add this sample to the current batch
+        # to do this we we need to see if the total token with this sample would exceed the max value
+
+        maybe_max_seq_len = max(max_seq_len_current_batch, seq_len)
+
+        if maybe_max_seq_len * (len(micro_batch) + 1) > max_token_per_micro_batch:
+            # in tis case adding the sample would exceed the limit
+            # so we rather cut out the current batch and start a new one
+            batches_and_max_seq_len.append((micro_batch, maybe_max_seq_len))
+            micro_batch = [sample]
+            max_seq_len_current_batch = seq_len
+
+        else:
+            # if we still have room we can add this sample to the current batch
+            max_seq_len_current_batch = maybe_max_seq_len
+            micro_batch.append(sample)
+
+    batches_and_max_seq_len.append((micro_batch, max_seq_len_current_batch))
+
+    return batches_and_max_seq_len
 
 
 ###########

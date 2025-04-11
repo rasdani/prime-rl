@@ -2,10 +2,11 @@ import pytest
 from zeroband.training.data import (
     ParquetDataset,
     _should_skip_index,
-    collate_packing,
+    collate_fn,
     FakeTokenizedDataset,
     pack_datatset_outputs_efficiently,
     packed_batch,
+    pack_datatset_outputs_balancing,
 )
 from torch.utils.data import DataLoader
 
@@ -94,7 +95,7 @@ def test_pack_bin_packing():
     for i in range(bin_size):
         bin.append(next(iter(dataset)))
 
-    micro_batch = collate_packing(bin, 2048, 128)
+    micro_batch = collate_fn(bin, 2048, 128)
 
     assert micro_batch["input_ids"].shape == (1, 2048)
 
@@ -148,3 +149,27 @@ def test_packing_vs_padding():
     )
 
     assert total_padded_tokens_packed < total_padded_tokens_padded
+
+
+@pytest.mark.parametrize(
+    "seq_lens,packed_output",
+    [
+        [[3, 3, 3, 3, 4, 4, 4, 4, 7, 7, 8, 8, 9, 9], [[3, 3, 3, 3], [4, 4, 4, 4], [7, 7], [8, 8], [9], [9]]],
+        [[2, 2, 2, 2, 4, 4, 32], [[2, 2, 2, 2], [4, 4], [32]]],
+        [[1, 1, 1, 1, 2, 2, 2, 2, 4, 32], [[1, 1, 1, 1, 2, 2, 2, 2], [4], [32]]],
+    ],
+)
+def test_pack_datatset_outputs_balancing(seq_lens, packed_output):
+    max_seq_len = 8
+    micro_bs = 2
+
+    # batch_size = 32
+
+    samples = [{"input_ids": torch.arange(seq)} for seq in seq_lens]
+
+    micro_batches = pack_datatset_outputs_balancing(samples, max_seq_len=max_seq_len, micro_bs=micro_bs)
+
+    micro_batches_len = [[len(sample["input_ids"]) for sample in batch[0]] for batch in micro_batches]
+
+    print(micro_batches_len)
+    assert micro_batches_len == packed_output
