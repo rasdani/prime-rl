@@ -5,5 +5,7 @@ rollout_path = "outputs"
 output_path = "data_rollout"
 max_model_len = 2048
 
-
-
+[len_reward]
+reward_type = "exact"
+length_prompt_location = "instruction"
+target_lengths = [500, 1000, 2000, 3000]
