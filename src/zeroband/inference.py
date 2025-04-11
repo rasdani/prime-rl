@@ -47,7 +47,7 @@ class SamplingParamConfig(BaseConfig):
 
 
 class LenRewardConfig(BaseConfig):
-    reward_type: Literal["exact", "auto", "clip"] = "auto"
+    reward_type: Literal["exact", "max", "clip"] = "max"
     target_length_sampling: Literal["discrete", "range"] = "discrete"
     length_prompt_location: Literal["system_prompt", "instruction"] = "system_prompt"
 
@@ -61,7 +61,7 @@ class LenRewardConfig(BaseConfig):
     # applicable for reward_type max and exact
     reward_coef: float = 0.0003
 
-    # only applicable for reward_type == "auto"
+    # only applicable for reward_type == "max"
     max_reward_delta: float = 0.5
 
 
@@ -277,7 +277,7 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
             length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
             total_reward -= length_penalty
 
-        elif len_reward_config.reward_type == "auto":
+        elif len_reward_config.reward_type == "max":
             diff = target_length - output_length
             length_penalty = torch.clip(
                 torch.tensor(len_reward_config.reward_coef * diff + len_reward_config.max_reward_delta), 0, 1
