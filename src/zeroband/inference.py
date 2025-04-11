@@ -47,7 +47,7 @@ class SamplingParamConfig(BaseConfig):
 
 
 class LenRewardConfig(BaseConfig):
-    reward_type: Literal["exact", "max", "clip"] = "max"
+    reward_type: Literal["exact", "auto", "clip"] = "auto"
     target_length_sampling: Literal["discrete", "range"] = "discrete"
     length_prompt_location: Literal["system_prompt", "instruction"] = "system_prompt"
 
@@ -61,7 +61,7 @@ class LenRewardConfig(BaseConfig):
     # applicable for reward_type max and exact
     reward_coef: float = 0.0003
 
-    # only applicable for reward_type == "max"
+    # only applicable for reward_type == "auto"
     max_reward_delta: float = 0.5
 
 
@@ -90,7 +90,7 @@ class Config(BaseConfig):
     async_level: int = 2  # the amount of step for which we can be in advance
 
     # mutli gpu
-    tp: int = 1
+    tp: int | Literal["auto"] = 1
     dp: int = 1
     gpus_ids: list[int] | None = None
     prime_log_freq: int | None = None
@@ -277,7 +277,7 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
             length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
             total_reward -= length_penalty
 
-        elif len_reward_config.reward_type == "max":
+        elif len_reward_config.reward_type == "auto":
             diff = target_length - output_length
             length_penalty = torch.clip(
                 torch.tensor(len_reward_config.reward_coef * diff + len_reward_config.max_reward_delta), 0, 1
@@ -361,6 +361,7 @@ def inference(config: Config):
     tokenizer = llm.get_tokenizer()
     rank = int(os.environ.get("RANK", "0"))
     logger = get_logger(f"INFERENCE {rank}")
+
     sampling_params = SamplingParams(**config.sampling.model_dump())
 
     if os.environ.get("NODE_ADDRESS") is not None:
@@ -610,6 +611,11 @@ def inference_run(config: Config) -> list[mp.Process]:
 
         gpus_ids = config.gpus_ids if config.gpus_ids is not None else list(range(torch.cuda.device_count()))
 
+        if config.tp == "auto":
+            assert len(gpus_ids) % config.dp == 0, "Number of GPUs must be divisible by dp when using tp=auto"
+            config.tp = len(gpus_ids) // config.dp
+            get_logger("PRE-INFERENCE").info(f"AUTO gpu config: now using {config.tp} GPUs for tp")
+
         assert len(gpus_ids) % (config.dp * config.tp) == 0, "Number of GPUs must be divisible by dp * tp"
 
         num_process = len(gpus_ids) // config.tp
@@ -621,6 +627,10 @@ def inference_run(config: Config) -> list[mp.Process]:
         return processes
 
     else:
+        if config.tp == "auto":
+            config.tp = torch.cuda.device_count()
+            get_logger("PRE-INFERENCE").info(f"AUTO gpu config: now using all {config.tp} GPUs for tp")
+
         inference(config)
         return []
 
