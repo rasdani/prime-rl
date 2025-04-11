@@ -1,6 +1,6 @@
 from pathlib import Path
 import time
-from typing import Any, Generator, TypedDict
+from typing import Any, Generator, Literal, TypeAlias, TypedDict
 
 from pydantic_config import BaseConfig
 
@@ -505,13 +505,22 @@ def packed_batch_padding(batch_optim: list[DatasetOutput], max_seq_len: int, pad
 ###########
 
 
+CollateMode: TypeAlias = Literal["packing", "padding", "balancing"]
+
+
 def packed_batch(
-    batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int, sequence_packing: bool
+    batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int, collate_mode: CollateMode
 ) -> list[BatchOutput]:
     """
     Take a list of sample and return a list of microbatches
     """
-    if sequence_packing:
-        return packed_batch_packing(batch_optim, max_seq_len, pad_token_id, micro_bs)
-    else:
-        return packed_batch_padding(batch_optim, max_seq_len, pad_token_id, micro_bs)
+
+    match collate_mode:
+        case "packing":
+            return packed_batch_packing(batch_optim, max_seq_len, pad_token_id, micro_bs)
+        case "padding":
+            return packed_batch_padding(batch_optim, max_seq_len, pad_token_id, micro_bs)
+        case "balancing":
+            return packed_batch_balancing(batch_optim, max_seq_len, pad_token_id, micro_bs)
+        case _:
+            raise ValueError(f"Invalid collate mode: {collate_mode}")

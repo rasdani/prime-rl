@@ -14,7 +14,7 @@ import shardcast
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
 from zeroband.training import envs
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
-from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, get_dataloader, packed_batch
+from zeroband.training.data import BatchOutput, CollateMode, DataConfig, DatasetOutput, get_dataloader, packed_batch
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt, MetricsAverager
@@ -103,7 +103,7 @@ class Config(BaseConfig):
 
     masked_mean_axis: int | None = None  # the axis to compute the mean of the masked values
 
-    sequence_packing: bool = False
+    collate_mode: CollateMode = "padding"
 
     @model_validator(mode="after")
     def check_liger(self):
@@ -263,7 +263,7 @@ def train(config: Config):
 
                 logger.info(f"batch_rollout: {len(batch_rollout)}m local_batch_size: {local_batch_size}")
                 batch_packed = packed_batch(
-                    batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.sequence_packing
+                    batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.collate_mode
                 )
                 num_grad_acc_steps = len(batch_packed)
 

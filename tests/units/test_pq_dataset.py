@@ -127,8 +127,8 @@ def test_packing_vs_padding():
 
         batch_rollout.append(data)
 
-    batch_packed = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, sequence_packing=True, micro_bs=MICRO_BS, pad_token_id=0)
-    batch_padded = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, sequence_packing=False, micro_bs=MICRO_BS, pad_token_id=0)
+    batch_packed = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, collate_mode="packing", micro_bs=MICRO_BS, pad_token_id=0)
+    batch_padded = packed_batch(batch_rollout, max_seq_len=SEQ_LEN, collate_mode="padding", micro_bs=MICRO_BS, pad_token_id=0)
 
     total_rewards_packed = sum(batch["rewards"].sum().item() for batch in batch_packed)
     total_rewards_padded = sum(batch["rewards"].sum().item() for batch in batch_padded)
