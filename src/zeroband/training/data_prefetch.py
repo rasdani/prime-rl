@@ -183,8 +183,10 @@ class _GCPPrefetcherInternal:
 
     def _download_files(self, blob: storage.Blob):
         local_path = self._blob_to_local_path(blob)
+        tmp_path = local_path.with_suffix(".tmp")
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        blob.download_to_filename(str(local_path))
+        blob.download_to_filename(str(tmp_path))
+        tmp_path.rename(local_path)
 
     def filter_to_download(self, blobs: list[storage.Blob]) -> list[storage.Blob]:
         return [f for f in blobs if f.name.endswith(".parquet") and f.name not in self.files_downloaded]
