@@ -259,7 +259,6 @@ def train(config: Config):
 
                     time_0 = time.time()
 
-                    logger.info(f"batch_rollout: {len(batch_rollout)}m local_batch_size: {local_batch_size}")
                     batch_packed = packed_batch(
                         batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.packing_mode
                     )
@@ -267,11 +266,7 @@ def train(config: Config):
 
                     time_1 = time.time()
                     total_time_packing += time_1 - time_0
-                    logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
-                    logger.info(
-                        f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}, batch size: {batch_packed[0]['input_ids'].shape}"
-                    )
                     for grad_acc_step in range(num_grad_acc_steps):
                         time_data_loading = time.time()
 
