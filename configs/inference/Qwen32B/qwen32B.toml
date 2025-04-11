@@ -10,3 +10,8 @@ n = 16
 reward_type = "exact"
 length_prompt_location = "instruction"
 target_lengths = [4000, 8000, 12000, 16000]
+
+[difficulty_filtering]
+solve_rate_field = "solve_rate_qwen_r1_distill_7b"
+min_solve_rate = 0.0
+max_solve_rate = 0.7
