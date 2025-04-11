@@ -21,12 +21,15 @@ def main(servers: list[str], output_dir: Path, versions_to_keep: int = -1, backl
         backlog_version: version to attempt to get first
     """
     client = ClientNode(servers, str(output_dir))
+    logged_versions: set[int] = set()  # Track versions we've logged messages for
 
     while True:
         # 1. Pick the version to download
         available_versions = sorted([int(x[1:]) for x in client.list_available_versions().keys()])
         if not available_versions:
-            logger.warning("No versions available")
+            if -1 not in logged_versions:
+                logger.warning("No versions available")
+                logged_versions.add(-1)
             time.sleep(POLL_INTERVAL)
             continue
         version = available_versions[-1]
@@ -39,11 +42,15 @@ def main(servers: list[str], output_dir: Path, versions_to_keep: int = -1, backl
 
         # 2. Check if the version exists
         if version not in available_versions:
-            logger.warning(f"Version {version} not found")
+            if version not in logged_versions:
+                logger.warning(f"Version {version} not found")
+                logged_versions.add(version)
             time.sleep(POLL_INTERVAL)
             continue
         if safetensors_filepath.exists():
-            logger.info(f"Version {version} already exists")
+            if version not in logged_versions:
+                logger.info(f"Version {version} already exists")
+                logged_versions.add(version)
             time.sleep(POLL_INTERVAL)
             continue
 
