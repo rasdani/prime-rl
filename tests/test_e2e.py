@@ -16,7 +16,7 @@ ERROR_RTOL = {
 }
 
 
-def compute_loss(batch, model):
+def compute_states(batch, model):
     with torch.no_grad():
         with torch.autocast("cuda", dtype=torch.bfloat16):
             temperature = 0.6
@@ -41,10 +41,8 @@ def compute_loss(batch, model):
                 0.2,
                 None,
             )
-            # loss_mask = batch["loss_mask"][:, 1:].to("cuda")
 
-            # return _apply_mask(per_token_logps, loss_mask, None)
-            return pg_loss
+            return {"pg_loss": pg_loss, "clip_ratio": clip_ratio, "batch": batch}
 
 
 def test_e2e():
@@ -57,25 +55,51 @@ def test_e2e():
     # create a fake dataset
     dataset = FakeTokenizedDataset(seq_len=SEQ_LEN, vocab_size=128)
 
-    batch_size = 8
+    pad_token_id = 0
+
+    batch_size = 2
     batch = []
     for i in range(batch_size):
         batch.append(next(iter(dataset)))
 
-    batch_padded = packed_batch(batch, SEQ_LEN, tokenizer.pad_token_id, batch_size, sequence_packing=False)
+    batch_padded = packed_batch(batch, SEQ_LEN, pad_token_id, batch_size, sequence_packing=False)
 
     assert len(batch_padded) == 1
 
-    loss_padded = compute_loss(batch_padded[0], model)
+    states_padded = compute_states(batch_padded[0], model)
 
     print("=========")
-    batch_packed = packed_batch(batch, SEQ_LEN, tokenizer.pad_token_id, batch_size, sequence_packing=True)
+    batch_packed = packed_batch(batch, SEQ_LEN, pad_token_id, batch_size, sequence_packing=True)
     assert len(batch_packed) == 1
 
-    loss_packed = compute_loss(batch_packed[0], model)
+    states_packed = compute_states(batch_packed[0], model)
 
     assert batch_packed[0]["rewards"].sum() == batch_padded[0]["rewards"].sum()
     assert batch_packed[0]["seq_lens"].sum() == batch_padded[0]["seq_lens"].sum()
 
-    print(loss_padded, loss_packed)
-    torch.testing.assert_close(loss_padded, loss_packed)
+    all_rewards_padded = sum([batch_padded[0]["rewards"], batch_packed[0]["rewards"]])
+    all_rewards_packed = states_padded["batch"]["rewards"] + states_packed["batch"]["rewards"]
+
+    torch.testing.assert_close(all_rewards_padded, all_rewards_packed)
+
+    print(f"{states_padded['batch']['input_ids']=}")
+    print(f"{states_packed['batch']['input_ids']=}")
+
+    all_inputs_ids_padded = states_padded["batch"]["input_ids"][states_padded["batch"]["input_ids"] != pad_token_id].sum()
+    all_inputs_ids_packed = states_packed["batch"]["input_ids"][states_packed["batch"]["input_ids"] != pad_token_id].sum()
+
+    torch.testing.assert_close(all_inputs_ids_padded, all_inputs_ids_packed)
+
+    # all_padded_tokens_padded = states_padded["batch"]["input_ids"][states_padded["batch"]["input_ids"] == pad_token_id].sum()
+    # all_padded_tokens_packed = states_packed["batch"]["input_ids"][states_packed["batch"]["input_ids"] == pad_token_id].sum()
+
+    # assert all_padded_tokens_padded > all_padded_tokens_packed
+
+    # all_padded_token_ = torch.cat([batch_padded[0]["input_ids"][batch_padded[0]["input_ids"] != tokenizer.pad_token_id], batch_packed[0]["input_ids"][batch_packed[0]["input_ids"] != tokenizer.pad_token_id]])
+    # all_packed_token_ids = torch.cat([states_padded["batch"]["input_ids"][states_padded["batch"]["input_ids"] != tokenizer.pad_token_id], states_packed["batch"]["input_ids"][states_packed["batch"]["input_ids"] != tokenizer.pad_token_id]])
+
+    # assert
+
+    torch.testing.assert_close(all_inputs_ids_padded, all_inputs_ids_packed)
+
+    torch.testing.assert_close(states_padded["pg_loss"], states_packed["pg_loss"])
