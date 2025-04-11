@@ -11,6 +11,7 @@ import wandb
 import shardcast
 
 from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokenizer
+from zeroband.training import envs
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import DataConfig, get_dataloader
 from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
@@ -29,6 +30,8 @@ from pydantic import model_validator
 from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
 import logging
+
+from zeroband.utils.http_monitor import HttpMonitor
 
 
 class AdamConfig(BaseConfig):
@@ -216,6 +219,9 @@ def train(config: Config):
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
+
+    if envs.PRIME_API_BASE_URL is not None:
+        monitor = HttpMonitor()
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
@@ -463,8 +469,11 @@ def train(config: Config):
 
                 log += f", tokens_per_second: {tokens_per_second:.2f}, tokens_per_second_per_gpu: {tokens_per_second_per_gpu:.2f}, mfu: {metrics['mfu']:.2f}"
 
-            if world_info.rank == 0 and config.wandb:
-                wandb.log(metrics)
+            if world_info.rank == 0:
+                if config.wandb:
+                    wandb.log(metrics)
+                if envs.PRIME_API_BASE_URL is not None:
+                    monitor.log(metrics)
 
             logger.info(log)
 
@@ -513,6 +522,9 @@ def train(config: Config):
 
     if prefetcher is not None:
         prefetcher.shutdown()
+
+    if world_info.rank == 0 and envs.PRIME_API_BASE_URL is not None:
+        monitor.finish()
 
     logger.info("Training finished, exiting ...")
     logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
