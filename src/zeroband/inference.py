@@ -275,7 +275,6 @@ async def compute_reward_for_output(output, verification_info, len_reward_config
         if len_reward_config.reward_type == "exact":
             length_penalty = abs(output_length - target_length)
             length_penalty = length_penalty * len_reward_config.reward_coef  # Scale factor to balance with math reward
-            length_penalty = min(1, length_penalty)
             total_reward -= length_penalty
 
         elif len_reward_config.reward_type == "max":
