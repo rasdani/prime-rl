@@ -565,9 +565,11 @@ def packed_batch_balancing(batch_optim: list[DatasetOutput], max_seq_len: int, p
     micro_batches = []
 
     for batch, max_seq_len_batch in batches_and_max_seq_len:
+        seq_len_padding = min(max_seq_len_batch, max_seq_len)
+
         padded_micro_batch = []
         for sample in batch:
-            collate_sample = collate_fn([sample], max_seq_len_batch, pad_token_id)
+            collate_sample = collate_fn([sample], seq_len_padding, pad_token_id)
             padded_micro_batch.append(collate_sample)
 
         micro_batch = merge_batches_padding(padded_micro_batch)
