@@ -157,7 +157,14 @@ class MetricsAverager:
         self.count = {}
         self.world_info = get_world_info()
 
-    def update(self, key, value: torch.Tensor):
+    def update(self, key, value: torch.Tensor | list[torch.Tensor]):
+        if isinstance(value, torch.Tensor):
+            self._update(key, value)
+        else:
+            for v in value:
+                self._update(key, v)
+
+    def _update(self, key, value: torch.Tensor):
         if key not in self.metrics:
             self.metrics[key] = value
             self.count[key] = 1
