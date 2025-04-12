@@ -2,7 +2,6 @@ name_model = "Qwen/QwQ-32B-Preview"
 batch_size = 16
 tp = "auto"
 max_model_len = 24_000
-dataset = "justus27/rl-code-and-math"
 
 [sampling]
 n = 16
