@@ -153,12 +153,6 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
     if gpus_ids is None:
         return world_info.local_rank
 
-        self.metrics = {}
-        self.count = {}
-        self.world_info = get_world_info()
-        self.rewards = 0
-        self.rewards_count = 0
-
 
 def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
@@ -258,11 +252,14 @@ def train(config: Config):
             data: list[list[BatchOutput]] = []
 
             for rollout_step in range(config.optim.step_per_rollout):
+                time_data_loading = time.time()
+
                 batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
+                time_data_loading = time.time() - time_data_loading
+                total_time_data_loading += time_data_loading
 
                 time_0 = time.time()
 
-                logger.info(f"batch_rollout: {len(batch_rollout)}m local_batch_size: {local_batch_size}")
                 batch_packed = packed_batch(
                     batch_rollout, config.data.seq_length, tokenizer.pad_token_id, config.train.micro_bs, config.collate_mode
                 )
@@ -272,16 +269,8 @@ def train(config: Config):
                 total_time_packing += time_1 - time_0
                 logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
-                logger.info(
-                    f"policy log prob rollout_step: {rollout_step} num_grad_acc_steps: {num_grad_acc_steps}, batch size: {batch_packed[0]['input_ids'].shape}"
-                )
                 for grad_acc_step in range(num_grad_acc_steps):
-                    time_data_loading = time.time()
-
                     batch = batch_packed[grad_acc_step]
-
-                    time_data_loading = time.time() - time_data_loading
-                    total_time_data_loading += time_data_loading
 
                     input_ids = batch["input_ids"].to("cuda")
 
