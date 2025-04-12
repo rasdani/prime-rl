@@ -153,10 +153,11 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
     if gpus_ids is None:
         return world_info.local_rank
 
-    if world_info.local_rank >= len(gpus_ids):
-        raise ValueError(f"Local rank {world_info.local_rank} is greater than the number of available GPUs ({len(gpus_ids)})")
-
-    return gpus_ids[world_info.local_rank]
+        self.metrics = {}
+        self.count = {}
+        self.world_info = get_world_info()
+        self.rewards = 0
+        self.rewards_count = 0
 
 
 def train(config: Config):
@@ -313,6 +314,8 @@ def train(config: Config):
             data_per_rollout = next(logprobs_aware_iterator)
             num_grad_acc_steps = len(data_per_rollout)
 
+            rewards_stats = []
+
             print(f"[rank {world_info.rank}] num_grad_acc_steps: {num_grad_acc_steps}")
             for grad_acc_step in range(num_grad_acc_steps):
                 batch = data_per_rollout[grad_acc_step]
@@ -321,7 +324,10 @@ def train(config: Config):
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
-                metric_averager.update("sample_reward", batch["rewards"].sum() / len(batch["rewards"]))
+                for rewards in batch["rewards"]:
+                    metric_averager.update("sample_reward", rewards)
+                    rewards_stats.append(rewards)
+
                 metric_averager.update("seq_lens", batch["seq_lens"].float().mean())
                 metric_averager.update("clip_seq_lens", (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0])
                 metric_averager.update("task_rewards", batch["task_rewards"].sum() / len(batch["task_rewards"]))
@@ -370,6 +376,17 @@ def train(config: Config):
                 del loss, pg_loss, entropy, clip_ratio
 
             metric_averager.sync()
+
+            rewards_count = torch.tensor(
+                len(rewards_stats),
+            )
+            dist.all_reduce(rewards_count, op=dist.ReduceOp.SUM)
+
+            rewards_sum = torch.tensor(sum(rewards_stats))
+            dist.all_reduce(rewards_sum, op=dist.ReduceOp.SUM)
+
+            sample_rewards_per_gpu = rewards_sum / rewards_count
+
             dist.all_reduce(loss_batch, op=dist.ReduceOp.SUM)
 
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
@@ -407,7 +424,8 @@ def train(config: Config):
                 f"rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
                 f"loss: {loss_batch.item():.4f}, "
                 f"clip_ratio: {metric_averager['clip_ratio'].item():.4f}, "
-                f"sample_reward: {metric_averager['sample_reward'].item():.4f}, "
+                f"sample_reward: {sample_rewards_per_gpu.item():.4f}, "
+                f"old_sample_reward: {metric_averager['sample_reward'].item():.4f}, "
             )
 
             del loss_batch, grad_norm
