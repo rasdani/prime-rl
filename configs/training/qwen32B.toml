@@ -1,4 +1,4 @@
-name_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
+name_model = "Qwen/QwQ-32B-Preview"
 project = "intellect-2"
 
 collate_mode = "packing"
