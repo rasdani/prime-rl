@@ -319,7 +319,6 @@ def train(config: Config):
             print(f"[rank {world_info.rank}] num_grad_acc_steps: {num_grad_acc_steps}")
             for grad_acc_step in range(num_grad_acc_steps):
                 batch = data_per_rollout[grad_acc_step]
-                logger.info(f"grad_acc_step: {grad_acc_step}, batch: {batch['input_ids'].shape}")
 
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
