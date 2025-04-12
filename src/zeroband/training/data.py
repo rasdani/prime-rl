@@ -437,21 +437,12 @@ def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_
     return batches
 
 
-def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
+def data_parallel_rebalancing(micro_batches: list[BatchOutput]) -> list[BatchOutput]:
     """
-    this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
+    This function will duplicate the first micro_batch to match the number of grad acc steps on each gpu
+    Otherwise will block FSDP forward and backward all gather.
     """
-    max_seq_len = max_seq_len * micro_bs
-
-    batches = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
-
-    get_logger().info(f"num bins: {len(batches)}, batch_optim: {len(batch_optim)}")
-
-    micro_batches = [collate_fn(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in batches]
-
     num_grad_acc_steps = len(micro_batches)
-
-    ### duplicate batch in case of unbalanced between gpus
 
     max_grad_acc_step = num_grad_acc_steps
     if dist.is_initialized():
@@ -473,6 +464,21 @@ def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad
         micro_batches.append(empty_batch)
 
     return micro_batches
+
+
+def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad_token_id: int, micro_bs: int) -> list[BatchOutput]:
+    """
+    this function will pack the batch into [1, seq_len] microbatch tensors with positions ids for calling fa2 with sequence packing
+    """
+    max_seq_len = max_seq_len * micro_bs
+
+    batches = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
+
+    get_logger().info(f"num bins: {len(batches)}, batch_optim: {len(batch_optim)}")
+
+    micro_batches = [collate_fn(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in batches]
+
+    return data_parallel_rebalancing(micro_batches)
 
 
 def merge_batches_padding(batches: list[BatchOutput]) -> list[BatchOutput]:
