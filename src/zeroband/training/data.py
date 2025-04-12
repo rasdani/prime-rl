@@ -575,7 +575,7 @@ def packed_batch_balancing(batch_optim: list[DatasetOutput], max_seq_len: int, p
         micro_batch = merge_batches_padding(padded_micro_batch)
         micro_batches.append(micro_batch)
 
-    return micro_batches
+    return data_parallel_rebalancing(micro_batches)
 
 
 ###########
