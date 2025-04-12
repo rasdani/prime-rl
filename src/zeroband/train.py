@@ -15,7 +15,7 @@ from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokeni
 from zeroband.training import envs
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import BatchOutput, DataConfig, DatasetOutput, get_dataloader, packed_batch
-from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
+from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss, remove_bos_tokens, remove_last_logit
 from zeroband.training.lr_scheduler import get_scheduler
 from zeroband.training.utils import PerfCounter, apply_ac_ckpt, MetricsAverager
 
@@ -288,8 +288,8 @@ def train(config: Config):
                         input_ids=input_ids, position_ids=batch["position_ids"]
                     ).logits.contiguous()
 
-                    input_ids = input_ids[:, 1:]
-                    logits = logits[:, :-1, :] / config.temperature
+                    input_ids = remove_bos_tokens(input_ids, position_ids=batch["position_ids"])
+                    logits = remove_last_logit(logits, position_ids=batch["position_ids"]) / config.temperature
 
                     per_token_logps = selective_log_softmax(logits, input_ids)
                     batch["logprobs"] = per_token_logps.to("cpu")
@@ -342,13 +342,19 @@ def train(config: Config):
                     advantages,
                     original_logprobs,
                     loss_mask,
+                    batch["position_ids"],
                     config.temperature,
                     config.grpo_epsilon_low,
                     config.grpo_epsilon_high,
                     config.masked_mean_axis,
                 )
 
-                entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
+                entropy = entropy_loss(logits,
+                    loss_mask,
+                    batch["position_ids"],
+                    config.temperature,
+                    config.masked_mean_axis
+                )
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
                 loss = loss / num_grad_acc_steps

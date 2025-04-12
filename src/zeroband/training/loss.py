@@ -5,6 +5,43 @@ from beartype import beartype as typechecker
 import torch.nn.functional as F
 
 
+def remove_bos_tokens(packed: Tensor, position_ids: Tensor | None) -> Tensor:
+    """
+    Drop the bos tokens from the packed tensor, given the position ids
+    Args:
+        packed: Tensor of shape (batch, seq, ...)
+        position_ids: Tensor of shape (1, seq) or None, implying torch.arange(0, seq).unsqueeze(0) (drop only the first token)
+    """
+    if position_ids is None:
+        return packed[:, 1:, ...]
+    else:
+        position_ids = position_ids.squeeze(0)  # (seq)
+        non_bos_mask = position_ids != 0
+        packed = packed[:, non_bos_mask, ...]
+        return packed
+
+
+def remove_last_logit(packed: Tensor, position_ids: Tensor | None) -> Tensor:
+    """
+    Drop the eos tokens from the packed tensor, given the position ids
+    Args:
+        packed: Tensor of shape (batch, seq, ...)
+        position_ids: Tensor of shape (1, seq) or None, implying torch.arange(0, seq).unsqueeze(0) (drop only the last logit)
+    """
+    if position_ids is None:
+        return packed[:, :-1, ...]
+    else:
+        position_ids = position_ids.squeeze(0)  # (seq)
+
+        # torch.diff returns 1 smaller, so add another position id to mark the eos logit.
+        padded_pos_ids = torch.cat([position_ids, torch.tensor([-1], device=position_ids.device)])
+
+        # Mask off the eos logits for each sequence
+        keep_mask = (torch.diff(padded_pos_ids) >= 0)
+        packed = packed[:, keep_mask, ...]
+        return packed
+
+
 # beartype here just make sure we have the correct shape
 @jaxtyped(typechecker=typechecker)
 def grpo_loss(
@@ -13,6 +50,7 @@ def grpo_loss(
     advantages: Float[Tensor, "batch seq"],
     original_logprobs: Float[Tensor, "batch seq_minus_1"],
     loss_mask: Int[Tensor, "batch seq"],
+    position_ids: Int[Tensor, "batch seq"] | None,
     temperature: float,
     epsilon_low: float,
     epsilon_high: float,
@@ -35,6 +73,7 @@ def grpo_loss(
         advantages=advantages,
         original_logprobs=original_logprobs,
         loss_mask=loss_mask,
+        position_ids=position_ids,
         temperature=temperature,
         epsilon_low=epsilon_low,
         epsilon_high=epsilon_high,
@@ -86,19 +125,20 @@ def _compile_grpo_loss(
     advantages: torch.Tensor,
     original_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
+    position_ids: torch.Tensor | None,
     temperature: float,
     epsilon_low: float,
     epsilon_high: float,
     masked_mean_axis: int | None,
 ) -> tuple[Tensor, Tensor]:
     # we start by dropping the bos token because it does not have a corresponding logit
-    input_ids = input_ids[:, 1:]
-    advantages = advantages[:, 1:]
-    # original_logprobs = original_logprobs[:, 1:] # no need to do it now
-    loss_mask = loss_mask[:, 1:]
+    input_ids = remove_bos_tokens(input_ids, position_ids)
+    advantages = remove_bos_tokens(advantages, position_ids)
+    # original_logprobs = remove_bos_tokens(original_logprobs, position_ids) # no need to do it now
+    loss_mask = remove_bos_tokens(loss_mask, position_ids)
 
     # from the logits we drop the last logits because it corresponds to the next token that will be sample but is not here yet
-    logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token prediction
+    logits = remove_last_logit(logits, position_ids)  # (B, L-1, V), exclude the last logit: it corresponds to the next token prediction
 
     # Divide logits by sampling temperature.
     # See https://huggingface.co/blog/the_n_implementation_details_of_rlhf_with_ppo#policy-training-implementation-details
@@ -120,21 +160,34 @@ def _compile_grpo_loss(
 
 @jaxtyped(typechecker=typechecker)
 def entropy_loss(
-    logits: Float[Tensor, "batch seq vocab"], loss_mask: Int[Tensor, "batch seq"], temperature: float, masked_mean_axis: int | None
+    logits: Float[Tensor, "batch seq vocab"],
+    loss_mask: Int[Tensor, "batch seq"],
+    position_ids: Int[Tensor, "batch seq"] | None,
+    temperature: float,
+    masked_mean_axis: int | None
 ) -> Tensor:
-    return _compile_entropy_loss(logits=logits, loss_mask=loss_mask, temperature=temperature, masked_mean_axis=masked_mean_axis)
+    return _compile_entropy_loss(
+        logits=logits,
+        loss_mask=loss_mask,
+        position_ids=position_ids,
+        temperature=temperature,
+        masked_mean_axis=masked_mean_axis
+    )
 
 
 # @torch.compile
-def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, temperature: float, masked_mean_axis: int | None):
-    logits = logits[:, :-1, :]
+def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, position_ids: torch.Tensor | None, temperature: float, masked_mean_axis: int | None):
+    logits = remove_last_logit(logits, position_ids)
     logits = logits / temperature
 
-    loss_mask = loss_mask[:, 1:]
-    pd = torch.nn.functional.softmax(logits, dim=-1)
-    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
+    loss_mask = remove_bos_tokens(loss_mask, position_ids)
 
-    return _apply_mask(entropy, loss_mask, masked_mean_axis)
+    pd = torch.nn.functional.softmax(logits, dim=-1)
+    sumreduce = torch.sum(pd * logits, dim=-1)
+    entropy = torch.logsumexp(logits, dim=-1) - sumreduce
+
+    masked = _apply_mask(entropy, loss_mask, masked_mean_axis)
+    return masked
 
 
 def _apply_mask(tensor: torch.Tensor, mask: torch.Tensor, masked_mean_axis: int | None) -> torch.Tensor:

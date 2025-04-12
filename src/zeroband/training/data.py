@@ -65,7 +65,7 @@ class FakeTokenizedDataset(IterableDataset):
             # we divide by local world rank to simulate imbalanced in the data
             seq_len = self.seq_len // (1 + world_info.local_rank)
 
-            len_ = torch.randint(1, seq_len + 1, (1,)).item()
+            len_ = int(torch.randint(1, seq_len + 1, (1,)).item())
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
             self.step += 1
@@ -73,12 +73,12 @@ class FakeTokenizedDataset(IterableDataset):
             yield {
                 "input_ids": input_ids,
                 "advantages": advantages,
-                "rewards": 0.5,
+                "rewards": torch.tensor(0.5),
                 "loss_mask": torch.ones(len_).int(),
                 "logprobs": torch.randn(len_),
-                "task_rewards": 0.5,
-                "length_penalties": 0.5,
-                "target_lengths": seq_len,
+                "task_rewards": torch.tensor(0.5),
+                "length_penalties": torch.tensor(0.5),
+                "target_lengths": torch.tensor(seq_len),
             }
 
 
@@ -341,7 +341,7 @@ class BatchOutput(TypedDict):
     advantages: Float[torch.Tensor, "batch seq"]
     loss_mask: Int[torch.Tensor, "batch seq"]
     logprobs: Float[torch.Tensor, "batch seq"]
-    position_ids: Int[torch.Tensor, "batch seq"]
+    position_ids: Int[torch.Tensor, "batch seq"] | None
 
     # sample level
     seq_lens: Int[torch.Tensor, "sample"]
@@ -472,7 +472,7 @@ def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad
     return micro_batches
 
 
-def merge_batches_padding(batches: list[BatchOutput]) -> list[BatchOutput]:
+def merge_batches_padding(batches: list[BatchOutput]) -> BatchOutput:
     return {
         # token level
         "input_ids": torch.cat([b["input_ids"] for b in batches], dim=0),
@@ -480,7 +480,7 @@ def merge_batches_padding(batches: list[BatchOutput]) -> list[BatchOutput]:
         "rewards": torch.cat([b["rewards"] for b in batches], dim=0),
         "loss_mask": torch.cat([b["loss_mask"] for b in batches], dim=0),
         "logprobs": torch.cat([b["logprobs"] for b in batches], dim=0),
-        "position_ids": torch.cat([b["position_ids"] for b in batches], dim=0),
+        "position_ids": None,
         # sample level
         "seq_lens": torch.cat([b["seq_lens"] for b in batches]),
         "task_rewards": torch.cat([b["task_rewards"] for b in batches]),
