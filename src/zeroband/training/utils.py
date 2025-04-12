@@ -11,6 +11,7 @@ from transformers import (
 from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
 import torch.distributed as dist
+from torch.distributed._composable.fsdp import FSDPModule
 
 
 def apply_ac_ckpt(model: ModelType, num: int):
@@ -189,3 +190,19 @@ class MetricsAverager:
 
     def items(self):
         return self.metrics.items()
+
+
+def offload_model_to_cpu(model: ModelType):
+    for param in model.parameters():
+        param.data = param.data.to("cpu")
+
+
+def wake_up_model_from_cpu(model: ModelType):
+    for param in model.parameters():
+        param.data = param.data.to("cuda")
+
+
+def reshard_module(model: torch.nn.Module):
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.reshard()

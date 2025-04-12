@@ -15,9 +15,9 @@ from zeroband.models import AttnImpl, ModelName, ModelType, get_model_and_tokeni
 from zeroband.training import envs
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.data import BatchOutput, CollateMode, DataConfig, DatasetOutput, get_dataloader, packed_batch
-from zeroband.training.loss import grpo_loss, selective_log_softmax, entropy_loss
+from zeroband.training.loss import grpo_loss, kl_penalty, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
-from zeroband.training.utils import PerfCounter, apply_ac_ckpt, MetricsAverager
+from zeroband.training.utils import PerfCounter, apply_ac_ckpt, MetricsAverager, offload_model_to_cpu, reshard_module
 
 from zeroband.logger import get_logger
 
@@ -106,6 +106,8 @@ class Config(BaseConfig):
 
     collate_mode: CollateMode = "padding"
 
+    kl_coef: float | None = None
+
     @model_validator(mode="after")
     def check_liger(self):
         if self.train.liger_qwen:
@@ -154,6 +156,16 @@ def get_device_placement(gpus_ids: list[int] | None, world_info: WorldInfo) -> i
         return world_info.local_rank
 
 
+def get_logprobs(model: ModelType, input_ids: torch.Tensor, position_ids: torch.Tensor, temperature: float) -> torch.Tensor:
+    logits: Float[torch.Tensor, "batch seq vocab"] = model(input_ids=input_ids, position_ids=position_ids).logits.contiguous()
+
+    input_ids_shifted = input_ids[:, 1:]
+    logits_shifted = logits[:, :-1, :] / temperature
+    logprobs = selective_log_softmax(logits_shifted, input_ids_shifted)
+    del logits, logits_shifted
+    return logprobs
+
+
 def train(config: Config):
     if "ZERO_BAND_DEV" not in os.environ:
         torch._logging.set_logs(dynamo=logging.CRITICAL)  # silent flex attn error
@@ -178,6 +190,9 @@ def train(config: Config):
         shardcast.initialize(origin_data_dir, max_distribution_folders=config.max_async_level)
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
+
+    if config.kl_coef is not None:
+        model_reference, _ = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
     perf_counter = PerfCounter(window_size=min(10, 2 * config.optim.step_per_rollout), model=model, seq_len=config.data.seq_length)
 
@@ -221,6 +236,12 @@ def train(config: Config):
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
 
+        if config.kl_coef is not None:
+            model_reference = torch.compile(model_reference) if not TYPE_CHECKING else model_reference
+
+    if config.kl_coef is not None:
+        offload_model_to_cpu(model_reference)
+
     if config.ckpt.resume:
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.resume)
 
@@ -249,6 +270,9 @@ def train(config: Config):
 
         # here we want to pre-compute the logprobs with the model before update
         with torch.no_grad():
+            if config.kl_coef is not None:
+                wake_up_model_from_cpu(model_reference)
+
             data: list[list[BatchOutput]] = []
 
             for rollout_step in range(config.optim.step_per_rollout):
@@ -273,19 +297,20 @@ def train(config: Config):
 
                     input_ids = batch["input_ids"].to("cuda")
 
-                    logits: Float[torch.Tensor, "batch seq vocab"] = model(
-                        input_ids=input_ids, position_ids=batch["position_ids"]
-                    ).logits.contiguous()
+                    per_token_logps = get_logprobs(model, input_ids, batch["position_ids"], config.temperature)
 
-                    input_ids = input_ids[:, 1:]
-                    logits = logits[:, :-1, :] / config.temperature
-
-                    per_token_logps = selective_log_softmax(logits, input_ids)
                     batch["logprobs"] = per_token_logps.to("cpu")
 
-                    del logits, per_token_logps
+                    if config.kl_coef is not None:
+                        per_token_logps_reference = get_logprobs(model_reference, input_ids, batch["position_ids"], config.temperature)
+                        batch["ref_logprobs"] = per_token_logps_reference.to("cpu")
 
                 data.append(batch_packed)
+
+            if config.kl_coef is not None:
+                # if we don't manually reshard the the embed and lm head will conflict with the offloading because they will stay unshard until backward which we never call
+                reshard_module(model_reference)
+                offload_model_to_cpu(model_reference)
 
             logprobs_aware_iterator = iter(data)
 
@@ -343,6 +368,12 @@ def train(config: Config):
                 entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)
 
                 loss = pg_loss - config.entropy_loss_coeff * entropy
+
+                if config.kl_coef is not None:
+                    kl = kl_penalty(original_logprobs, batch["ref_logprobs"].to("cuda"), loss_mask, config.masked_mean_axis)
+                    metric_averager.update("kl", kl)
+                    loss = loss + config.kl_coef * kl
+
                 loss = loss / num_grad_acc_steps
 
                 inputs_ids_shape = input_ids.shape
