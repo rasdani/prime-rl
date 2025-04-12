@@ -17,7 +17,14 @@ from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_
 from zeroband.training.data import BatchOutput, CollateMode, DataConfig, DatasetOutput, get_dataloader, packed_batch
 from zeroband.training.loss import grpo_loss, kl_penalty, selective_log_softmax, entropy_loss
 from zeroband.training.lr_scheduler import get_scheduler
-from zeroband.training.utils import PerfCounter, apply_ac_ckpt, MetricsAverager, offload_model_to_cpu, reshard_module
+from zeroband.training.utils import (
+    PerfCounter,
+    apply_ac_ckpt,
+    MetricsAverager,
+    offload_model_to_cpu,
+    reshard_module,
+    wake_up_model_from_cpu,
+)
 
 from zeroband.logger import get_logger
 
@@ -209,6 +216,8 @@ def train(config: Config):
         apply_ac_ckpt(model, num)
 
     apply_fsdp(model, config.train.reshard_after_forward)
+    if config.kl_coef is not None:
+        apply_fsdp(model_reference, config.train.reshard_after_forward)
 
     optimizer = torch.optim.AdamW(
         params=model.parameters(),
@@ -302,6 +311,8 @@ def train(config: Config):
                     batch["logprobs"] = per_token_logps.to("cpu")
 
                     if config.kl_coef is not None:
+                        logger.info(f"input_ids: {input_ids.device}")
+                        logger.info(f"model_reference device: {model_reference.device}")
                         per_token_logps_reference = get_logprobs(model_reference, input_ids, batch["position_ids"], config.temperature)
                         batch["ref_logprobs"] = per_token_logps_reference.to("cpu")
 

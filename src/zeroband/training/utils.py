@@ -195,11 +195,15 @@ class MetricsAverager:
 def offload_model_to_cpu(model: ModelType):
     for param in model.parameters():
         param.data = param.data.to("cpu")
+    for buffer in model.buffers():
+        buffer.data = buffer.data.to("cpu")
 
 
 def wake_up_model_from_cpu(model: ModelType):
     for param in model.parameters():
         param.data = param.data.to("cuda")
+    for buffer in model.buffers():
+        buffer.data = buffer.data.to("cuda")
 
 
 def reshard_module(model: torch.nn.Module):
