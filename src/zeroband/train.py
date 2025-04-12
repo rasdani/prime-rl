@@ -400,6 +400,7 @@ def train(config: Config):
                 "time": time.time(),
                 "grad_norm": grad_norm.item(),
                 "padding_proportion": padding_proportion,
+                "grad_acc_steps": num_grad_acc_steps,
             }
 
             for key, value in metric_averager.items():
