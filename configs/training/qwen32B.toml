@@ -1,6 +1,8 @@
 name_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 project = "intellect-2"
 
+collate_mode = "packing"
+
 [train]
 micro_bs = 1
 reshard_after_forward = true
