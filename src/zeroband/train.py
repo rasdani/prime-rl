@@ -284,6 +284,7 @@ def train(config: Config):
         with torch.no_grad():
             if config.kl_coef is not None:
                 wake_up_model_from_cpu(model_reference, tensors_offloaded_reference)
+                del tensors_offloaded_reference
 
             data: list[list[BatchOutput]] = []
 
