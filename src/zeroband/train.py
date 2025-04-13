@@ -50,6 +50,7 @@ class OptimConfig(BaseConfig):
     stable_steps: int = 80_000
     total_steps: int = 88_000
     batch_size: int = 512
+    grad_norm_clip: float = 1.0
 
     step_per_rollout: int = 1
 
@@ -364,7 +365,7 @@ def train(config: Config):
 
             dist.all_reduce(loss_batch, op=dist.ReduceOp.SUM)
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.optim.grad_norm_clip).full_tensor()  # type: ignore (is a dtensor)
 
             optimizer.step()
             scheduler.step()
