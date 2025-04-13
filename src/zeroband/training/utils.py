@@ -1,3 +1,4 @@
+from itertools import chain
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
 from zeroband.logger import get_logger
 import socket
@@ -7,6 +8,7 @@ from transformers import (
     LlamaConfig,
     LlamaForCausalLM,
 )
+from torch.distributed.tensor import DTensor
 
 from zeroband.models import ModelType
 from zeroband.training.world_info import get_world_info
@@ -192,18 +194,33 @@ class MetricsAverager:
         return self.metrics.items()
 
 
-def offload_model_to_cpu(model: ModelType):
-    for param in model.parameters():
-        param.data = param.data.to("cpu")
-    for buffer in model.buffers():
-        buffer.data = buffer.data.to("cpu")
+def get_real_tensor(tensor: torch.Tensor | DTensor):
+    if isinstance(tensor, DTensor):
+        return tensor.to_local()
+    return tensor
 
 
-def wake_up_model_from_cpu(model: ModelType):
-    for param in model.parameters():
-        param.data = param.data.to("cuda")
-    for buffer in model.buffers():
-        buffer.data = buffer.data.to("cuda")
+def offload_model_to_cpu(model: ModelType) -> list[tuple[torch.Tensor, int]]:
+    tensors_offloaded = []
+    for param in chain(model.parameters(), model.buffers()):
+        data = get_real_tensor(param.data)
+
+        cpu_data = data.to("cpu")
+        storage_size = data.untyped_storage().size()
+        data.untyped_storage().resize_(1)  # need to shrink direct storage otherwise gpu memory is not properly freed
+
+        tensors_offloaded.append((cpu_data, storage_size))
+    torch.cuda.empty_cache()
+
+    return tensors_offloaded
+
+
+def wake_up_model_from_cpu(model: ModelType, tensors: list[tuple[torch.Tensor, int]]):
+    for param, (cpu_data, storage_size) in zip(chain(model.parameters(), model.buffers()), tensors):
+        data = get_real_tensor(param.data)
+        data.untyped_storage().resize_(storage_size)
+
+        param.data = data.to("cuda")
 
 
 def reshard_module(model: torch.nn.Module):
