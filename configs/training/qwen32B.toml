@@ -7,6 +7,7 @@ collate_mode = "packing"
 micro_bs = 1
 reshard_after_forward = true
 attn_impl = "flash_attention_2"
+ac_ckpt = true
 
 [data]
 seq_length = 32768
