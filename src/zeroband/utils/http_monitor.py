@@ -18,7 +18,7 @@ class HttpMonitor:
 
         self._logger = get_logger()
 
-        self.run_id = "b396001defcf4a3d9181b893de80573b"
+        self.run_id = envs.PRIME_DASHBOARD_AUTH_TOKEN
         if self.run_id is None:
             raise ValueError("run_id must be set for HttpMonitor")
 
