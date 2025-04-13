@@ -198,9 +198,6 @@ def train(config: Config):
 
     model, tokenizer = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
 
-    if config.kl_coef is not None:
-        model_reference, _ = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
-
     perf_counter = PerfCounter(window_size=min(10, 2 * config.optim.step_per_rollout), model=model, seq_len=config.data.seq_length)
 
     if config.train.liger_qwen:
@@ -216,8 +213,9 @@ def train(config: Config):
         apply_ac_ckpt(model, num)
 
     apply_fsdp(model, config.train.reshard_after_forward)
+
     if config.kl_coef is not None:
-        # model_reference = model_reference.to("cuda")
+        model_reference, _ = get_model_and_tokenizer(config.name_model, config.train.attn_impl)
         apply_fsdp(model_reference, config.train.reshard_after_forward)
 
     optimizer = torch.optim.AdamW(
