@@ -313,8 +313,6 @@ def train(config: Config):
                     batch["logprobs"] = per_token_logps.to("cpu")
 
                     if config.kl_coef is not None:
-                        logger.info(f"input_ids: {input_ids.device}")
-                        logger.info(f"model_reference device: {model_reference.device}")
                         per_token_logps_reference = get_logprobs(model_reference, input_ids, batch["position_ids"], config.temperature)
                         batch["ref_logprobs"] = per_token_logps_reference.to("cpu")
 
