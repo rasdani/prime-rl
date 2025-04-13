@@ -1,4 +1,4 @@
-from zeroband.training.loss import grpo_loss, entropy_loss, kl_penalty
+from zeroband.training.loss import grpo_loss, entropy_loss
 import torch
 import pytest
 
@@ -81,12 +81,3 @@ def test_grpo_loss_padding(masked_mean_axis, dtype):
 
     assert torch.allclose(reward_list[0], reward_list[1])
     assert torch.allclose(loss_list[0], loss_list[1])
-
-
-def test_kl_penalty():
-    logprob = torch.randn(10, 9, dtype=torch.float32).cuda()
-    ref_logprob = torch.randn(10, 9, dtype=torch.float32).cuda()
-    loss_mask = torch.ones(10, 10).int().cuda()
-    kl = kl_penalty(logprob, ref_logprob, loss_mask, None)
-    assert kl.shape == ()
-    assert kl.item() is not None

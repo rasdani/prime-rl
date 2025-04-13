@@ -3,8 +3,6 @@ project = "intellect-2"
 
 collate_mode = "packing"
 
-kl_coef = 0.001
-
 [train]
 micro_bs = 1
 reshard_after_forward = true
