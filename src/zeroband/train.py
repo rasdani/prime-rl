@@ -123,7 +123,6 @@ def get_local_batch_size(batch_size: int, micro_bs: int, data_workers: int, worl
     assert batch_size % world_info.world_size == 0
     batch_size = batch_size // world_info.world_size
 
-    print(f"batch_size: {batch_size}, micro_bs: {micro_bs}, data_workers: {data_workers}")
     assert batch_size % micro_bs == 0, str(
         f"The micro batch size ({micro_bs}) must divide the number of samples on each GPU ({batch_size})"
     )
@@ -268,7 +267,6 @@ def train(config: Config):
 
                 time_1 = time.time()
                 total_time_packing += time_1 - time_0
-                logger.info(f"time to pack batch: {time_1 - time_0:.2f} seconds")
 
                 for grad_acc_step in range(num_grad_acc_steps):
                     batch = batch_packed[grad_acc_step]
@@ -304,7 +302,6 @@ def train(config: Config):
             data_per_rollout = next(logprobs_aware_iterator)
             num_grad_acc_steps = len(data_per_rollout)
 
-            print(f"[rank {world_info.rank}] num_grad_acc_steps: {num_grad_acc_steps}")
             for grad_acc_step in range(num_grad_acc_steps):
                 batch = data_per_rollout[grad_acc_step]
 

@@ -426,7 +426,6 @@ def pack_datatset_outputs_efficiently(batch_optim: list[DatasetOutput], max_seq_
 
     batch_with_len = [(len(sample["input_ids"]), sample) for sample in batch_optim]
 
-    get_logger().info(f"all tokens in batch: {sum(len(sample['input_ids']) for sample in batch_optim)}")
     sorted_batch = sorted(batch_with_len, key=lambda x: x[0], reverse=True)
 
     ## we create bins
@@ -489,8 +488,6 @@ def packed_batch_packing(batch_optim: list[DatasetOutput], max_seq_len: int, pad
     max_seq_len = max_seq_len * micro_bs
 
     batches = pack_datatset_outputs_efficiently(batch_optim, max_seq_len=max_seq_len)
-
-    get_logger().info(f"num bins: {len(batches)}, batch_optim: {len(batch_optim)}")
 
     micro_batches = [collate_fn(bin, pad_token_id=pad_token_id, max_seq_len=max_seq_len) for bin in batches]
 
