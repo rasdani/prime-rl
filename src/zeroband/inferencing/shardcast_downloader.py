@@ -98,9 +98,10 @@ def run_main_bg(servers: list[str], output_dir: Path, versions_to_keep: int = -1
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--servers", type=str, nargs="+", required=True)
+    parser.add_argument("--servers", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--versions-to-keep", type=int, default=-1)
     parser.add_argument("--backlog-version", type=int, default=-1)
     args = parser.parse_args()
-    main(args.servers, Path(args.output_dir), args.versions_to_keep, args.backlog_version)
+    servers = args.servers.split(",")
+    main(servers, Path(args.output_dir), args.versions_to_keep, args.backlog_version)
