@@ -137,7 +137,7 @@ def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, ba
             logger.info("raising timeout")
             raise TimeoutError(f"Timeout waiting for step {step_count} to be created")
 
-        if wait_count % 50 == 0:
+        if wait_count % 600 == 0:  # log every 5 minutes
             logger.info(
                 f"[data_worker:{worker_id}] Waiting for {step_path} to have enough samples. len(files): {len(files)}, Current rows: {rows}, target: {batch_size}"
             )

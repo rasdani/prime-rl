@@ -241,6 +241,8 @@ def train(config: Config):
 
     previous_ckpt_rollout = []
 
+    logger.info("Starting training loop")
+
     while True:
         time_start = time.time()
 
