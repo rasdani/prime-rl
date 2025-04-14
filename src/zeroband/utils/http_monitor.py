@@ -53,7 +53,7 @@ class HttpMonitor:
         self._remove_duplicates()
 
         batch = self.data[: self.log_flush_interval]
-        filtered_batch = [{k: d[k] for k in ("step", "seq_lens", "sample_reward")} for d in batch]
+        filtered_batch = [{k: d[k] for k in ("step", "seq_lens", "sample_reward", "total_problems")} for d in batch]
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.auth_token}"}
         payload = {"metrics": filtered_batch, "operation_type": "append"}
         api = f"{self.base_url}/pools/{self.run_id}/metrics"
