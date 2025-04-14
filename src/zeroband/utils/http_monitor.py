@@ -10,7 +10,7 @@ class HttpMonitor:
     Logs the status of nodes, and training progress to an API
     """
 
-    def __init__(self, log_flush_interval: int = 10):
+    def __init__(self, log_flush_interval: int = envs.PRIME_DASHBOARD_METRIC_INTERVAL):
         self.data = []
         self.log_flush_interval = log_flush_interval
         self.base_url = envs.PRIME_API_BASE_URL

@@ -6,12 +6,14 @@ if TYPE_CHECKING:
     PRIME_DASHBOARD_AUTH_TOKEN: str | None = None
     PRIME_API_BASE_URL: str | None = None
     PRIME_RUN_ID: str | None = None
+    PRIME_DASHBOARD_METRIC_INTERVAL: int = 1
 
 _env = {
     "TRAINING_ENABLE_ACCEPTED_CHECK": lambda: os.getenv("TRAINING_ENABLE_ACCEPTED_CHECK", "false").lower() in ["true", "1", "yes", "y"],
     "PRIME_API_BASE_URL": lambda: os.getenv("PRIME_API_BASE_URL"),
     "PRIME_DASHBOARD_AUTH_TOKEN": lambda: os.getenv("PRIME_DASHBOARD_AUTH_TOKEN"),
     "PRIME_RUN_ID": lambda: os.getenv("PRIME_RUN_ID"),
+    "PRIME_DASHBOARD_METRIC_INTERVAL": lambda: int(os.getenv("PRIME_DASHBOARD_METRIC_INTERVAL", "1")),
 }
 
 
