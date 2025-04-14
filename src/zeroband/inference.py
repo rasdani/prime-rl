@@ -231,7 +231,6 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     return llm
 
 
-@lru_cache(maxsize=1)
 def _get_target_lengths(target_lengths: list[float] | DynamicTargetLengthConfig) -> list[float]:
     target
     if isinstance(target_lengths, DynamicTargetLengthConfig):
