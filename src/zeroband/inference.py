@@ -418,7 +418,13 @@ def inference(config: Config):
     for i in range(0, min(len(dataset), max_samples), config.batch_size):
         if config.step_endpoint is not None:
             # We get the step from the endpoint at the start of each batch to know what to work on
-            new_real_step = requests.get(config.step_endpoint).json()
+            try:
+                new_real_step = requests.get(config.step_endpoint).json()
+            except Exception as e:
+                logger.warning(f"Failed to get step from endpoint {config.step_endpoint}: {e}")
+                time.sleep(10)
+                continue
+
             if new_real_step != real_step:
                 real_step = new_real_step
                 current_step_batch_counter = 1
