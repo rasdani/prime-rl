@@ -250,7 +250,6 @@ def _get_target_lengths(target_lengths: list[float] | DynamicTargetLengthConfig)
     else:
         target = target_lengths
 
-    get_logger().info(f"Using target lengths: {target} for device {device_name}")
     return target
 
 
