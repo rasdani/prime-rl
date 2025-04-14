@@ -4,6 +4,6 @@ dp = 6
 rollout_path = "outputs"
 output_path = "data_rollout"
 max_model_len = 2048
-
+dataset = "justus27/deepscaler-math-genesys-format"
 
 
