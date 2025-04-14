@@ -137,6 +137,36 @@ def _compile_entropy_loss(logits: torch.Tensor, loss_mask: torch.Tensor, tempera
     return _apply_mask(entropy, loss_mask, masked_mean_axis)
 
 
+@jaxtyped(typechecker=typechecker)
+def kl_penalty(
+    logprob: Float[Tensor, "batch seq_minus_1"],
+    ref_logprob: Float[Tensor, "batch seq_minus_1"],
+    loss_mask: Int[Tensor, "batch seq"],
+    masked_mean_axis: int | None,
+) -> Float[Tensor, ""]:
+    """Compute KL divergence given logprob and ref_logprob.
+    Copied from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1104
+    https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py#L351
+
+    Args:
+        logprob:
+        ref_logprob:
+
+    Returns:
+
+    """
+
+    # J. Schulman. Approximating kl divergence, 2020.
+    # # URL http://joschu.net/blog/kl-approx.html.
+    loss_mask = loss_mask[:, 1:]
+
+    kl = ref_logprob - logprob
+    ratio = torch.exp(kl)
+    kld = (ratio - kl - 1).contiguous()
+    kl = torch.clamp(kld, min=-10, max=10)
+    return _apply_mask(kl, loss_mask, masked_mean_axis)
+
+
 def _apply_mask(tensor: torch.Tensor, mask: torch.Tensor, masked_mean_axis: int | None) -> torch.Tensor:
     # First sum over sequence dimension (dim=1), then mean over batch (dim=0)
     if masked_mean_axis is None:
