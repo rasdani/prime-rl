@@ -382,8 +382,9 @@ def train(config: Config):
 
                 if config.kl_coef is not None:
                     kl = kl_penalty(original_logprobs, batch["ref_logprobs"].to("cuda"), loss_mask, config.masked_mean_axis)
-                    metric_averager.update("kl", kl)
-                    loss = loss + config.kl_coef * kl
+                    kl_scaled = kl * config.kl_coef
+                    metric_averager.update("kl", kl_scaled)
+                    loss = loss + kl_scaled
 
                 loss = loss / num_grad_acc_steps
 
