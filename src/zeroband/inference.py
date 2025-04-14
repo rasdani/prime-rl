@@ -232,7 +232,6 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
 
 
 def _get_target_lengths(target_lengths: list[float] | DynamicTargetLengthConfig) -> list[float]:
-    target
     if isinstance(target_lengths, DynamicTargetLengthConfig):
         device_name = torch.cuda.get_device_name(torch.device("cuda"))
         if torch.cuda.is_available():
