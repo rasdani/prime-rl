@@ -160,6 +160,7 @@ class MetricsAverager:
         self.count = {}
         self.world_info = get_world_info()
 
+    @torch.no_grad()
     def update(self, key, value: torch.Tensor | list[torch.Tensor]):
         if isinstance(value, torch.Tensor):
             self._update(key, value)
@@ -175,6 +176,7 @@ class MetricsAverager:
             self.metrics[key] += value
             self.count[key] += 1
 
+    @torch.no_grad()
     def sync(self):
         for key in self.metrics:
             value = self.metrics[key] / self.count[key]
