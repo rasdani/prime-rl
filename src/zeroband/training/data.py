@@ -15,13 +15,10 @@ from pyarrow import dataset as ds
 import pyarrow.parquet as pq
 
 from zeroband.logger import get_logger
-from zeroband.training.data_prefetch import GCPPrefetcher
+from zeroband.training.data_prefetch import GCPPrefetcher, STABLE_FILE
 from zeroband.training.world_info import get_world_info
 from zeroband.training import envs
 from zeroband.schema import pa_schema
-
-
-STABLE_FILE = "stable"
 
 
 class DataConfig(BaseConfig):
@@ -94,7 +91,9 @@ def validate_schema_pa_file(file: Path):
         return False
 
 
-def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, batch_size: int, ignore_zero_advantages: bool) -> ds.Dataset:
+def _get_dataset_from_files_step(
+    step_count: int, path: Path, timeout: float, batch_size: int, ignore_zero_advantages: bool, use_stable_file: bool
+) -> ds.Dataset:
     """Get all the files for a given step. Waits until the step is created which is indicated by the stable file."""
     logger = get_logger()
     step_path = path / f"step_{step_count}"
@@ -113,6 +112,7 @@ def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, ba
             files = [i for i in files if i.stem in accepted_flags]
 
         rows = 0
+
         if len(files) > 0:
             try:
                 for file in files:
@@ -131,7 +131,14 @@ def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, ba
 
             if rows >= batch_size:
                 logger.info(f"Dataset for step {step_count} has enough samples. rows: {rows} and {len(files)} files")
-                return dataset
+
+                if use_stable_file:
+                    stable_file = step_path / STABLE_FILE
+                    if stable_file.exists():
+                        logger.info(f"Stable file {stable_file} exists for step {step_count}, returning dataset")
+                        return dataset
+                else:
+                    return dataset
 
         if time.time() - start_time > timeout:
             logger.info("raising timeout")
@@ -141,6 +148,10 @@ def _get_dataset_from_files_step(step_count: int, path: Path, timeout: float, ba
             logger.info(
                 f"[data_worker:{worker_id}] Waiting for {step_path} to have enough samples. len(files): {len(files)}, Current rows: {rows}, target: {batch_size}"
             )
+            if use_stable_file:
+                stable_file = step_path / STABLE_FILE
+                if not stable_file.exists():
+                    logger.info(f"Stable file {stable_file} does not exist for step {step_count}, waiting for it to be created")
 
         wait_count += 1
         time.sleep(0.5)
@@ -184,7 +195,14 @@ class ParquetDataset(IterableDataset):
     """
 
     def __init__(
-        self, path: Path, batch_size: int, timeout: float, step_count_init: int, ignore_zero_advantages: bool, pq_read_bs: int = 64
+        self,
+        path: Path,
+        batch_size: int,
+        timeout: float,
+        step_count_init: int,
+        ignore_zero_advantages: bool,
+        pq_read_bs: int = 64,
+        use_stable_file: bool = False,
     ):
         self._logger = get_logger()
         self._path = path
@@ -197,6 +215,8 @@ class ParquetDataset(IterableDataset):
         self._timeout = timeout
 
         self._ignore_zero_advantages = ignore_zero_advantages
+
+        self._use_stable_file = use_stable_file
 
     def __iter__(self) -> Generator[DatasetOutput, Any, None]:
         worker_info = torch.utils.data.get_worker_info()
@@ -220,7 +240,7 @@ class ParquetDataset(IterableDataset):
             self._logger.debug(msg=f"data: Processing step {self._step_count}")
 
             dataset = _get_dataset_from_files_step(
-                self._step_count, self._path, self._timeout, self._batch_size, self._ignore_zero_advantages
+                self._step_count, self._path, self._timeout, self._batch_size, self._ignore_zero_advantages, self._use_stable_file
             )
 
             required_columns = [
@@ -332,7 +352,9 @@ def get_dataloader(
     prefetcher = None
     path = data_config.path
 
+    use_stable_file = False
     if "gs" in data_config.path:
+        use_stable_file = True
         if get_world_info().rank == 0:
             prefetcher = GCPPrefetcher(data_config.path, data_config.local_dir)
         path = data_config.local_dir
@@ -340,7 +362,14 @@ def get_dataloader(
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
-        train_dataset = ParquetDataset(Path(path), batch_size, data_config.timeout, step_count_init, data_config.ignore_zero_advantages)
+        train_dataset = ParquetDataset(
+            Path(path),
+            batch_size,
+            data_config.timeout,
+            step_count_init,
+            data_config.ignore_zero_advantages,
+            use_stable_file=use_stable_file,
+        )
 
     loader = DataLoader(
         train_dataset,

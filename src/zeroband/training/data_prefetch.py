@@ -7,6 +7,9 @@ from zeroband.logger import get_logger
 import multiprocessing as mp
 
 
+STABLE_FILE = "stable"
+
+
 class GCPPrefetcher:
     """
     This class is in charge of downloading the parquet files from GCS to a local directory (in shared memory).
@@ -79,6 +82,7 @@ class _GCPPrefetcherInternal:
             for step_number in step_to_download:
                 files = self.filter_to_download(steps_blobs[step_number])
                 threads = []
+
                 for file in files:
                     thread = threading.Thread(target=self._download_files, args=(file,))
                     thread.start()
@@ -89,22 +93,21 @@ class _GCPPrefetcherInternal:
                 for thread in threads:
                     thread.join()
 
-                for file in files:
-                    tmp_path = self._blob_to_local_path_tmp(file)
-                    tmp_path.rename(self._blob_to_local_path(file))
+                stable_file = self._get_stable_file(self.files_downloaded[0])
+                stable_file.touch()
+
+    def _get_stable_file(self, blob: storage.Blob) -> Path:
+        parts = Path(blob.name).parts
+        src_part_len = len(self.src_folder.parts)
+        return self.local_dir / Path(*parts[src_part_len:-1]) / "stable"
 
     def _blob_to_local_path(self, blob: storage.Blob) -> Path:
         parts = Path(blob.name).parts
         src_part_len = len(self.src_folder.parts)
         return self.local_dir / Path(*parts[src_part_len:])
 
-    def _blob_to_local_path_tmp(self, blob: storage.Blob) -> Path:
-        local_path = self._blob_to_local_path(blob)
-        tmp_path = local_path.with_suffix(suffix=".tmp")
-        return tmp_path
-
     def _download_files(self, blob: storage.Blob):
-        tmp_path = self._blob_to_local_path_tmp(blob)
+        tmp_path = self._blob_to_local_path(blob)
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         blob.download_to_filename(str(tmp_path))
 
