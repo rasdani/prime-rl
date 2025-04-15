@@ -333,7 +333,7 @@ def get_dataloader(
     path = data_config.path
 
     if "gs" in data_config.path:
-        if get_world_info().local_rank == 0:
+        if get_world_info().rank == 0:
             prefetcher = GCPPrefetcher(data_config.path, data_config.local_dir)
         path = data_config.local_dir
 
