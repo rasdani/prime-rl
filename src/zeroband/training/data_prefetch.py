@@ -1,80 +1,10 @@
-import queue
 from collections import defaultdict
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 import threading
-from typing import Callable
 from google.cloud import storage
 
 from zeroband.logger import get_logger
 import multiprocessing as mp
-
-
-class PrioritizedJob:
-    """
-    just a wrapper to make the priority queue work
-    """
-
-    def __init__(self, priority: int, job: Callable, args: tuple = tuple(), kwargs: dict = dict()):
-        self.priority = priority
-        self.job = job
-        self.args = args
-        self.kwargs = kwargs
-
-    def __lt__(self, other):
-        return self.priority < other.priority
-
-    def __eq__(self, other):
-        return self.priority == other.priority
-
-    def execute(self):
-        self.job(*self.args, **self.kwargs)
-
-
-class PriorityThreadPool:
-    """
-
-    this class is allow to treat job asynchroneously with a priority.
-
-    Under the hood it used a thread pool and a priority queue to treat the job.
-    """
-
-    def __init__(self, max_workers):
-        self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
-        self.priority_queue = queue.PriorityQueue()
-
-        self.worker_thread = threading.Thread(target=self._worker_loop)
-        self.worker_thread.daemon = True  # allow to avoid blocking the main thread when shutting down
-
-        self.running_tag = False
-
-        self.start()
-
-    def start(self):
-        self.running_tag = True
-        self.worker_thread.start()
-
-    def stop(self):
-        self.running_tag = False
-        self.worker_thread.join()
-
-    def _worker_loop(self):
-        while self.running_tag:
-            try:
-                prioritized_job = self.priority_queue.get()
-                self.thread_pool.submit(prioritized_job.execute)
-            except queue.Empty:
-                continue
-
-    def submit(self, func, *args, priority: int = 0, **kwargs):
-        self.priority_queue.put(PrioritizedJob(priority, func, args, kwargs))
-
-    def shutdown(self, wait=True):
-        self.running_tag = False
-        if wait:
-            self.worker_thread.join()
-        else:
-            self.worker_thread.join(timeout=1)
 
 
 class GCPPrefetcher:
@@ -130,9 +60,6 @@ class _GCPPrefetcherInternal:
         self.client = storage.Client()
         self.bucket = self.client.bucket(self.bucket_name)
 
-        self.thread_pool_download = PriorityThreadPool(max_workers=max_workers)
-        self.thread_pool_delete = PriorityThreadPool(max_workers=max_workers)
-
         self.buffer_steps = []
 
         self.files_downloaded = []
@@ -151,42 +78,35 @@ class _GCPPrefetcherInternal:
 
             for step_number in step_to_download:
                 files = self.filter_to_download(steps_blobs[step_number])
+                threads = []
                 for file in files:
-                    self.thread_pool_download.submit(self._download_files, file, priority=step_number)
+                    thread = threading.Thread(target=self._download_files, args=(file,))
+                    thread.start()
+                    threads.append(thread)
                     # we want to download the file from the oldest step first
                     self.files_downloaded.append(file.name)
 
-            # TODO bring back deleting logic
-            # the issue is that right now there is no way to know if the file is still in use during training
-            # technically this should be not a problem with a large enough buffer
-            # but for testing removing the delete logic is easier
-            # its not trivial neither to make the dataset and the prefetcher because both work in different process and the dataloader is in wrapping datasets.
+                for thread in threads:
+                    thread.join()
 
-            # step_to_delete = list(steps_blobs.keys())[: -self.max_buffer_steps]
-
-            # for step_number in step_to_delete:
-            #     files = steps_blobs[step_number]
-            #     for file in files:
-            #         self.delete_files.append(file.name)
-            #         # we want to delete the file from the oldest step first
-            #         self.thread_pool_delete.submit(step_number, self._delete_files, file)
+                for file in files:
+                    tmp_path = self._blob_to_local_path_tmp(file)
+                    tmp_path.rename(self._blob_to_local_path(file))
 
     def _blob_to_local_path(self, blob: storage.Blob) -> Path:
         parts = Path(blob.name).parts
         src_part_len = len(self.src_folder.parts)
         return self.local_dir / Path(*parts[src_part_len:])
 
-    def _delete_files(self, blob: storage.Blob):
+    def _blob_to_local_path_tmp(self, blob: storage.Blob) -> Path:
         local_path = self._blob_to_local_path(blob)
-        if local_path.exists():
-            local_path.unlink()
+        tmp_path = local_path.with_suffix(suffix=".tmp")
+        return tmp_path
 
     def _download_files(self, blob: storage.Blob):
-        local_path = self._blob_to_local_path(blob)
-        tmp_path = local_path.with_suffix(".tmp")
-        local_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._blob_to_local_path_tmp(blob)
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
         blob.download_to_filename(str(tmp_path))
-        tmp_path.rename(local_path)
 
     def filter_to_download(self, blobs: list[storage.Blob]) -> list[storage.Blob]:
         return [f for f in blobs if f.name.endswith(".parquet") and f.name not in self.files_downloaded]
