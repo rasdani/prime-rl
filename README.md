@@ -1,8 +1,10 @@
 # prime-rl - decentralized RL training at scale
 
-fork of prime to add RL training at scale. Private for now
+prime-rl is a codebase for decentralized RL training at scale.
 
 
+
+## install
 quick install
 ```
 curl -sSL https://raw.githubusercontent.com/PrimeIntellect-ai/prime-rl/main/install.sh | bash
@@ -98,28 +100,5 @@ uv  run torchrun --nproc_per_node=2 src/zeroband/train.py @ configs/training/Qwe
 ```
 
 if running on h100 node instead of H200 you should add ` --train.micro_bs 4`
-
-
-
-## Checkpoints management
-
-To save a checkpoint to gcp you need to:
-
-authentificate
-```bash
-gcloud auth login yourname@primeintellect.ai
-```
-
-then to push a file or a folder
-
-```bash
-gsutil -m cp -r yourfile gs://workspaces_research/yourname/yourfolder/.
-```
-
-to download a file or a folder
-
-```bash
-gcloud storage cp -r  gs://workspaces_research/yourname/yourfile .
-```
 
 
