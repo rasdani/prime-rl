@@ -93,7 +93,7 @@ class _GCPPrefetcherInternal:
                 for thread in threads:
                     thread.join()
 
-                stable_file = self._get_stable_file(self.files_downloaded[0])
+                stable_file = self._get_stable_file(files[0])
                 stable_file.touch()
 
     def _get_stable_file(self, blob: storage.Blob) -> Path:
