@@ -115,6 +115,8 @@ class Config(BaseConfig):
 
     kl_coef: float | None = None
 
+    start_step: int = 0
+
     @model_validator(mode="after")
     def check_liger(self):
         if self.train.liger_qwen:
@@ -233,7 +235,7 @@ def train(config: Config):
         num_training_steps=config.optim.total_steps,
     )
 
-    training_progress = TrainingProgress(total_tokens=0, step=0, total_problems=0)
+    training_progress = TrainingProgress(total_tokens=0, step=config.start_step, total_problems=0)
 
     if world_info.rank == 0 and config.wandb:
         wandb.init(project=config.project, config=config.model_dump())
