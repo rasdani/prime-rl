@@ -405,7 +405,7 @@ def train(config: Config):
 
             metric_averager.sync()
 
-            dist.all_reduce(loss_batch, op=dist.ReduceOp.SUM)
+            dist.all_reduce(loss_batch, op=dist.ReduceOp.AVG)
 
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.optim.grad_norm_clip).full_tensor()  # type: ignore (is a dtensor)
 
