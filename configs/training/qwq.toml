@@ -3,7 +3,7 @@ project = "intellect-2"
 
 collate_mode = "packing"
 
-kl_coef = 0.001
+kl_coef = 0.002
 
 [train]
 micro_bs = 1
