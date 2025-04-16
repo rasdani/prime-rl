@@ -22,6 +22,7 @@ def test_grpo_loss(masked_mean_axis, dtype):
         epsilon_low=0.2,
         epsilon_high=0.2,
         masked_mean_axis=masked_mean_axis,
+        clamp_log_prob_coef=10.0,
     )
     assert loss.shape == ()
     assert loss.item() is not None
@@ -76,6 +77,7 @@ def test_grpo_loss_padding(masked_mean_axis, dtype):
             epsilon_low=0.2,
             epsilon_high=0.2,
             masked_mean_axis=masked_mean_axis,
+            clamp_log_prob_coef=10.0,
         )
         loss_list.append(loss)
 

@@ -106,6 +106,7 @@ class Config(BaseConfig):
     grpo_epsilon_low: float = 0.2
     grpo_epsilon_high: float = 0.2
     entropy_loss_coeff: float = 0.001
+    clamp_log_prob_coef: float = 4.0
 
     max_async_level: int = 2  # the amount of rollout checkpoints to keep
 
@@ -380,6 +381,7 @@ def train(config: Config):
                     config.grpo_epsilon_low,
                     config.grpo_epsilon_high,
                     config.masked_mean_axis,
+                    config.clamp_log_prob_coef,
                 )
 
                 entropy = entropy_loss(logits, loss_mask, config.temperature, config.masked_mean_axis)

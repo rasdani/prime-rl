@@ -17,6 +17,7 @@ def grpo_loss(
     epsilon_low: float,
     epsilon_high: float,
     masked_mean_axis: int | None,
+    clamp_log_prob_coef: float,
 ) -> tuple[Tensor, Tensor]:
     """
     DeepSeek Math Loss: https://arxiv.org/abs/2402.03300
@@ -39,6 +40,7 @@ def grpo_loss(
         epsilon_low=epsilon_low,
         epsilon_high=epsilon_high,
         masked_mean_axis=masked_mean_axis,
+        clamp_log_prob_coef=clamp_log_prob_coef,
     )
 
 
@@ -90,6 +92,7 @@ def _compile_grpo_loss(
     epsilon_low: float,
     epsilon_high: float,
     masked_mean_axis: int | None,
+    clamp_log_prob_coef: float,
 ) -> tuple[Tensor, Tensor]:
     # we start by dropping the bos token because it does not have a corresponding logit
     input_ids = input_ids[:, 1:]
@@ -105,7 +108,8 @@ def _compile_grpo_loss(
     logits = logits / temperature
     per_token_logps = selective_log_softmax(logits, input_ids)
 
-    coef_1 = torch.exp(per_token_logps - original_logprobs)
+    coef_1 = torch.clamp(torch.exp(per_token_logps - original_logprobs), 0, clamp_log_prob_coef)
+
     coef_2 = torch.clamp(coef_1, 1 - epsilon_low, 1 + epsilon_high)
     per_token_loss1 = -coef_1 * advantages
     per_token_loss2 = -coef_2 * advantages
