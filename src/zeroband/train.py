@@ -350,12 +350,14 @@ def train(config: Config):
 
                 for rewards in batch["rewards"]:
                     metric_averager.update("sample_reward", rewards)
-
-                metric_averager.update("seq_lens", batch["seq_lens"].float().mean())
-                metric_averager.update("clip_seq_lens", (batch["seq_lens"] >= config.data.seq_length).sum() / batch["seq_lens"].shape[0])
-                metric_averager.update("task_rewards", batch["task_rewards"].sum() / len(batch["task_rewards"]))
-                metric_averager.update("length_penalties", batch["length_penalties"].sum() / len(batch["length_penalties"]))
-                metric_averager.update("target_lengths", batch["target_lengths"].float().mean())
+                for task_rewards in batch["task_rewards"]:
+                    metric_averager.update("task_reward", task_rewards)
+                for seq_lens in batch["seq_lens"]:
+                    metric_averager.update("seq_lens", seq_lens)
+                for length_penalties in batch["length_penalties"]:
+                    metric_averager.update("length_penalties", length_penalties)
+                for target_lengths in batch["target_lengths"]:
+                    metric_averager.update("target_lengths", target_lengths)
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(
