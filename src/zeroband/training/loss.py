@@ -170,7 +170,7 @@ def kl_penalty(
 def _apply_mask(tensor: torch.Tensor, mask: torch.Tensor, masked_mean_axis: int | None) -> torch.Tensor:
     # First sum over sequence dimension (dim=1), then mean over batch (dim=0)
     if mask.sum() == 0:
-        return (tensor * mask).sum()  # we still want to backprogate throw tensor even tho the loss is null here.
+        return (tensor * mask).sum()  # we still want to backprogate through tensor even tho the loss is null here.
 
     if masked_mean_axis is None:
         return (tensor * mask).sum() / mask.sum()  # Add small epsilon to avoid division by zero
