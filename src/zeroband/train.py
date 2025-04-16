@@ -354,10 +354,11 @@ def train(config: Config):
                     metric_averager.update("task_reward", task_rewards)
                 for seq_lens in batch["seq_lens"]:
                     metric_averager.update("seq_lens", seq_lens)
-                for length_penalties in batch["length_penalties"]:
-                    metric_averager.update("length_penalties", length_penalties)
-                for target_lengths in batch["target_lengths"]:
-                    metric_averager.update("target_lengths", target_lengths)
+
+                for target_len, len_penalty in zip(batch["target_lengths"], batch["length_penalties"]):
+                    metric_averager.update("target_lengths", target_len)
+                    metric_averager.update("length_penalties", len_penalty)
+                    metric_averager.update(f"length_penalty_{target_len}", len_penalty)
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(
