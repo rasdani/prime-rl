@@ -256,6 +256,7 @@ def train(config: Config):
         logger.info(f"memory after model reference offload: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
     if config.ckpt.resume:
+        logger.info(f"loading checkpoint from {config.ckpt.resume}")
         load_checkpoint_fsdp_state(model, [optimizer], training_progress, scheduler, config.ckpt.resume)
 
     if training_progress.step % config.optim.step_per_rollout != 0:
