@@ -356,19 +356,16 @@ def train(config: Config):
                 input_ids = batch["input_ids"].to("cuda")
                 loss_mask = batch["loss_mask"]
 
-                for target_len, len_penalty, rewards, task_rewards, seq_lens in zip(
-                    batch["target_lengths"], batch["length_penalties"], batch["rewards"], batch["task_rewards"], batch["seq_lens"]
-                ):
-                    metric_averager.update("target_lengths", target_len)
-                    metric_averager.update("length_penalties", len_penalty)
+                for rewards in batch["rewards"]:
                     metric_averager.update("sample_reward", rewards)
+                for task_rewards in batch["task_rewards"]:
                     metric_averager.update("task_reward", task_rewards)
+                for seq_lens in batch["seq_lens"]:
                     metric_averager.update("seq_lens", seq_lens)
-
-                    metric_averager.update(f"length_penalty_{target_len}", len_penalty)
-                    metric_averager.update(f"sample_reward_{target_len}", rewards)
-                    metric_averager.update(f"task_reward_{target_len}", task_rewards)
-                    metric_averager.update(f"seq_lens_{target_len}", seq_lens)
+                for length_penalties in batch["length_penalties"]:
+                    metric_averager.update("length_penalties", length_penalties)
+                for target_lengths in batch["target_lengths"]:
+                    metric_averager.update("target_lengths", target_lengths)
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(
