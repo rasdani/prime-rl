@@ -1,8 +1,7 @@
 from collections import defaultdict
 from pathlib import Path
+import threading
 from google.cloud import storage
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import wait
 
 from zeroband.logger import get_logger
 import multiprocessing as mp
@@ -70,7 +69,6 @@ class _GCPPrefetcherInternal:
         self.delete_files = []
 
         self.max_buffer_steps = max_buffer_steps
-        self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
 
     def prefetch(self):
         while True:
@@ -83,14 +81,17 @@ class _GCPPrefetcherInternal:
 
             for step_number in step_to_download:
                 files = self.filter_to_download(steps_blobs[step_number])
-                futures = []
+                threads = []
 
                 for file in files:
-                    future = self.thread_pool.submit(self._download_files, file)
-                    futures.append(future)
+                    thread = threading.Thread(target=self._download_files, args=(file,))
+                    thread.start()
+                    threads.append(thread)
+                    # we want to download the file from the oldest step first
                     self.files_downloaded.append(file.name)
 
-                wait(futures)
+                for thread in threads:
+                    thread.join()
 
                 stable_file = self._get_stable_file(files[0])
                 stable_file.touch()
@@ -134,8 +135,10 @@ class _GCPPrefetcherInternal:
         self.__del__()
 
     def __del__(self):
-        if hasattr(self, "thread_pool"):
-            self.thread_pool.shutdown(wait=True)
+        if hasattr(self, "thread_pool_download"):
+            self.thread_pool_download.shutdown(wait=True)
+        if hasattr(self, "thread_pool_delete"):
+            self.thread_pool_delete.shutdown(wait=True)
 
 
 if __name__ == "__main__":
