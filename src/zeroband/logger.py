@@ -1,4 +1,5 @@
 import logging
+import os
 
 from zeroband.training.world_info import get_world_info
 
@@ -26,7 +27,14 @@ def get_logger(name: str = "TRAIN") -> logging.Logger:
     logger = logging.getLogger(name)
 
     if world_info.local_rank == 0:
-        logger.setLevel(level=logging.INFO)
+        level = os.environ.get("ZERO_BAND_LOG_LEVEL", "INFO")
+
+        if level == "DEBUG":
+            logger.setLevel(level=logging.DEBUG)
+        elif level == "INFO":
+            logger.setLevel(level=logging.INFO)
+        else:
+            raise ValueError(f"Invalid log level: {level}")
     else:
         logger.setLevel(level=logging.CRITICAL)
 
