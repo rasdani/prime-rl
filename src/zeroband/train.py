@@ -292,6 +292,7 @@ def train(config: Config):
             data: list[list[BatchOutput]] = []
 
             for rollout_step in range(config.optim.step_per_rollout):
+                logger.debug(f"start rollout step {rollout_step} / {config.optim.step_per_rollout}")
                 time_data_loading = time.time()
 
                 batch_rollout: list[DatasetOutput] = next(train_dataloader_iterator)
@@ -310,6 +311,7 @@ def train(config: Config):
 
                 for grad_acc_step in range(num_grad_acc_steps):
                     batch = batch_packed[grad_acc_step]
+                    logger.debug(f"log prob grad_acc_step {grad_acc_step} / {num_grad_acc_steps}, batch: {batch['input_ids'].shape}")
 
                     input_ids = batch["input_ids"].to("cuda")
 
@@ -318,6 +320,7 @@ def train(config: Config):
                     batch["logprobs"] = per_token_logps.to("cpu")
 
                     if config.kl_coef is not None:
+                        logger.debug(f"kl grad_acc_step {grad_acc_step} / {num_grad_acc_steps}, batch: {batch['input_ids'].shape}")
                         per_token_logps_reference = get_logprobs(model_reference, input_ids, batch["position_ids"], config.temperature)
                         batch["ref_logprobs"] = per_token_logps_reference.to("cpu")
 
@@ -333,7 +336,9 @@ def train(config: Config):
             time_logprob = time.time() - time_start
             logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
 
+        logger.debug("start training rollout")
         for rollout_step in range(config.optim.step_per_rollout):
+            logger.debug(f"training rollout step {rollout_step} / {config.optim.step_per_rollout}")
             metric_averager = MetricsAverager()
             loss_batch = torch.tensor(0.0, device="cuda")
 
@@ -344,6 +349,7 @@ def train(config: Config):
             num_grad_acc_steps = len(data_per_rollout)
 
             for grad_acc_step in range(num_grad_acc_steps):
+                logger.debug(f"training grad_acc_step {grad_acc_step} / {num_grad_acc_steps}")
                 batch = data_per_rollout[grad_acc_step]
 
                 input_ids = batch["input_ids"].to("cuda")
@@ -418,9 +424,13 @@ def train(config: Config):
 
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.optim.grad_norm_clip).full_tensor()  # type: ignore (is a dtensor)
 
+            logger.debug(f"loss: {loss_batch.item()}, grad_norm: {grad_norm.item()}")
+
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
+
+            logger.debug("optimizer step")
 
             training_progress.step += 1
             inner_lr = [group["lr"] for group in optimizer.param_groups][0]
@@ -479,6 +489,7 @@ def train(config: Config):
 
             # Lets do this first so that clients can start downloading as soon as possible
             if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
+                logger.debug("saving rollout ckpt")
                 rollout_step = training_progress.step // config.optim.step_per_rollout
                 path = Path(config.ckpt.rollout_path) / f"step_{rollout_step}"
                 previous_ckpt_rollout.append(path)
