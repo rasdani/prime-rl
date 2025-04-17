@@ -207,11 +207,13 @@ def offload_model_to_cpu(model: ModelType) -> list[tuple[torch.Tensor, int]]:
     for param in chain(model.parameters(), model.buffers()):
         data = get_real_tensor(param.data)
 
-        cpu_data = data.to("cpu")
+        cpu_data = data.to("cpu", non_blocking=True)
         storage_size = data.untyped_storage().size()
         data.untyped_storage().resize_(1)  # need to shrink direct storage otherwise gpu memory is not properly freed
 
         tensors_offloaded.append((cpu_data, storage_size))
+    del data
+    torch.cuda.synchronize()
     torch.cuda.empty_cache()
 
     return tensors_offloaded
@@ -222,8 +224,8 @@ def wake_up_model_from_cpu(model: ModelType, tensors: list[tuple[torch.Tensor, i
         data = get_real_tensor(param.data)
         data.untyped_storage().resize_(storage_size)
 
-        param.data = data.to("cuda")
-
+        param.data = data.copy_(cpu_data, non_blocking=True)
+    torch.cuda.synchronize()
 
 def reshard_module(model: torch.nn.Module):
     for module in model.modules():
