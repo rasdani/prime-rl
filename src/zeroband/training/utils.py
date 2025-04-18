@@ -222,6 +222,7 @@ def wake_up_model_from_cpu(model: ModelType, tensors: list[tuple[torch.Tensor, i
         data.copy_(cpu_data, non_blocking=True)
     torch.cuda.synchronize()
 
+
 def reshard_module(model: torch.nn.Module):
     for module in model.modules():
         if isinstance(module, FSDPModule):
