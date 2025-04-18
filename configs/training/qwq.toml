@@ -14,10 +14,10 @@ seq_length = 32768
 ignore_zero_advantages = true
 
 [optim]
-batch_size = 512
+batch_size = 1024
 warmup_steps = 1
 total_steps = 10000000000000000000
-step_per_rollout = 8
+step_per_rollout = 4
 grad_norm_clip = 0.4
 
 
