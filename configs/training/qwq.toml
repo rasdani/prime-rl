@@ -10,7 +10,7 @@ attn_impl = "flash_attention_2"
 ac_ckpt = true
 
 [data]
-seq_length = 32768
+seq_length = 4200
 ignore_zero_advantages = true
 
 [optim]
