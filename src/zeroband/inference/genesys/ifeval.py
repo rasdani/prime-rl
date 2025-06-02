@@ -475,24 +475,24 @@ IF_FUNCTIONS_MAP = {
 def verify_ifeval(completion: str, verification_info: dict) -> float:
     """
     Verifies completion against IFEval instruction-following criteria.
-    
+
     Args:
         completion: Model's response string
         verification_info: Dict containing ground_truth with func_name and parameters
-    
+
     Returns:
         Float score (0.0 to 1.0) representing instruction following accuracy
     """
-    
+
     # Extract the response after thinking (if present)
     if "</think>" in completion:
         response = completion.split("</think>")[1].strip()
     else:
         response = completion.strip()
-    
+
     if not response:
         return 0.0
-    
+
     try:
         # Get ground truth from verification_info
         ground_truth = verification_info.get("ground_truth")
@@ -500,23 +500,23 @@ def verify_ifeval(completion: str, verification_info: dict) -> float:
             gt = json.loads(ground_truth)
         else:
             gt = ground_truth
-            
+
         if not gt:
             return 0.0
-            
+
         # Extract function name and parameters
         func_name = gt.pop("func_name")
         func = IF_FUNCTIONS_MAP.get(func_name)
-        
+
         if not func:
             return 0.0
-            
+
         # Filter out None values and pass to function
         non_none_args = {k: v for k, v in gt.items() if v is not None}
-        
+
         # Call the verification function
         result = func(response, **non_none_args)
-        
+
         # Convert boolean or other results to float score
         if isinstance(result, bool):
             return float(result)
@@ -529,6 +529,6 @@ def verify_ifeval(completion: str, verification_info: dict) -> float:
             return 0.0
         else:
             return 0.0
-            
+
     except Exception:
         return 0.0
