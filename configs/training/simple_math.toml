@@ -6,7 +6,7 @@ micro_bs = 4 # change to 8 for H200
 reshard_after_forward = true
 
 [optim]
-batch_size = 128
+batch_size = 1
 warmup_steps = 1
 total_steps = 100000000000000
 step_per_rollout = 4
