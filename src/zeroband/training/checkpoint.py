@@ -124,7 +124,10 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
             key: set[str] = get_fqns(model, key)
             assert len(key) == 1
             key = next(iter(key))
-            cpu_state[key] = value.to("cpu", non_blocking=True)
+            cpu_state[key] = value.to("cpu", non_blocking=False)
+            # TODO(SAMI) keeping blocking here to avoid race condition, should be faster to make it non blocking tho
+
+    torch.distributed.barrier()
 
     logger.info(f"gathering full tensor checkpointing in {time.time() - start_time:.2f} seconds")
 
