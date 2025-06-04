@@ -1,3 +1,5 @@
+#inspired from https://github.com/astral-sh/uv-docker-example/blob/main/multistage.Dockerfile
+
 # Build stage
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel AS builder
 LABEL maintainer="prime intellect"
@@ -14,67 +16,71 @@ ENV PATH=$PATH:/usr/local/cuda/bin
 RUN apt-get update && apt-get install -y --no-install-recommends --force-yes \
   build-essential \
   curl \
-  wget \
-  git \
-  vim \
-  htop \
-  nvtop \
-  iperf \
-  tmux \
-  openssh-server \
-  git-lfs \
   sudo \
-  gpg \
+  git \
   && apt-get clean autoclean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-# install gsutil
-RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && apt-get update -y && apt-get install google-cloud-cli -y
-
-# # Install Rust
-# RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
-# ENV PATH="/root/.cargo/bin:${PATH}"
-# RUN echo "export PATH=\"/opt/conda/bin:/root/.cargo/bin:\$PATH\"" >> /root/.bashrc
 
 # Download the latest installer
 ADD https://astral.sh/uv/install.sh /uv-installer.sh
-
-# Run the installer then remove it
 RUN sh /uv-installer.sh && rm /uv-installer.sh
-
-# Ensure the installed binary is on the `PATH`
 ENV PATH="/root/.local/bin/:$PATH"
 
 # Install Python dependencies (The gradual copies help with caching)
-WORKDIR /root/prime-rl
+WORKDIR /app
 
 COPY ./pyproject.toml ./pyproject.toml
 COPY ./uv.lock ./uv.lock
 COPY ./README.md ./README.md
 COPY ./src/ ./src/
 
-# Create venv and install dependencies
-RUN uv sync && uv sync --extra fa
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+ENV UV_PYTHON_DOWNLOADS=0
 
-# Runtime stage
+
+COPY src/ /app/src/
+COPY pyproject.toml /app/pyproject.toml
+COPY uv.lock /app/uv.lock
+COPY README.md /app/README.md
+COPY configs /app/configs
+
+RUN --mount=type=cache,target=/app/.cache/uv \
+    uv sync --locked --no-dev
+
+RUN --mount=type=cache,target=/app/.cache/uv \
+    uv sync --extra fa --locked --no-dev
+
 FROM python:3.11-slim
-WORKDIR /root/prime-rl
 
-RUN apt-get update && apt-get install -y --no-install-recommends --force-yes build-essential wget clang
+RUN apt-get update && apt-get install -y \
+    --no-install-recommends \
+    --force-yes \
+    build-essential \
+    wget \
+    clang \
+    tmux \
+    iperf \
+    openssh-server \
+    git-lfs \
+    gpg \
+    && apt-get clean autoclean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Copy virtual environment
-COPY --from=builder /root/prime-rl/.venv /root/prime-rl/.venv
-RUN rm /root/prime-rl/.venv/bin/python
-RUN ln -s /usr/local/bin/python /root/prime-rl/.venv/bin/python
-ENV PATH="/root/prime-rl/.venv/bin:$PATH"
 
-# Note(Jack): Nothing should need to compile so we don't need these
-# COPY --from=builder /usr/local/cuda-12.4 /usr/local/cuda
-# ENV LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
-# ENV CUDA_HOME=/usr/local/cuda-12.4
-# ENV PATH="/usr/local/cuda-12.4/bin:$PATH"
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+RUN groupadd --gid $GROUP_ID appuser && \
+    useradd --uid $USER_ID --gid appuser --create-home --shell /bin/bash appuser
 
-# Copy application files
-COPY --from=builder /root/prime-rl/src ./src
-COPY ./configs/ ./configs/
+USER appuser
+WORKDIR /app
+# Copy the application from the builder
+COPY --from=builder --chown=appuser:appuser /app /app
 
+RUN rm /app/.venv/bin/python && ln -s /usr/local/bin/python /app/.venv/bin/python
+RUN rm /app/.venv/bin/python3 && ln -s /usr/local/bin/python /app/.venv/bin/python3
+RUN rm /app/.venv/bin/python3.11 && ln -s /usr/local/bin/python /app/.venv/bin/python3.11
+
+
+# Place executables in the environment at the front of the path
+ENV PATH="/app/.venv/bin:$PATH"
 ENTRYPOINT ["python", "src/zeroband/infer.py"]

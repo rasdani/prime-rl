@@ -16,6 +16,7 @@ class SamplingParamConfig(BaseConfig):
     n: int = 8
     logprobs: int = 0  # 0 mean 1 logprob here
     top_k: int = -1
+    seed: int | None = None
 
 
 class DifficultyFilteringConfig(BaseConfig):
@@ -47,6 +48,10 @@ class Config(BaseConfig):
     quant: Literal["fp8"] | None = None
 
     sampling: SamplingParamConfig = SamplingParamConfig()
+
+    # Whether to enable thinking for the model. Used by the `format_prompts` function to prepend a thinking prompt
+    enable_thinking: bool = True
+
     enforce_eager: bool = False
     max_model_len: int | None = None
 
