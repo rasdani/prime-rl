@@ -3,8 +3,8 @@ from typing import Callable, Literal
 from zeroband.inference.genesys.ascii_tree_formatting import compute_reward as compute_ascii_tree_reward
 from zeroband.inference.genesys.code import evaluate_code
 from zeroband.inference.genesys.code_output_prediction import verify_code_output_prediction
-from zeroband.inference.genesys.ifeval import verify_ifeval
 from zeroband.inference.genesys.complex_json_output import verify_complex_json_formatting
+from zeroband.inference.genesys.ifeval import verify_ifeval
 from zeroband.inference.genesys.math import compute_math_reward
 from zeroband.inference.genesys.pydantic_json_adherance import validate_pydantic_json
 from zeroband.inference.genesys.reasoning_gym import verify_reasoning_gym
