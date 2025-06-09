@@ -187,9 +187,40 @@ diff --git a/examples/duplicate-modify-replay.py b/examples/duplicate-modify-rep
 ```
 </answer>"""
 
+    golden_diff = """\
+diff --git a/examples/addons/duplicate-modify-replay.py b/examples/addons/duplicate-modify-replay.py
+--- a/examples/addons/duplicate-modify-replay.py
++++ b/examples/addons/duplicate-modify-replay.py
+@@ -10,6 +10,6 @@
+     # Only interactive tools have a view. If we have one, add a duplicate entry
+     # for our flow.
+     if "view" in ctx.master.addons:
+-        ctx.master.commands.call("view.flows.add", [flow])
++        ctx.master.commands.call("view.flows.duplicate", [flow])
+     flow.request.path = "/changed"
+     ctx.master.commands.call("replay.client", [flow])
+"""
+    completion = """\
+```diff
+diff --git a/examples/addons/duplicate-modify-replay.py b/examples/addons/duplicate-modify-replay.py
+--- a/examples/addons/duplicate-modify-replay.py
++++ b/examples/addons/duplicate-modify-replay.py
+@@ -10,6 +10,6 @@
+     # Only interactive tools have a view. If we have one, add a duplicate entry
+     # for our flow.
+     if "view" in ctx.master.addons:
++        ctx.master.commands.call("view.flows.add", [flow])
+_        ctx.master.commands.call("view.flows.duplicate", [flow])
+     flow.request.path = "/changed"
+     ctx.master.commands.call("replay.client", [flow])
+```
+"""
+
     verification_info = {
-        "golden_diff": 'diff --git a/examples/addons/duplicate-modify-replay.py b/examples/addons/duplicate-modify-replay.py\n--- a/examples/addons/duplicate-modify-replay.py\n+++ b/examples/addons/duplicate-modify-replay.py\n@@ -10,6 +10,6 @@\n     # Only interactive tools have a view. If we have one, add a duplicate entry\n     # for our flow.\n     if "view" in ctx.master.addons:\n-        ctx.master.commands.call("view.flows.add", [flow])\n+        ctx.master.commands.call("view.flows.duplicate", [flow])\n     flow.request.path = "/changed"\n     ctx.master.commands.call("replay.client", [flow])\n'
+        # "golden_diff": 'diff --git a/examples/addons/duplicate-modify-replay.py b/examples/addons/duplicate-modify-replay.py\n--- a/examples/addons/duplicate-modify-replay.py\n+++ b/examples/addons/duplicate-modify-replay.py\n@@ -10,6 +10,6 @@\n     # Only interactive tools have a view. If we have one, add a duplicate entry\n     # for our flow.\n     if "view" in ctx.master.addons:\n-        ctx.master.commands.call("view.flows.add", [flow])\n+        ctx.master.commands.call("view.flows.duplicate", [flow])\n     flow.request.path = "/changed"\n     ctx.master.commands.call("replay.client", [flow])\n'
+        "golden_diff": golden_diff,
     }
 
     # print(compute_git_diff_reward(completion, verification_info))
-    print(compute_git_diff_reward(f"```diff\n{verification_info['golden_diff']}\n```", verification_info))
+    # print(compute_git_diff_reward(f"```diff\n{verification_info['golden_diff']}\n```", verification_info))
+    print(compute_git_diff_reward(completion, verification_info))
