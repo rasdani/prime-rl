@@ -3,6 +3,7 @@ from typing import Callable, Literal
 from zeroband.inference.genesys.ascii_tree_formatting import compute_reward as compute_ascii_tree_reward
 from zeroband.inference.genesys.code import evaluate_code
 from zeroband.inference.genesys.code_output_prediction import verify_code_output_prediction
+from zeroband.inference.genesys.git_diff import compute_git_diff_reward
 from zeroband.inference.genesys.ifeval import verify_ifeval
 from zeroband.inference.genesys.math import compute_math_reward
 from zeroband.inference.genesys.pydantic_json_adherance import validate_pydantic_json
@@ -20,6 +21,7 @@ TaskType = Literal[
     "ascii_tree_formatting",
     "pydantic_adherance",
     "ifeval",
+    "git_diff",
 ]
 
 
@@ -40,4 +42,5 @@ _REWARD_FUNCTIONS: dict[TaskType, Callable] = {
     "ascii_tree_formatting": compute_ascii_tree_reward,
     "pydantic_adherance": validate_pydantic_json,
     "ifeval": verify_ifeval,
+    "git_diff": compute_git_diff_reward,
 }
