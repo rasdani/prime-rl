@@ -1,0 +1,58 @@
+# Development Dockerfile - not optimized for size, includes dev tools
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+LABEL maintainer="prime intellect"
+LABEL repository="prime-rl"
+
+# Set locale
+RUN echo "LC_ALL=en_US.UTF-8" >> /etc/environment
+
+# CUDA environment
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=$PATH:/usr/local/cuda/bin
+
+# Install development tools and dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      curl \
+      wget \
+      git \
+      vim \
+      htop \
+      nvtop \
+      iperf \
+      tmux \
+      openssh-server \
+      git-lfs \
+      sudo \
+      gpg && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Google Cloud SDK for gsutil (optional)
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+      | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+      | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
+    apt-get update -y && \
+    apt-get install -y google-cloud-cli && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install uv (astral) for dependency management
+ADD https://astral.sh/uv/install.sh /uv-installer.sh
+RUN sh /uv-installer.sh && rm /uv-installer.sh
+ENV PATH="/root/.local/bin/:$PATH"
+
+WORKDIR /root/prime-rl
+
+# Copy project metadata for dependency installation
+COPY pyproject.toml uv.lock README.md ./
+# Copy source for package installation
+COPY src/ ./src/
+
+# Create and activate virtual environment, install dependencies
+RUN uv venv --python 3.11 .venv
+RUN . .venv/bin/activate && uv sync && uv pip install flash-attn --no-build-isolation
+ENV PATH="/root/prime-rl/.venv/bin:$PATH"
+
+# Default to interactive shell
+CMD ["/bin/bash"]
