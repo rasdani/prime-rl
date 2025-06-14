@@ -8,6 +8,7 @@ import torch
 from safetensors.torch import save_file
 from torch.distributed.checkpoint.state_dict import _get_fqns as get_fqns
 from torch.distributed.tensor import DTensor
+from transformers import AutoTokenizer
 
 from zeroband.training.world_info import get_world_info
 from zeroband.utils.logger import get_logger
@@ -35,7 +36,6 @@ def save_checkpoint_fsdp_state(
     model: ModelType,
     optimizers: list[torch.optim.Optimizer],
     training_progress: TrainingProgress,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
     path_root: str | Path,
 ):
     """
@@ -53,7 +53,6 @@ def save_checkpoint_fsdp_state(
         state["model"] = model.state_dict()
         state["optimizers"] = [optimizer.state_dict() for optimizer in optimizers]
         state["training_progress"] = training_progress
-        state["scheduler"] = scheduler.state_dict()
 
         torch.save(state, f)
 
@@ -62,7 +61,6 @@ def load_checkpoint_fsdp_state(
     model: ModelType,
     optimizers: list[torch.optim.Optimizer],
     training_progress: TrainingProgress,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
     path: str | Path,
 ):
     """
@@ -88,13 +86,13 @@ def load_checkpoint_fsdp_state(
     training_progress.step = state["training_progress"].step
     training_progress.total_samples = state["training_progress"].total_samples
 
-    scheduler.load_state_dict(state["scheduler"])
-
 
 async_ckpt_job = None
 
 
-def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = torch.bfloat16, async_save: bool = False) -> Path:
+def save_ckpt_for_rollout(
+    model: ModelType, tokenizer: AutoTokenizer, path: Path, dtype: torch.dtype = torch.bfloat16, async_save: bool = False
+) -> Path:
     """
     Save the checkpoint for rollout as one unified safetensors file.
 
@@ -124,13 +122,20 @@ def save_ckpt_for_rollout(model: ModelType, path: Path, dtype: torch.dtype = tor
             key: set[str] = get_fqns(model, key)
             assert len(key) == 1
             key = next(iter(key))
-            cpu_state[key] = value.to("cpu", non_blocking=True)
+            cpu_state[key] = value.to("cpu", non_blocking=False)
+            # TODO(SAMI) keeping blocking here to avoid race condition, should be faster to make it non blocking tho
+
+    torch.distributed.barrier()
 
     logger.info(f"gathering full tensor checkpointing in {time.time() - start_time:.2f} seconds")
 
     def _save():
         if world_info.rank == 0:
             save_file(cpu_state, path_file, metadata={"format": "pt"})
+
+            model.config.save_pretrained(path)
+            model.generation_config.save_pretrained(path)
+            tokenizer.save_pretrained(path)
 
             stable_file = path / "stable"
             stable_file.touch()
