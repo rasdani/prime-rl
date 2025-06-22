@@ -1,18 +1,28 @@
 import asyncio
 import json
+import os
 import socket
 import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 import psutil
 import pynvml
+import wandb
 
-from zeroband.utils.config import APIMonitorConfig, BaseConfig, FileMonitorConfig, MultiMonitorConfig, SocketMonitorConfig
+from zeroband.utils.config import (
+    APIMonitorConfig,
+    BaseConfig,
+    FileMonitorConfig,
+    MultiMonitorConfig,
+    SocketMonitorConfig,
+    WandbMonitorConfig,
+)
 from zeroband.utils.logger import get_logger
+from zeroband.utils.pydantic_config import BaseSettings
 
 
 class Monitor(ABC):
@@ -23,10 +33,10 @@ class Monitor(ABC):
         self.lock = threading.Lock()
         self.metadata = {"task_id": task_id}
         self.has_metadata = any(self.metadata.values())
-        self.logger = get_logger("INFER")
+        self.logger = get_logger()
         if not self.has_metadata:
             self.logger.warning("No run metadata found. This is fine for local runs, but unexpected when contributing to a public run.")
-        self.logger.debug(f"Initializing {self.__class__.__name__} ({str(self.config).replace(' ', ', ')})")
+        self.logger.info(f"Initializing {self.__class__.__name__} ({config})")
 
     def _serialize_metrics(self, metrics: dict[str, Any]) -> str:
         if self.has_metadata:
@@ -99,21 +109,50 @@ class APIMonitor(Monitor):
         asyncio.run(_post_metrics())
 
 
+class WandbMonitor(Monitor):
+    """Logs to Weights and Biases."""
+
+    def __init__(self, config: WandbMonitorConfig, task_id: str | None = None, run_config: BaseSettings | None = None):
+        super().__init__(config, task_id)
+        rank = os.environ.get("RANK", os.environ.get("DP_RANK", "0"))
+        self.enabled = rank == "0"
+        if not self.enabled:
+            self.logger.warning(f"Skipping WandbMonitor initialization from non-master rank ({rank})")
+            return
+        self.wandb = wandb.init(
+            project=config.project, group=config.group, name=config.name, dir=config.dir, config=run_config.model_dump()
+        )
+        self.prefix = f"{config.prefix}/" if config.prefix else ""
+
+    def log(self, metrics: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+        step = metrics.pop("step", None)
+        metrics = {f"{self.prefix}{k}": v for k, v in metrics.items()}
+        wandb.log(metrics, step=step)
+
+
+MonitorType = Literal["file", "socket", "api", "wandb"]
+
+
 class MultiMonitor:
     """
     Log progress, performance, and system metrics to multiple (configurable) outputs.
     """
 
-    def __init__(self, config: MultiMonitorConfig, task_id: str | None = None):
-        self.logger = get_logger("INFER")
+    def __init__(self, config: MultiMonitorConfig, task_id: str | None = None, run_config: BaseSettings | None = None):
+        self.logger = get_logger()
+        self.logger.info(f"Initializing MultiMonitor ({config})")
         # Initialize outputs
-        self.outputs = []
+        self.outputs: dict[MonitorType, Monitor] = {}
         if config.file is not None:
-            self.outputs.append(FileMonitor(config.file, task_id))
+            self.outputs["file"] = FileMonitor(config.file, task_id)
         if config.socket is not None:
-            self.outputs.append(SocketMonitor(config.socket, task_id))
+            self.outputs["socket"] = SocketMonitor(config.socket, task_id)
         if config.api is not None:
-            self.outputs.append(APIMonitor(config.api, task_id))
+            self.outputs["api"] = APIMonitor(config.api, task_id)
+        if config.wandb is not None:
+            self.outputs["wandb"] = WandbMonitor(config.wandb, task_id, run_config=run_config)
 
         self.disabled = len(self.outputs) == 0
 
@@ -126,13 +165,14 @@ class MultiMonitor:
             self._stop_event = threading.Event()
             self._start_metrics_thread()
 
-    def log(self, metrics: dict[str, Any]) -> None:
+    def log(self, metrics: dict[str, Any], exclude: list[MonitorType] = []) -> None:
         """Logs metrics to all outputs."""
         if self.disabled:
             return
-        self.logger.info(f"Logging metrics: {metrics}")
-        for output in self.outputs:
-            output.log(metrics)
+        self.logger.debug(f"Logging metrics: {metrics}")
+        for output_type, output in self.outputs.items():
+            if output_type not in exclude:
+                output.log(metrics)
 
     def _set_has_gpu(self) -> bool:
         """Determines if a GPU is available at runtime"""
@@ -183,7 +223,7 @@ class MultiMonitor:
                         }
                     )
 
-            self.log(metrics)
+            self.log(metrics, exclude=["wandb"])
             time.sleep(self._system_log_frequency)
 
     def __del__(self):
@@ -192,7 +232,6 @@ class MultiMonitor:
             self._stop_metrics_thread()
 
 
-def setup_monitor(config: MultiMonitorConfig, task_id: str | None = None) -> MultiMonitor:
+def setup_monitor(config: MultiMonitorConfig, task_id: str | None = None, run_config: BaseSettings | None = None) -> MultiMonitor:
     """Sets up a monitor to log metrics to multiple specified outputs."""
-    get_logger("INFER").info(f"Initializing monitor ({config})")
-    return MultiMonitor(config, task_id)
+    return MultiMonitor(config, task_id, run_config)

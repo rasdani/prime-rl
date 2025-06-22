@@ -6,7 +6,7 @@ from safetensors import safe_open
 from transformers import AutoTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 from vllm import LLM
-from vllm.model_executor.model_loader.loader import _process_weights_after_loading
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from zeroband.inference.config import LenRewardsConfig
@@ -51,7 +51,7 @@ def reload_model_weights(llm: LLM, ckpt_path: str):
     # Process weights after loading (important for some models)
     model_config = llm.llm_engine.model_config
     device = next(model.parameters()).device
-    _process_weights_after_loading(model, model_config, device)
+    process_weights_after_loading(model, model_config, device)
 
     return llm
 
@@ -142,7 +142,7 @@ def format_prompts(
     return formatted_prompts
 
 
-def compute_max_batch_size(llm: LLM) -> int:
+def compute_max_batch_size(llm: LLM, max_model_len: int | None = None) -> int:
     """
     Automatically computes the maximum batch size (number of sequences decoded in
     parallel) without exceeding the GPU memory to prevent cache eviction. We use vLLM's
@@ -164,7 +164,7 @@ def compute_max_batch_size(llm: LLM) -> int:
     """
     num_gpu_blocks = llm.llm_engine.model_executor.cache_config.num_gpu_blocks
     block_size = llm.llm_engine.model_executor.cache_config.block_size
-    max_model_len = llm.llm_engine.model_config.max_model_len
+    max_model_len = max_model_len or llm.llm_engine.model_config.max_model_len
     max_cache_tokens = num_gpu_blocks * block_size
     max_batch_size = max_cache_tokens // max_model_len
 

@@ -1,4 +1,7 @@
-import sys
+# (Jack): This is an umerged patch to fix a bug in vllm https://github.com/vllm-project/vllm/pull/19940
+# This can be removed once the patch is merged and vllm is updated.
+import zeroband.inference.monkeypatch_sampling_metadata  # noqa: F401
+
 import json
 import multiprocessing as mp
 import os
@@ -15,14 +18,13 @@ import numpy as np
 import pyarrow.parquet as pq
 import requests
 import torch
-import torch.distributed as dist
 from datasets import load_dataset
 from toploc.utils import sha256sum
 from vllm import LLM, SamplingParams, TokensPrompt
 from huggingface_hub import snapshot_download
 
-from zeroband.utils.config import extract_toml_paths, to_kebab_case
-from zeroband.inference.config import Config as InferenceConfig, set_toml_paths
+from zeroband.utils.pydantic_config import parse_argv
+from zeroband.inference.config import Config as InferenceConfig
 from zeroband.inference.parquet import get_parquet_table
 from zeroband.inference.pipeline import all_reduce, patch_model_load, setup_comm, setup_hooks
 from zeroband.inference.rewards import compute_vllm_rewards
@@ -38,15 +40,16 @@ from zeroband.inference.utils import (
     format_prompts,
 )
 from zeroband.training.mp import EnvWrapper
-from zeroband.utils.logger import get_logger
+from zeroband.utils.utils import clean_exit
+from zeroband.inference.logger import setup_logger
 
 
+@clean_exit
 def inference(config: InferenceConfig):
     # Initialize the logger
-    logger = get_logger("INFER")
+    dp_rank = int(os.environ.get("DP_RANK", 0))
+    logger = setup_logger(config.log, parallel_config=config.parallel, dp_rank=dp_rank)
     logger.info("Starting inference")
-    logger.info(f"Log level: {config.log_level}")
-    logger.info(f"Parallelism: TP={config.parallel.tp} DP={config.parallel.dp} PP={config.parallel.pp.world_size}")
 
     # Optionally, clean the rollout path
     if config.clean_rollout_path and config.rollout_path is not None:
@@ -57,10 +60,10 @@ def inference(config: InferenceConfig):
     logger.info(f"Downloading model weights for {config.model.name}")
     start_time = time.time()
     snapshot_download(config.model.name)
-    logger.info(f"Downloaded model weights in {time.time() - start_time:.2f}s")
+    logger.success(f"Downloaded model weights in {time.time() - start_time:.2f}s")
 
     # Initialize metrics
-    monitor = setup_monitor(config.monitor, config.task_id)
+    monitor = setup_monitor(config.monitor, config.task_id, config)
 
     # Patch vLLM's model loading to load model shard
     patch_model_load(config=config.parallel.pp)
@@ -72,7 +75,6 @@ def inference(config: InferenceConfig):
         model=config.model.name,
         dtype=config.model.dtype,
         kv_cache_dtype=config.model.kv_cache_dtype,
-        max_seq_len_to_capture=config.model.max_model_len,
         max_model_len=config.model.max_model_len,
         quantization=config.model.quantization,
         enforce_eager=config.model.enforce_eager,
@@ -82,10 +84,11 @@ def inference(config: InferenceConfig):
         enable_chunked_prefill=False,  # This is required for toploc2 because chunked prefill seems to allow len(seq_groups) != len(selected_token_indices) which is unexpected
         seed=config.seed,
     )
-    if config.toploc2:
+    if config.toploc.enable_toploc2:
         llm.llm_engine.model_executor.driver_worker.model_runner.sampler = Toploc2Sampler()
+        logger.info("Using toploc2 sampler")
     tokenizer = llm.get_tokenizer()
-    logger.info(f"Initialized model and tokenizer in {time.time() - start_time:.2f}s")
+    logger.success(f"Initialized model and tokenizer in {time.time() - start_time:.2f}s")
 
     # Initialize dataset
     logger.info(f"Initializing dataset (name={config.data.name}, split={config.data.split})")
@@ -94,15 +97,15 @@ def inference(config: InferenceConfig):
 
     if not config.rewards.compute_reward:
         logger.info("Reward computation is disabled, setting task_type to null_reward")
-        dataset = dataset.map(lambda x: {"task_type": "null_reward"})
+        dataset = dataset.map(lambda _: {"task_type": "null_reward"})
 
-    logger.info(f"Initialized dataset with {len(dataset):,} problems in {time.time() - start_time:.2f}s")
+    logger.success(f"Initialized dataset with {len(dataset):,} problems in {time.time() - start_time:.2f}s")
 
     # Optionally shuffle dataset
     if config.group_id is not None:
         # We dont shuffle here because we shuffle reproducibly in the sampling loop.
-        assert config.seed is None, "Seed is not supported when PRIME_GROUP_ID is set"
-        assert os.environ.get("DP_RANK") is None, "DP is not supported when group ID is set"
+        assert config.seed is None, "Seed is not supported when group ID is set"
+        assert config.parallel.dp == 1, "DP is not supported when group ID is set"
         node_address_int = int(config.group_id, 16)
         logger.info(f"Seeding with {node_address_int} ({config.group_id})")
     else:
@@ -118,25 +121,21 @@ def inference(config: InferenceConfig):
         logger.info(f"Filtering out prompts with more than {config.data.max_prompt_len} tokens")
         start_time = time.time()
         dataset = filter_data_by_prompt_length(dataset, config.data.max_prompt_len, tokenizer)
-        logger.info(f"Filtered long prompts in {time.time() - start_time:.2f}s - {len(dataset)} samples remaining")
+        logger.success(f"Filtered long prompts in {time.time() - start_time:.2f}s - {len(dataset)} samples remaining")
 
     # Optionally, filter dataset for samples within difficulty range
     if config.data.difficulty_filtering:
         logger.info(
             f"Filtering dataset for difficulty in [{config.data.difficulty_filtering.min_solve_rate}, {config.data.difficulty_filtering.max_solve_rate}]"
         )
-        start_time = time.time()
         dataset = dataset.filter(
             lambda x: x[config.data.difficulty_filtering.solve_rate_field] >= config.data.difficulty_filtering.min_solve_rate
             and x[config.data.difficulty_filtering.solve_rate_field] <= config.data.difficulty_filtering.max_solve_rate
         )
-        logger.info(
-            f"Filtered dataset for difficulty in [{config.data.difficulty_filtering.min_solve_rate}, {config.data.difficulty_filtering.max_solve_rate}] in {time.time() - start_time:.2f}s - {len(dataset)} samples remaining"
-        )
 
     # Initialize sampling parameters
-    logger.info(f"Initializing sampling parameters ({config.sampling} seed={config.seed})")
-    sampling_params = SamplingParams(**config.sampling.model_dump(), seed=config.seed)
+    logger.info(f"Initializing sampling parameters ({config.sampling})")
+    sampling_params = SamplingParams(**config.sampling.model_dump())
 
     # Setup pipeline parallel communication and hook
     node = setup_comm(config.parallel.pp)
@@ -149,8 +148,11 @@ def inference(config: InferenceConfig):
         logger.info("Auto-computing maximum batch size")
         local_max_batch_size = compute_max_batch_size(llm)
         max_batch_size = all_reduce(node, torch.tensor(local_max_batch_size), config=config.parallel.pp, op=torch.min).item()
+        logger.info(f"Auto-computed maximum batch size: {max_batch_size}")
+        max_batch_size = int(max_batch_size * config.scale_factor)
+        logger.info(f"Scaled maximum batch size by {config.scale_factor} to {max_batch_size}")
 
-    logger.info(f"Maximum batch size: {max_batch_size}")
+    logger.info(f"Using maximum batch size: {max_batch_size}")
 
     # Throw an error if the batch cannot fit number of samples to generate per problem.
     # TODO(Mika): Circumvent this assertion by distribtuting parallel samples across multiple batches
@@ -169,9 +171,10 @@ def inference(config: InferenceConfig):
     toploc_cache, _ = setup_toploc_cache(
         llm,
         pp_config=config.parallel.pp,
-        disable=not config.toploc,
+        disable=not config.toploc.enable_toploc1,
         max_seqs=batch_size,
         hidden_size=hidden_size,
+        topk=config.toploc.topk,
     )
 
     ckpt_step = 0
@@ -186,6 +189,16 @@ def inference(config: InferenceConfig):
         logger.info(f"Resuming from step {ckpt_step} at {path_file}")
         llm = reload_model_weights(llm, path_file)
         real_step = ckpt_step
+
+    # Check if we should resume from step_path file
+    if config.step_path is not None and config.step_path.exists():
+        try:
+            saved_step = int(config.step_path.read_text().strip())
+            logger.info(f"Found existing step file at {config.step_path} with step {saved_step}")
+            real_step = saved_step
+            logger.info(f"Resuming from step {real_step} (loaded from {config.step_path})")
+        except (ValueError, IOError) as e:
+            logger.warning(f"Failed to read step from {config.step_path}: {e}")
 
     # This is used by the seeding logic to make sure we dont generate the same samples twice if we do multiple batches for a step
     current_step_batch_counter = 1
@@ -211,9 +224,9 @@ def inference(config: InferenceConfig):
                 current_step_batch_counter += 1
 
         logger.info(f"Inference step {real_step} (Checkpoint step: {ckpt_step})")
-        if config.rl and real_step - ckpt_step > config.rl.max_async:
+        if config.rl and real_step - ckpt_step > config.rl.async_level:
             logger.info(f"Required to reload model weights for step {ckpt_step} from {config.rl.ckpt_path}")
-            ckpt_step = real_step - config.rl.max_async
+            ckpt_step = real_step - config.rl.async_level
             attempt_count = 0
             while True:
                 stable_file = Path(config.rl.ckpt_path) / f"step_{ckpt_step}/stable"
@@ -222,12 +235,18 @@ def inference(config: InferenceConfig):
                     llm = reload_model_weights(llm, Path(config.rl.ckpt_path) / f"step_{ckpt_step}/model.safetensors")
                     total_problems = 0
                     total_tokens = 0
-                    logger.info(f"Reloaded model weights for step {ckpt_step} from {stable_file}")
+                    logger.success(f"Reloaded model weights for step {ckpt_step} from {stable_file}")
                     break
                 if attempt_count % 30 == 0:
                     logger.info(f"No stable file found at {stable_file}, waiting for new checkpoint")
                 time.sleep(1)
                 attempt_count += 1
+
+        if config.step_path is not None:
+            logger.info(f"Writing current inference step ({real_step}) to {config.step_path}")
+            if not config.step_path.exists():
+                config.step_path.parent.mkdir(parents=True, exist_ok=True)
+            config.step_path.write_text(str(real_step))
 
         # Get batch
         if node_address_int is not None:
@@ -242,6 +261,8 @@ def inference(config: InferenceConfig):
         else:
             # Use modulo to cycle through the dataset instead of terminating
             indices = [(dataset_offset + j) % len(dataset) for j in range(problems_per_batch)]
+            if seed is not None:
+                sampling_params.seed = seed + real_step * 1_000_000  # 1M is needed to avoid collision from sampling.n
 
         logger.debug(f"Sampling batch with indices [{' '.join(map(str, indices[:3]))}...{' '.join(map(str, indices[-3:]))}]")
         problems = dataset.select(indices)
@@ -264,21 +285,136 @@ def inference(config: InferenceConfig):
             tokenize=True,
         )
 
-        # Convert BatchEncoding to TokensPrompt objects
-        token_prompts = [TokensPrompt(prompt_token_ids=input_ids) for input_ids in tokenized_prompts]
+        generate_start_time = time.time()
+        if config.contexts:
+            # Convert tokenized prompts to TokensPrompt objects (prompt_id -> TokensPrompt)
+            # TODO(jack): These can probably be lists and then we dont need the list dict sort thing going on at the end?
+            unordered_token_prompts: dict[int, TokensPrompt] = {
+                i: TokensPrompt(prompt_token_ids=prompt_token_ids) for i, prompt_token_ids in enumerate(tokenized_prompts)
+            }
+            # Save chunked request outputs (prompt_id -> RequestOutput)
+            unordered_output_token_ids: dict[int, list[int]] = {i: [] for i in unordered_token_prompts.keys()}
+            unordered_proofs: dict[int, bytes] = {i: b"" for i in unordered_token_prompts.keys()}
 
-        start_time = time.time()
-        request_outputs = llm.generate(token_prompts, sampling_params, use_tqdm=False)
-        end_time = time.time()
+            max_model_len = llm.llm_engine.model_config.max_model_len
+            assert max(config.contexts) <= max_model_len, "The final context should be less than the max model length"
+            assert sorted(config.contexts) == config.contexts, "Contexts must be sorted"
+            num_finished_sequences = 0
+            for context in config.contexts:
+                # Auto-compute the max batch size for the current context
+                logger.info(f"Running at context {context}")
+                local_max_batch_size = compute_max_batch_size(llm, max_model_len=context)
+                if node:
+                    max_batch_size = int(
+                        all_reduce(node, torch.tensor(local_max_batch_size), config=config.parallel.pp, op=torch.min).item()
+                    )
+                else:
+                    max_batch_size = local_max_batch_size
+                logger.info(f"Auto-computed maximum batch size for context {context}: {max_batch_size}")
 
-        # Dropping like this isn't ideal. But in practice, we shouldn't have any prompts that are too long.
-        request_outputs = [req for req in request_outputs if len(req.outputs[0].token_ids) > 0]
-        if len(request_outputs) != len(prompts):
-            logger.warning(f"{len(prompts) - len(request_outputs)} prompts were filtered out because they were too long")
+                # Micro-batch the sequences to not trigger cache eviction
+                prompt_ids = list(unordered_token_prompts.keys())
+                micro_batch_prompt_ids = [prompt_ids[i : i + max_batch_size] for i in range(0, len(prompt_ids), max_batch_size)]
+                micro_batches = [
+                    {prompt_id: unordered_token_prompts[prompt_id] for prompt_id in micro_batch_prompt_ids}
+                    for micro_batch_prompt_ids in micro_batch_prompt_ids
+                ]
+                finish_sequence = context == max(config.contexts)  # Last context
+                for mb_i, mb_unordered_tokens_prompts in enumerate(micro_batches):
+                    # 1. Figure out the max_tokens to set
+                    max_input_tokens = max(len(token_prompt["prompt_token_ids"]) for token_prompt in mb_unordered_tokens_prompts.values())
+                    # TopLoc1 proofs do chunks of 32 tokens
+                    # So we must have a multiple of 32 tokens
+                    max_tokens = int((context - max_input_tokens) / 32) * 32
+                    assert max_tokens > 0, "Context must be larger than the max input tokens"
+                    sampling_params.max_tokens = max_tokens
 
-        # This generates proofs for the remaining sequences that haven't reached max_len.
-        # We call here to give time for the proofs to be generated non-blocking in the background.
-        toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
+                    # 2. Generate
+                    logger.info(
+                        f"Generating {len(mb_unordered_tokens_prompts)} samples with context {context} for micro batch {mb_i + 1}/{len(micro_batches)} ({max_tokens} tokens)"
+                    )
+                    logger.info(f"Token prompt IDs: {list(mb_unordered_tokens_prompts.keys())}")
+                    start_time = time.time()
+                    request_outputs = llm.generate(list(mb_unordered_tokens_prompts.values()), sampling_params, use_tqdm=config.use_tqdm)
+                    generation_time = time.time() - start_time
+                    logger.info(f"Generated {len(request_outputs)} samples in {generation_time:.2f}s")
+
+                    # Force generation of proofs for the remaining sequences that haven't reached max_len.
+                    toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
+
+                    # Save the TOPLOC proofs for the current chunk
+                    toploc_cache.wait_for_proofs()
+                    chunked_proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
+                    for prompt_id, chunked_proof in zip(mb_unordered_tokens_prompts.keys(), chunked_proofs):
+                        unordered_proofs[prompt_id] += chunked_proof
+                    toploc_cache.reset_cache()
+
+                    # Only keep unfinished sequences for the next iteration
+                    finished_prompt_ids = []
+                    for prompt_id, request_output in zip(mb_unordered_tokens_prompts.keys(), request_outputs):
+                        # Note: This assumes that sampling.n == 1, else it might break
+                        assert len(request_output.outputs) == 1, "Sampling.n must be 1"
+                        output = request_output.outputs[0]
+                        unordered_output_token_ids[prompt_id].extend(output.token_ids)
+                        if output.finish_reason == "stop" or finish_sequence:
+                            # We remember which sequences finished, so we can pop remove them from the prompt pool
+                            finished_prompt_ids.append(prompt_id)
+                        else:
+                            # Overwrite the token prompt so that we prefill the next chunk
+                            unordered_token_prompts[prompt_id] = TokensPrompt(
+                                prompt_token_ids=[*request_output.prompt_token_ids, *output.token_ids]
+                            )
+                    for prompt_id in finished_prompt_ids:
+                        unordered_token_prompts.pop(prompt_id)
+
+                    num_finished_sequences += len(finished_prompt_ids)
+                    logger.info(f"Finished {len(finished_prompt_ids)} sequences at micro batch {mb_i} at context {context}")
+                logger.info(f"Finished {num_finished_sequences} sequences at context {context}")
+
+            # Order the request outputs by prompt_id to pretend like we generated all samples in one go
+            # request_outputs = list(dict(sorted(unordered_request_outputs.items(), key=lambda x: x[0])).values())
+            from vllm.outputs import RequestOutput, CompletionOutput
+
+            request_outputs = []
+            for prompt_id in unordered_output_token_ids.keys():
+                request_outputs.append(
+                    RequestOutput(
+                        request_id="shouldnt matter",
+                        prompt=None,
+                        prompt_logprobs=None,
+                        finished=True,
+                        prompt_token_ids=tokenized_prompts[prompt_id],
+                        outputs=[
+                            CompletionOutput(
+                                index=0,
+                                token_ids=unordered_output_token_ids[prompt_id],
+                                text=tokenizer.decode(unordered_output_token_ids[prompt_id], skip_special_tokens=True),
+                                cumulative_logprob=None,
+                                logprobs=None,
+                            )
+                        ],
+                    )
+                )
+            proofs = list(dict(sorted(unordered_proofs.items(), key=lambda x: x[0])).values())
+            assert len(request_outputs) == batch_size, "Number of request outputs must match batch size"
+            assert len(proofs) == batch_size, "Number of proofs must match batch size"
+        else:
+            token_prompts: list[TokensPrompt] = [TokensPrompt(prompt_token_ids=prompt_token_ids) for prompt_token_ids in tokenized_prompts]
+            request_outputs = llm.generate(token_prompts, sampling_params, use_tqdm=config.use_tqdm)
+
+            # This generates proofs for the remaining sequences that haven't reached max_len.
+            # We call here to give time for the proofs to be generated non-blocking in the background.
+            toploc_cache.maybe_generate_proofs_in_background(force_generate=True)
+
+            # Compute proofs
+            # Note (Jack): Currently, vllm guarantees that seq ids are in the same order as prompts passed to generate.
+            # Generate always adds requests to the engine in the order of the prompts.
+            # And returns them in the sequence they were added.
+            toploc_cache.wait_for_proofs()
+            proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
+            toploc_cache.reset_cache()
+
+        generation_time = time.time() - generate_start_time
 
         # Compute progress metrics
         batch_problems = len(problems)
@@ -289,27 +425,28 @@ def inference(config: InferenceConfig):
         total_tokens += batch_tokens
         total_problems += batch_problems
         total_samples += batch_samples
-        logger.info(f"Generated {batch_samples} samples for {batch_problems} problems for step {real_step} in {end_time - start_time:.2f}s")
+        logger.success(f"Generated {batch_samples} samples for {batch_problems} problems in {generation_time:.2f}s")
 
         # Print example
         first_prompt = tokenizer.decode(request_outputs[0].prompt_token_ids)
         first_completion = tokenizer.decode(request_outputs[0].outputs[0].token_ids)
-        logger.debug(f"Example: {first_prompt}{first_completion}")
+        logger.debug(f"Showing example (first completion):\n{first_prompt}{first_completion}")
 
         # Log progress metrics
         progress_metrics = {
             "progress/batch_problems": batch_problems,
             "progress/batch_samples": batch_samples,
             "progress/batch_tokens": batch_tokens,
+            "step": real_step,
         }
         monitor.log(progress_metrics)
 
         # Compute performance metrics
-        batch_tokens_per_second = batch_tokens / (end_time - start_time)
-        batch_samples_per_minute = batch_samples / (end_time - start_time) * 60
+        batch_tokens_per_second = batch_tokens / generation_time
+        batch_samples_per_minute = batch_samples / generation_time * 60
         batch_avg_seq_length = batch_tokens / batch_size
         logger.info(
-            f"Batch throughput: {batch_tokens_per_second:.2f} tokens/sec, {batch_samples_per_minute:.2f} samples/min ({batch_tokens} tokens in {end_time - start_time:.2f}s, avg seq len: {batch_avg_seq_length:.1f})"
+            f"Batch throughput: {batch_tokens_per_second:.2f} tokens/sec, {batch_samples_per_minute:.2f} samples/min ({batch_tokens} tokens in {generation_time:.2f}s, avg seq len: {batch_avg_seq_length:.1f})"
         )
 
         # Log performance metrics
@@ -317,26 +454,16 @@ def inference(config: InferenceConfig):
             "performance/batch_tokens_per_second": batch_tokens_per_second,
             "performance/batch_samples_per_minute": batch_samples_per_minute,
             "performance/batch_avg_seq_length": batch_avg_seq_length,
+            "step": real_step,
         }
         monitor.log(perf_metrics)
 
-        # Compute proofs
-        # Note (Jack): Currently, vllm guarantees that seq ids are in the same order as prompts passed to generate.
-        # Generate always adds requests to the engine in the order of the prompts.
-        # And returns them in the sequence they were added.
-        toploc_cache.wait_for_proofs()
-        proofs = [b"".join(proofs) for _, proofs in sorted(toploc_cache.proofs.items(), key=lambda x: x[0])]
-        toploc_cache.reset_cache()
-
-        # Compute rewards and advantages
-        start = time.time()
+        # Compute and log rewards and advantages
+        logger.info("Computing rewards and advantages")
         request_rewards = compute_vllm_rewards(request_outputs, verification_infos, task_types, config.rewards)
-        logger.info(f"Computed rewards and advantages in {time.time() - start:.2f}s")
-
         batch_rewards = sum(sum(r.reward for r in req.rewards) for req in request_rewards) / batch_samples
-
-        monitor.log({"rewards/batch_rewards": batch_rewards})
-        logger.info(f"Average reward of the batch: {batch_rewards}")
+        logger.info(f"Average reward of the batch: {batch_rewards:.2f}")
+        monitor.log({"rewards/batch_rewards": batch_rewards, "step": real_step})
 
         if sampling_params.seed is not None:
             sampling_seeds = [sampling_params.seed + i for i in range(sampling_params.n)] * problems_per_batch
@@ -361,8 +488,8 @@ def inference(config: InferenceConfig):
         step_path = Path(config.rollout_path) / f"step_{real_step}"
         step_path.mkdir(parents=True, exist_ok=True)
         save_path = step_path / f"{uuid.uuid4()}.parquet"
+        logger.info(f"Saving batch outputs to {save_path}")
         pq.write_table(table, save_path)
-        logger.info(f"Saved batch outputs to {save_path}")
 
         # Log file metadata
         sha256 = sha256sum(save_path)
@@ -371,14 +498,14 @@ def inference(config: InferenceConfig):
             for input_tokens, output_tokens in zip(table.column("input_tokens").to_pylist(), table.column("output_tokens").to_pylist())
         ]
 
-        monitor.log(
-            {
-                "output/save_path": save_path.as_posix(),
-                "output/sha256": sha256,
-                "output/output_flops": sum(output_flops for _, output_flops in flop_counts) // config.parallel.pp.world_size,
-                "output/input_flops": sum(input_flops for input_flops, _ in flop_counts) // config.parallel.pp.world_size,
-            }
-        )
+        work_submission = {
+            "output/output_flops": sum(output_flops for _, output_flops in flop_counts) // config.parallel.pp.world_size,
+            "output/input_flops": sum(input_flops for input_flops, _ in flop_counts) // config.parallel.pp.world_size,
+            "output/save_path": save_path.as_posix(),
+            "output/sha256": sha256,
+            "output/step": real_step,
+        }
+        monitor.log(work_submission, exclude=["wandb"])
 
         real_step += 1
 
@@ -388,10 +515,7 @@ def inference(config: InferenceConfig):
 
         dataset_offset += problems_per_batch
 
-    logger.info(f"Inference finished! Generated {total_samples} samples for {total_problems} problems")
-
-    # Manually destroy vLLM process group to avoid warnings
-    dist.destroy_process_group()
+    logger.success(f"Inference finished! Generated {total_samples} samples for {total_problems} problems")
 
 
 def main(config: InferenceConfig) -> list[mp.Process]:
@@ -425,11 +549,7 @@ if __name__ == "__main__":
     # Set spawn method before any other multiprocessing code
     mp.set_start_method("spawn")
 
-    # Extract toml file paths from CLI arguments
-    toml_paths, cli_args = extract_toml_paths(sys.argv[1:])
-    set_toml_paths(toml_paths)
-
-    config = InferenceConfig(_cli_parse_args=to_kebab_case(cli_args))
+    config = parse_argv(InferenceConfig)
 
     if config.rl and config.rl.step_endpoint is not None:
         current_step = requests.get(config.rl.step_endpoint).json()
@@ -445,10 +565,10 @@ if __name__ == "__main__":
         shardcast_process = run_main_bg(
             inference_envs.SHARDCAST_SERVERS,
             config.rl.ckpt_path,
-            config.rl.max_async + 1,
+            config.rl.async_level + 1,
             # TODO: maybe +1 because we most likely won't download the current step in time?
             # We could deadlock though.
-            max(current_step - config.rl.max_async, 1),
+            max(current_step - config.rl.async_level, 1),
         )
     else:
         shardcast_process = None

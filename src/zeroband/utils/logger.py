@@ -1,61 +1,32 @@
-import logging
-from logging import Formatter, Logger
-from typing import Literal
+from loguru._logger import Logger
 
-from zeroband.training.world_info import WorldInfo, get_world_info
-from zeroband.utils import envs
+# Global loguru logger instance
+_LOGGER: Logger | None = None
 
 
-class PrimeFormatter(Formatter):
-    def __init__(self, world_info: WorldInfo | None = None):
-        super().__init__()
-        self.world_info = world_info
-
-    def format(self, record):
-        if self.world_info is not None:
-            record.rank = self.world_info.rank
-            log_format = "{asctime} [{name}] [Rank {rank}] [{levelname}] [{filename}:{lineno}] {message}"
-        else:
-            log_format = "{asctime} [{name}] [{levelname}] {message}"
-        formatter = logging.Formatter(log_format, style="{", datefmt="%m-%d %H:%M:%S")
-        return formatter.format(record)
+def set_logger(logger: Logger) -> None:
+    """
+    Set the global logger. This function is shared across submodules such as
+    training and inference, and should be called *exactly once* from a
+    module-specific `setup_logger` function with the logger instance.
+    """
+    global _LOGGER
+    _LOGGER = logger
 
 
-ALLOWED_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "critical": logging.CRITICAL}
-LoggerName = Literal["INFER", "TRAIN"]
+def get_logger() -> Logger:
+    """
+    Get the global logger. This function is shared across submodules such as
+    training and inference to accesst the global logger instance.
+
+    Returns:
+        The global logger.
+    """
+    global _LOGGER
+    return _LOGGER
 
 
-def get_logger(name: LoggerName) -> Logger:
-    # Get logger from Python's built-in registry
-    logger = logging.getLogger(name)
-
-    # Only configure the logger if it hasn't been configured yet
-    if not logger.handlers:
-        level = envs.PRIME_LOG_LEVEL
-        world_info = None
-        if name == "TRAIN":
-            world_info = get_world_info()
-            if world_info.local_rank == 0:
-                # On first rank, set log level from env var
-                logger.setLevel(ALLOWED_LEVELS.get(level, logging.INFO))
-            else:
-                # Else, only log critical messages
-                logger.setLevel(logging.CRITICAL)
-        else:
-            # Set log level
-            logger.setLevel(ALLOWED_LEVELS.get(level, logging.INFO))
-
-        # Add handler with custom formatter
-        handler = logging.StreamHandler()
-        handler.setFormatter(PrimeFormatter(world_info=world_info))
-        logger.addHandler(handler)
-
-        # Prevent the log messages from being propagated to the root logger
-        logger.propagate = False
-
-    return logger
-
-
-def reset_logger(name: str | None = None) -> None:
-    logger = logging.getLogger(name)
-    logger.handlers.clear()
+def reset_logger() -> None:
+    """Reset the global logger. Useful mainly in test to clear loggers between tests."""
+    global _LOGGER
+    _LOGGER = None

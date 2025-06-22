@@ -22,7 +22,7 @@ class DatasetOutput(TypedDict):
     input_ids: Int[torch.Tensor, "seq"]
     advantages: Float[torch.Tensor, "seq"]
     loss_mask: Int[torch.Tensor, "seq"]
-    logprobs: Float[torch.Tensor, "seq"] | None  # logprobs from vllm (optional)
+    logprobs: Float[torch.Tensor, "seq"]
 
     # sample level
     seq_lens: Int[torch.Tensor, "1"]
@@ -37,12 +37,11 @@ class DatasetOutput(TypedDict):
 class FakeTokenizedDataset(IterableDataset):
     """A dummy dataset that generates random sequences with the full schema including new columns."""
 
-    def __init__(self, seq_len: int, vocab_size: int, generate_logprobs: bool = True):
+    def __init__(self, seq_len: int, vocab_size: int):
         self.seq_len = seq_len
         self.vocab_size = vocab_size
         assert vocab_size > 3, "Vocab size must be greater than 3"
         self.step = 0
-        self.generate_logprobs = generate_logprobs
 
     def __iter__(self) -> Generator[DatasetOutput, Any, None]:
         while True:
@@ -55,13 +54,7 @@ class FakeTokenizedDataset(IterableDataset):
             input_ids = torch.randint(3, self.vocab_size, (len_,))
             advantages = torch.randn(len_)
             self.step += 1
-
-            # Generate fake logprobs if requested
-            logprobs = None
-            if self.generate_logprobs and len_ > 1:
-                # Generate random negative values for log probabilities
-                # Exclude first token (BOS) to match expected format
-                logprobs = -torch.abs(torch.randn(len_ - 1))  # Negative values for log probs
+            logprobs = -torch.abs(torch.randn(len_))  # Negative values for log probs
 
             yield {
                 "input_ids": input_ids,
@@ -91,7 +84,7 @@ def _get_dataset_from_files_step(
     step_count: int, path: Path, timeout: float, batch_size: int, ignore_zero_advantages: bool, use_stable_file: bool
 ) -> ds.Dataset:
     """Get all the files for a given step. Waits until the step is created which is indicated by the stable file."""
-    logger = get_logger("TRAIN")
+    logger = get_logger()
     step_path = path / f"step_{step_count}"
 
     start_time = time.time()
@@ -122,7 +115,7 @@ def _get_dataset_from_files_step(
 
                 rows = dataset.count_rows()
             except Exception as e:
-                logger.warn(f"Error loading dataset for step {step_count}: {e}, files: {files}")
+                logger.warning(f"Error loading dataset for step {step_count}: {e}, files: {files}")
                 rows = 0
 
             if rows >= batch_size:
@@ -199,9 +192,8 @@ class ParquetDataset(IterableDataset):
         ignore_zero_advantages: bool,
         pq_read_bs: int = 64,
         use_stable_file: bool = False,
-        use_vllm_logprobs: bool = False,
     ):
-        self._logger = get_logger("TRAIN")
+        self._logger = get_logger()
         self._path = path
         self._batch_size = batch_size
         self._pq_read_bs = pq_read_bs
@@ -214,7 +206,6 @@ class ParquetDataset(IterableDataset):
         self._ignore_zero_advantages = ignore_zero_advantages
 
         self._use_stable_file = use_stable_file
-        self._use_vllm_logprobs = use_vllm_logprobs
 
     def __iter__(self) -> Generator[DatasetOutput, Any, None]:
         worker_info = torch.utils.data.get_worker_info()
@@ -235,7 +226,7 @@ class ParquetDataset(IterableDataset):
 
             sample_count = 0
 
-            self._logger.debug(msg=f"data: Processing step {self._step_count}")
+            self._logger.debug(f"Data processing step {self._step_count}")
 
             dataset = _get_dataset_from_files_step(
                 self._step_count, self._path, self._timeout, self._batch_size, self._ignore_zero_advantages, self._use_stable_file
@@ -250,33 +241,16 @@ class ParquetDataset(IterableDataset):
                 "length_penalties",
                 "target_lengths",
                 "task_type",
+                "input_logprobs",
+                "output_logprobs",
                 "temperature",
             ]
-
-            if self._use_vllm_logprobs:
-                required_columns.extend(["input_logprobs", "output_logprobs"])
 
             scanner = dataset.scanner(columns=required_columns, batch_size=self._pq_read_bs)
             counter = 0
 
             for j, batch in enumerate(scanner.to_batches()):
                 if all(col in batch.column_names for col in required_columns):
-                    batch_data = {
-                        "input_tokens": batch["input_tokens"],
-                        "output_tokens": batch["output_tokens"],
-                        "advantages": batch["advantages"],
-                        "rewards": batch["rewards"],
-                        "task_rewards": batch["task_rewards"],
-                        "length_penalties": batch["length_penalties"],
-                        "target_lengths": batch["target_lengths"],
-                        "task_type": batch["task_type"],
-                        "temperature": batch["temperature"],
-                    }
-
-                    if self._use_vllm_logprobs:
-                        batch_data["input_logprobs"] = batch["input_logprobs"]
-                        batch_data["output_logprobs"] = batch["output_logprobs"]
-
                     for i in range(len(batch["input_tokens"])):
                         counter += 1
                         if _should_skip_index(
@@ -289,41 +263,38 @@ class ParquetDataset(IterableDataset):
                             continue
 
                         try:
-                            input_ids = torch.tensor(batch_data["input_tokens"][i].as_py())
-                            output_ids = torch.tensor(batch_data["output_tokens"][i].as_py())
+                            input_ids = torch.tensor(batch["input_tokens"][i].as_py())
+                            output_ids = torch.tensor(batch["output_tokens"][i].as_py())
 
                             ids = torch.cat([input_ids, output_ids], dim=0)
                             loss_mask = torch.cat([torch.zeros(len(input_ids)), torch.ones(len(output_ids))], dim=0).int()
 
-                            adv_value = batch_data["advantages"][i].as_py()
-                            reward_value = batch_data["rewards"][i].as_py()
+                            adv_value = batch["advantages"][i].as_py()
+                            reward_value = batch["rewards"][i].as_py()
 
                             adv = torch.tensor([adv_value] * len(ids))  # advantage
 
-                            # Compute logprobs if using vllm logprobs
-                            logprobs = None
-                            if self._use_vllm_logprobs:
-                                input_logprobs = torch.tensor(batch_data["input_logprobs"][i].as_py())
-                                output_logprobs = torch.tensor(batch_data["output_logprobs"][i].as_py())
-                                # Concatenate and remove the first token (BOS)
-                                logprobs = torch.cat([input_logprobs, output_logprobs], dim=0)
-                                assert logprobs.shape == ids.shape, f"logprobs: {logprobs.shape} should be the same as ids: {ids.shape}"
+                            input_logprobs = torch.tensor(batch["input_logprobs"][i].as_py())
+                            output_logprobs = torch.tensor(batch["output_logprobs"][i].as_py())
+                            # Concatenate and remove the first token (BOS)
+                            logprobs = torch.cat([input_logprobs, output_logprobs], dim=0)
+                            assert logprobs.shape == ids.shape, f"logprobs: {logprobs.shape} should be the same as ids: {ids.shape}"
 
                             data = {
                                 "input_ids": ids,
                                 "advantages": adv,
                                 "rewards": reward_value,
                                 "loss_mask": loss_mask,
-                                "task_rewards": batch_data["task_rewards"][i].as_py(),
-                                "length_penalties": batch_data["length_penalties"][i].as_py(),
-                                "target_lengths": batch_data["target_lengths"][i].as_py(),
-                                "task_type": batch_data["task_type"][i].as_py(),
+                                "task_rewards": batch["task_rewards"][i].as_py(),
+                                "length_penalties": batch["length_penalties"][i].as_py(),
+                                "target_lengths": batch["target_lengths"][i].as_py(),
+                                "task_type": batch["task_type"][i].as_py(),
                                 "logprobs": logprobs,
-                                "temperature": batch_data["temperature"][i].as_py(),
+                                "temperature": batch["temperature"][i].as_py(),
                             }
 
                         except Exception as e:
-                            self._logger.warn(f"Error processing row {counter} sample {sample_count}: {str(e)}")
+                            self._logger.warning(f"Error processing row {counter} sample {sample_count}: {str(e)}")
                             data = None
 
                         if data is not None:
@@ -333,7 +304,7 @@ class ParquetDataset(IterableDataset):
                         if sample_count >= target_sample_count_per_batch:
                             break
                 else:
-                    self._logger.warn(f"Batch {j} does not have the required columns")
+                    self._logger.warning(f"Batch {j} does not have the required columns")
 
                 if sample_count >= target_sample_count_per_batch:
                     break
@@ -349,7 +320,6 @@ def get_dataloader(
     batch_size: int,
     data_config: DataConfig,
     step_count_init: int,
-    use_vllm_logprobs: bool = False,
 ) -> tuple[DataLoader[list[DatasetOutput]], GCPPrefetcher | None]:
     """Get a dataloader for the training dataset"""
 
@@ -366,7 +336,7 @@ def get_dataloader(
         path = data_config.local_dir
 
     if data_config.fake:
-        train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer), generate_logprobs=use_vllm_logprobs)
+        train_dataset = FakeTokenizedDataset(data_config.seq_length, len(tokenizer))
     else:
         train_dataset = ParquetDataset(
             Path(path),
@@ -375,7 +345,6 @@ def get_dataloader(
             step_count_init,
             data_config.ignore_zero_advantages,
             use_stable_file=use_stable_file,
-            use_vllm_logprobs=use_vllm_logprobs,
         )
 
     loader = DataLoader(
@@ -393,7 +362,7 @@ class BatchOutput(TypedDict):
     advantages: Float[torch.Tensor, "batch seq"]
     loss_mask: Int[torch.Tensor, "batch seq"]
     position_ids: Int[torch.Tensor, "batch seq"]
-    logprobs: Float[torch.Tensor, "batch seq_minus_1"] | None  # logprobs from vllm (optional)
+    logprobs: Float[torch.Tensor, "batch seq_minus_1"]
 
     # sample level
     seq_lens: Int[torch.Tensor, "sample"]

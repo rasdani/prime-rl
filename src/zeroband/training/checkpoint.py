@@ -99,7 +99,7 @@ def save_ckpt_for_rollout(
     Return:
         Path to the saved checkpoint safetensor
     """
-    logger = get_logger("TRAIN")
+    logger = get_logger()
     world_info = get_world_info()
 
     if not path.exists():

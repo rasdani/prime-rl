@@ -1,11 +1,9 @@
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 
-
-class BaseConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+from zeroband.utils.pydantic_config import BaseConfig
 
 
 class FileMonitorConfig(BaseConfig):
@@ -52,6 +50,37 @@ class APIMonitorConfig(BaseConfig):
         return self
 
 
+class WandbMonitorConfig(BaseConfig):
+    """Configures logging to Weights and Biases."""
+
+    project: Annotated[str, Field(default="prime-rl", description="The W&B project to log to.")]
+    group: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="The W&B group to log to. If None, it will not set the group. Use grouping if you want multiple associated runs (e.g. RL training has a training and inference run) log to the same dashboard.",
+        ),
+    ]
+    name: Annotated[str | None, Field(default=None, description="The W&B name to to use for logging.")]
+    dir: Annotated[
+        Path | None,
+        Field(
+            default=Path("logs"),
+            description="Path to the directory to keep local logs. It will automatically create a `wandb` subdirectory to store run logs.",
+        ),
+    ]
+
+    prefix: Annotated[
+        str,
+        Field(
+            default="",
+            description="The prefix to add to each key in the metrics dictionary before logging to W&B. Useful for distinguishing between different runs in the same group (e.g. training and inference)",
+        ),
+    ]
+
+    log_samples: Annotated[bool, Field(default=False, description="Whether to log samples to W&B.")]
+
+
 class MultiMonitorConfig(BaseConfig):
     """Configures the monitoring system."""
 
@@ -59,42 +88,12 @@ class MultiMonitorConfig(BaseConfig):
     file: Annotated[FileMonitorConfig, Field(default=None)]
     socket: Annotated[SocketMonitorConfig, Field(default=None)]
     api: Annotated[APIMonitorConfig, Field(default=None)]
+    wandb: Annotated[WandbMonitorConfig, Field(default=None)]
 
     system_log_frequency: Annotated[
         int, Field(default=0, ge=0, description="Interval in seconds to log system metrics. If 0, no system metrics are logged)")
     ]
 
     def __str__(self) -> str:
-        file_str = "disabled" if self.file is None else f"path={self.file.path}"
-        socket_str = "disabled" if self.socket is None else f"path={self.socket.path}"
-        api_str = "disabled" if self.api is None else f"url={self.api.url}"
-        return f"file={file_str}, socket={socket_str}, api={api_str}, system_log_frequency={self.system_log_frequency}"
-
-
-# Extract config file paths from CLI to pass to pydantic-settings as toml source
-# This enables the use of `@` to pass config file paths to the CLI
-def extract_toml_paths(args: list[str]) -> tuple[list[str], list[str]]:
-    toml_paths = []
-    remaining_args = args.copy()
-    for arg, next_arg in zip(args, args[1:] + [""]):
-        if arg.startswith("@"):
-            if arg == "@":  # We assume that the next argument is a toml file path
-                toml_paths.append(next_arg)
-                remaining_args.remove(arg)
-                remaining_args.remove(next_arg)
-            else:  # We assume that the argument is a toml file path
-                toml_paths.append(arg.replace("@", ""))
-                remaining_args.remove(arg)
-    return toml_paths, remaining_args
-
-
-def to_kebab_case(args: list[str]) -> list[str]:
-    """
-    Converts CLI argument keys from snake case to kebab case.
-
-    For example, `--max_batch_size 1` will be transformed `--max-batch-size 1`.
-    """
-    for i, arg in enumerate(args):
-        if arg.startswith("--"):
-            args[i] = arg.replace("_", "-")
-    return args
+        is_enabled = lambda x: "enabled" if x is not None else "disabled"
+        return f"file={is_enabled(self.file)}, socket={is_enabled(self.socket)}, api={is_enabled(self.api)}, wandb={is_enabled(self.wandb)}, system_log_frequency={self.system_log_frequency}"

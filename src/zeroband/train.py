@@ -1,9 +1,9 @@
 import logging
 import os
 import shutil
-import sys
 import time
 from collections import defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,17 +11,16 @@ import shardcast
 import torch
 import torch.distributed as dist
 import torch.distributed.tensor
-import wandb
 from jaxtyping import Float
 from liger_kernel.transformers import apply_liger_kernel_to_qwen2
 from torch._guards import log as torch_log
-from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard  # type: ignore
+from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
 from zeroband.training import envs
 from zeroband.training.checkpoint import TrainingProgress, load_checkpoint_fsdp_state, save_checkpoint_fsdp_state, save_ckpt_for_rollout
 from zeroband.training.config import Config as TrainingConfig
-from zeroband.training.config import set_toml_paths
 from zeroband.training.data import BatchOutput, DatasetOutput, get_dataloader, packed_batch
+from zeroband.training.logger import setup_logger
 from zeroband.training.loss import entropy_loss, grpo_loss, kl_penalty, selective_log_softmax
 from zeroband.training.utils import (
     MetricsAverager,
@@ -30,16 +29,15 @@ from zeroband.training.utils import (
     apply_ac_ckpt,
     copy_model_to_cpu,
     log_prompt_response_samples,
-    log_to_wandb,
     offload_model_to_cpu,
     reshard_module,
     wake_up_model_from_cpu,
 )
 from zeroband.training.world_info import WorldInfo, get_world_info
-from zeroband.utils.config import extract_toml_paths, to_kebab_case
-from zeroband.utils.logger import get_logger
 from zeroband.utils.models import ModelType, get_model_and_tokenizer
 from zeroband.utils.monitor import setup_monitor
+from zeroband.utils.pydantic_config import parse_argv
+from zeroband.utils.utils import clean_exit
 
 
 def get_local_batch_size(batch_size: int, micro_bs: int, data_workers: int, world_info: WorldInfo) -> int:
@@ -87,12 +85,13 @@ def get_logprobs(model: ModelType, input_ids: torch.Tensor, position_ids: torch.
     return logprobs
 
 
+@clean_exit
 def train(config: TrainingConfig):
     if "ZERO_BAND_DEV" not in os.environ:
         torch_log.setLevel(logging.CRITICAL)
 
-    logger = get_logger("TRAIN")
     world_info = get_world_info()
+    logger = setup_logger(config.log, world_info)
     wandb_sample_history = None
 
     if config.ckpt.clean_rollout_path and config.ckpt.rollout_path is not None:
@@ -112,7 +111,7 @@ def train(config: TrainingConfig):
 
     if config.ckpt.rollout_path is not None and world_info.rank == 0:
         if envs.SHARDCAST_OUTPUT_DIR is not None:
-            shardcast.initialize(envs.SHARDCAST_OUTPUT_DIR, max_distribution_folders=config.async_level)
+            shardcast.initialize(envs.SHARDCAST_OUTPUT_DIR, max_distribution_folders=config.max_async_level)
 
     model, tokenizer = get_model_and_tokenizer(config.model.name, config.train.attn_impl)
 
@@ -150,11 +149,8 @@ def train(config: TrainingConfig):
     total_samples = config.start_total_samples if config.start_total_samples is not None else 0
     training_progress = TrainingProgress(total_tokens=0, step=config.start_step, total_samples=total_samples)
 
-    if world_info.rank == 0 and config.wandb:
-        wandb.init(project=config.project, config=config.model_dump(), dir="wandb_logs", name=config.wandb_run_name)
-
     # Setup the monitor
-    monitor = setup_monitor(config.monitor)
+    monitor = setup_monitor(config.monitor, run_config=config)
 
     if config.train.torch_compile:
         model = torch.compile(model) if not TYPE_CHECKING else model
@@ -197,7 +193,6 @@ def train(config: TrainingConfig):
         batch_size=config.optim.batch_size * config.optim.step_per_rollout,
         data_config=config.data,
         step_count_init=step_count_init,
-        use_vllm_logprobs=config.recompute_logprobs,
     )
     train_dataloader_iterator = iter(train_dataloader)
 
@@ -218,7 +213,7 @@ def train(config: TrainingConfig):
                 # del tensor_offloaded_repository[0]
 
             if config.recompute_logprobs:
-                og_infer_step = training_progress.step // config.optim.step_per_rollout - config.async_level
+                og_infer_step = training_progress.step // config.optim.step_per_rollout - config.max_async_level
                 infer_step = max(og_infer_step, 0)
                 wake_up_model_from_cpu(model_for_logprob_only, tensor_offloaded_repository[infer_step])
 
@@ -247,18 +242,16 @@ def train(config: TrainingConfig):
 
                 for grad_acc_step in range(num_grad_acc_steps):
                     batch = batch_packed[grad_acc_step]
-                    logger.debug(f"log prob grad_acc_step {grad_acc_step} / {num_grad_acc_steps}, batch: {batch['input_ids'].shape}")
 
                     # Only compute logprobs if not using vllm logprobs or if the batch doesn't have them
-                    if config.recompute_logprobs or batch["logprobs"] is None:
+                    if config.recompute_logprobs:
+                        logger.debug(f"log prob grad_acc_step {grad_acc_step} / {num_grad_acc_steps}, batch: {batch['input_ids'].shape}")
                         input_ids = batch["input_ids"].to("cuda")
 
                         model_for_logprob = model_for_logprob_only if config.recompute_logprobs else model
                         per_token_logps = get_logprobs(model_for_logprob, input_ids, batch["position_ids"], batch["temperature"])
 
                         batch["logprobs"] = per_token_logps.to("cpu")
-                    else:
-                        logger.debug(f"Using vllm logprobs from dataset for grad_acc_step {grad_acc_step}")
 
                     if config.grpo.kl_coef is not None:
                         logger.debug(f"kl grad_acc_step {grad_acc_step} / {num_grad_acc_steps}, batch: {batch['input_ids'].shape}")
@@ -281,8 +274,13 @@ def train(config: TrainingConfig):
 
             logprobs_aware_iterator = iter(data)
 
-            time_logprob = time.time() - time_start
-            logger.info(f"Time to compute logprobs: {time_logprob:.2f} seconds")
+            total_time = time.time() - time_start
+            total_time_logprob = total_time - total_time_data_loading - total_time_packing
+
+            logger.debug(f"Time to data loading: {total_time_data_loading:.2f} seconds")
+            logger.debug(f"Time to packing: {total_time_packing:.2f} seconds")
+            logger.info(f"Time to compute logprobs: {total_time_logprob:.2f} seconds")
+            logger.info(f"Total time data preprocessing: {total_time:.2f} seconds")
 
         logger.debug("start training rollout")
 
@@ -299,7 +297,7 @@ def train(config: TrainingConfig):
             num_grad_acc_steps = len(data_per_rollout)
 
             # Collect samples for WandB logging - do this ONCE per step
-            if world_info.rank == 0 and config.wandb:
+            if config.monitor.wandb is not None and config.monitor.wandb.log_samples and world_info.rank == 0:
                 # Use the first batch for logging (could be configurable if needed)
                 batch = data_per_rollout[0]
 
@@ -325,33 +323,32 @@ def train(config: TrainingConfig):
 
                 # Update general metrics
                 for rewards in batch["rewards"]:
-                    metric_averager.update("sample_reward", rewards)
+                    metric_averager.update("rewards/sample_reward", rewards)
                 for seq_lens in batch["seq_lens"]:
-                    metric_averager.update("seq_lens", seq_lens)
+                    metric_averager.update("lengths/seq_lens", seq_lens)
                 for length_penalties in batch["length_penalties"]:
-                    metric_averager.update("length_penalties", length_penalties)
+                    metric_averager.update("lengths/length_penalties", length_penalties)
                 for target_lengths in batch["target_lengths"]:
-                    metric_averager.update("target_lengths", target_lengths)
+                    metric_averager.update("lengths/target_lengths", target_lengths)
 
                 # Task-specific metrics with proper grouping
                 if "task_types" in batch:
                     # Group rewards by task type
                     task_type_rewards = defaultdict(list)
                     for i, task_type in enumerate(batch["task_types"]):
-                        task_key = f"individual_task_{task_type}"
-                        task_type_rewards[task_key].append(batch["task_rewards"][i].item())
+                        task_type_rewards[task_type].append(batch["task_rewards"][i].item())
 
                     # Update metrics with task-specific averages
                     for task_key, rewards in task_type_rewards.items():
                         if rewards:
                             avg_reward = sum(rewards) / len(rewards)
-                            metric_averager.update(task_key, torch.tensor(avg_reward))
+                            metric_averager.update(f"task_rewards/{task_key}", torch.tensor(avg_reward))
 
                     # Add aggregate task_reward metric
                     all_task_rewards = [reward.item() for reward in batch["task_rewards"]]
                     if all_task_rewards:
                         avg_task_reward = sum(all_task_rewards) / len(all_task_rewards)
-                        metric_averager.update("task_reward", torch.tensor(avg_task_reward))
+                        metric_averager.update("rewards/task_reward", torch.tensor(avg_task_reward))
 
                 # Forward
                 logits: Float[torch.Tensor, "batch seq vocab"] = model(
@@ -376,14 +373,15 @@ def train(config: TrainingConfig):
                     config.grpo.off_policy,
                 )
 
-                entropy = entropy_loss(logits, loss_mask, batch["temperature"], max_tokens)
+                with torch.no_grad() if config.grpo.entropy_loss_coeff == 0 else nullcontext():
+                    entropy = entropy_loss(logits, loss_mask, batch["temperature"], max_tokens)
 
                 loss = pg_loss - config.grpo.entropy_loss_coeff * entropy
 
                 if config.grpo.kl_coef is not None:
                     kl = kl_penalty(original_logprobs, batch["ref_logprobs"].to("cuda"), loss_mask, max_tokens)
                     kl_scaled = kl * config.grpo.kl_coef
-                    metric_averager.update("kl", kl_scaled)
+                    metric_averager.update("losses/kl", kl_scaled)
                     loss = loss + kl_scaled
 
                 loss = loss / num_grad_acc_steps
@@ -397,11 +395,11 @@ def train(config: TrainingConfig):
                 loss.backward()
                 loss_batch += loss.detach().clone()
 
-                metric_averager.update("pg_loss", pg_loss.detach().clone())
-                metric_averager.update("entropy_loss", entropy.detach().clone())
+                metric_averager.update("losses/pg_loss", pg_loss.detach().clone())
+                metric_averager.update("losses/entropy_loss", entropy.detach().clone())
 
                 if clip_ratio is not None:
-                    metric_averager.update("clip_ratio", clip_ratio.detach().clone())
+                    metric_averager.update("losses/clip_ratio", clip_ratio.detach().clone())
 
                 del loss, pg_loss, entropy, clip_ratio
 
@@ -427,19 +425,17 @@ def train(config: TrainingConfig):
             training_progress.total_tokens += new_tokens
             training_progress.total_samples += config.optim.batch_size
 
-            padding_proportion = (config.data.seq_length - metric_averager["seq_lens"].item() - 1) / config.data.seq_length
+            padding_proportion = (config.data.seq_length - metric_averager["lengths/seq_lens"].item() - 1) / config.data.seq_length
 
             metrics = {
-                "Loss": loss_batch.item(),
                 "step": training_progress.step,
-                "rollout_step": rollout_step,
-                "inner_lr": inner_lr,
-                "total_tokens": training_progress.total_tokens,
-                "time": time.time(),
-                "grad_norm": grad_norm.item(),
-                "padding_proportion": padding_proportion,
-                "grad_acc_steps": num_grad_acc_steps,
-                "total_samples": training_progress.total_samples,
+                "losses/Loss": loss_batch.item(),
+                "train/rollout_step": rollout_step,
+                "train/inner_lr": inner_lr,
+                "train/total_tokens": training_progress.total_tokens,
+                "train/total_samples": training_progress.total_samples,
+                "losses/grad_norm": grad_norm.item(),
+                "lengths/padding_proportion": padding_proportion,
             }
 
             for key, value in metric_averager.items():
@@ -449,7 +445,7 @@ def train(config: TrainingConfig):
                 f"step: {training_progress.step}, "
                 f"rollout_step: {training_progress.step // config.optim.step_per_rollout}, "
                 f"loss: {loss_batch.item():.4f}, "
-                f"sample_reward: {metric_averager['sample_reward'].item():.4f}, "
+                f"sample_reward: {metric_averager['rewards/sample_reward'].item():.4f}, "
             )
 
             del loss_batch, grad_norm
@@ -457,27 +453,25 @@ def train(config: TrainingConfig):
             tokens_per_second = perf_counter.get_tokens_per_second()
             if tokens_per_second is not None:
                 tokens_per_second_per_gpu = tokens_per_second / world_info.world_size
-                metrics["tokens_per_second"] = tokens_per_second
-                metrics["tokens_per_second_per_gpu"] = tokens_per_second_per_gpu
+                mfu = perf_counter.get_mfu()
+                metrics.update(
+                    {
+                        "perf/tokens_per_second": tokens_per_second,
+                        "perf/tokens_per_second_per_gpu": tokens_per_second_per_gpu,
+                        "perf/mfu": mfu,
+                    }
+                )
 
-                metrics["mfu"] = perf_counter.get_mfu()
-
-                log += f", tokens_per_second: {tokens_per_second:.2f}, tokens_per_second_per_gpu: {tokens_per_second_per_gpu:.2f}, mfu: {metrics['mfu']:.2f}"
+                log += f", tokens_per_second: {tokens_per_second:.2f}, tokens_per_second_per_gpu: {tokens_per_second_per_gpu:.2f}, mfu: {mfu:.2f}"
 
             if world_info.rank == 0:
-                if config.wandb:
-                    log_to_wandb(metrics)
-
-                # Lowercase metrics before logging
-                metrics = {k.lower(): v for k, v in metrics.items()}
-
-                # Filter metrics to only include the ones we want to send to the API
-                metrics = {k: metrics[k] for k in ("step", "seq_lens", "sample_reward", "total_samples")}
-
-                # TODO(Mika): Maybe need to ensure not logging duplicates?
                 monitor.log(metrics)
 
             logger.info(log)
+
+            time_rollout_ckpt = None
+            time_shardcast = None
+            time_rollout_delete = None
 
             # Lets do this first so that clients can start downloading as soon as possible
             if config.ckpt.rollout_path is not None and training_progress.step % config.optim.step_per_rollout == 0:
@@ -485,18 +479,27 @@ def train(config: TrainingConfig):
                 rollout_step = training_progress.step // config.optim.step_per_rollout
                 path = Path(config.ckpt.rollout_path) / f"step_{rollout_step}"
                 previous_ckpt_rollout.append(path)
-                safetensor_path = save_ckpt_for_rollout(model, tokenizer, path)
+                t0 = time.time()
+                safetensor_path = save_ckpt_for_rollout(model, tokenizer, path, async_save=config.ckpt.async_save)
+                time_rollout_ckpt = time.time() - t0
+
+                time_shardcast = time.time()
                 if world_info.rank == 0:
                     if envs.SHARDCAST_OUTPUT_DIR is not None:
                         logger.info(f"Broadcasting {safetensor_path}")
                         shardcast.broadcast(safetensor_path)  # TODO: Is this blocking?
+                time_shardcast = time.time() - time_shardcast
 
-                if len(previous_ckpt_rollout) > config.async_level:
+                time_rollout_delete = time.time()
+                if len(previous_ckpt_rollout) > config.max_async_level:
                     path_to_delete = previous_ckpt_rollout.pop(0)
-                    if path_to_delete.exists():
+                    ckpt_step = int(str(path_to_delete).split("_")[-1])
+
+                    should_keep = config.ckpt.interval_rollout is not None and ckpt_step % config.ckpt.interval_rollout == 0
+                    if path_to_delete.exists() and not should_keep:
                         logger.info(f"Removing past rollout ckpt at {path_to_delete}")
                         shutil.rmtree(path_to_delete, ignore_errors=True)
-
+                time_rollout_delete = time.time() - time_rollout_delete
             if config.train.memory_profile and (training_progress.step == 2) and world_info.rank == 0:
                 logger.info("Dumping memory snapshot.")
                 pickle_path: str = config.train.memory_profile
@@ -516,17 +519,25 @@ def train(config: TrainingConfig):
             tensor_offloaded_repository[training_progress.step // config.optim.step_per_rollout] = copy_model_to_cpu(model)
 
         time_rollout_step = time.time() - time_start
-        logger.info(f"Finished rollout {rollout_step} step {training_progress.step}")
-        if world_info.rank == 0 and config.wandb:
-            new_metrics = {
-                "rollout_step": rollout_step,
+        logger.success(f"Finished training step {training_progress.step} in {time_rollout_step:.2f}s")
+        if world_info.rank == 0:
+            time_metrics = {
                 "step": training_progress.step,
-                "time_rollout_step": time_rollout_step,
-                "time_logprob": time_logprob,
-                "time_data_loading": total_time_data_loading,
-                "time_packing": total_time_packing,
+                "perf/time_rollout_step": time_rollout_step,
+                "perf/time_logprob": total_time_logprob,
+                "perf/time_data_loading": total_time_data_loading,
+                "perf/time_packing": total_time_packing,
+                "time_data_preprocessing": total_time,
+                "time_rollout_delete": time_rollout_delete,
             }
-            log_to_wandb(new_metrics)
+            if time_rollout_ckpt is not None:
+                time_metrics["perf/time_rollout_ckpt"] = time_rollout_ckpt
+            if time_shardcast is not None:
+                time_metrics["perf/time_shardcast"] = time_shardcast
+            if time_rollout_delete is not None:
+                time_metrics["perf/time_rollout_delete"] = time_rollout_delete
+
+            monitor.log(time_metrics)
 
         if config.stop_after_steps is not None and training_progress.step >= config.stop_after_steps:
             break
@@ -534,14 +545,10 @@ def train(config: TrainingConfig):
     if prefetcher is not None:
         prefetcher.shutdown()
 
-    logger.info("Training finished, exiting ...")
-    logger.info(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+    logger.info(f"Peak memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+    logger.success("Training finished!")
 
 
 if __name__ == "__main__":
-    # Extract toml file paths from CLI arguments
-    toml_paths, cli_args = extract_toml_paths(sys.argv[1:])
-    set_toml_paths(toml_paths)
-
-    config = TrainingConfig(_cli_parse_args=to_kebab_case(cli_args))
+    config = parse_argv(TrainingConfig)
     train(config)

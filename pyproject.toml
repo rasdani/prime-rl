@@ -3,7 +3,7 @@ name = "zeroband"
 version = "0.1.0"
 description = "ZeroBand is a production ready codebase for decentralized training of LLM"
 readme = "README.md"
-requires-python = "==3.11.*"
+requires-python = "~=3.12.3"
 dependencies = [
     "torch",
     "numpy",
@@ -15,7 +15,7 @@ dependencies = [
     "zstandard",
     "pyarrow",
     "wandb",
-    "vllm>=0.8.5",
+    "vllm~=0.9.1",
     "jaxtyping",
     "beartype",
     "toploc>=0.1.6",
@@ -35,12 +35,13 @@ dependencies = [
     "reasoning-gym @ git+https://github.com/open-thought/reasoning-gym.git",
     "tomli>=2.2.1",
     "pydantic[email]>=2.11.5",
-    "cydifflib>=1.2.0",
     "pydantic-settings>=2.9.1",
-] 
+    "cydifflib>=1.2.0",
+    "loguru>=0.7.3",
+]
 
 [project.optional-dependencies]
-fa = ["flash-attn>=2.7.4"]
+fa = ["flash-attn>=2.8.0"]
 kernelbench = ["modal>=1.0.3"]
 
 [build-system]

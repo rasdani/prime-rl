@@ -1,30 +1,16 @@
-import os
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
-from pydantic_settings import (
-    BaseSettings,
-    PydanticBaseSettingsSource,
-    SettingsConfigDict,
-    TomlConfigSettingsSource,
-)
 
-from zeroband.utils.config import BaseConfig, MultiMonitorConfig
-
-# These are two somewhat hacky workarounds inspired by https://github.com/pydantic/pydantic-settings/issues/259 to ensure backwards compatibility with our old CLI system `pydantic_config`
-TOML_PATHS: list[str] = []
-
-
-def set_toml_paths(toml_paths: list[str]) -> None:
-    global TOML_PATHS
-    TOML_PATHS = toml_paths
+from zeroband.utils.config import MultiMonitorConfig
+from zeroband.utils.pydantic_config import BaseConfig, BaseSettings
 
 
 class SamplingConfig(BaseConfig):
     """Configures how tokens are sampled from the model. Largely follows the vLLM sampling parameters (https://docs.vllm.ai/en/latest/api/vllm.sampling_params.html)."""
 
-    n: Annotated[int, Field(default=8, ge=1, description="Number of output sequences to return for the given prompt.")]
+    n: Annotated[int, Field(default=16, ge=1, description="Number of output sequences to return for the given prompt.")]
 
     presence_penalty: Annotated[
         float,
@@ -45,7 +31,7 @@ class SamplingConfig(BaseConfig):
     temperature: Annotated[
         float,
         Field(
-            default=0.6,
+            default=1.0,
             ge=0,
             description="Scales the output probability distribution. Lower values => more deterministic, higher values => more random. If 0, will sample greedily.",
         ),
@@ -203,7 +189,7 @@ class RewardsConfig(BaseConfig):
     """Configures rewards compuation"""
 
     len_reward: Annotated[LenRewardsConfig | None, Field(default=None)]
-    advantage_estimation_method: Annotated[Literal["grpo", "dr_grpo", "opo"], Field(default="grpo")]
+    advantage_estimation_method: Annotated[Literal["grpo", "dr_grpo", "opo"], Field(default="dr_grpo")]
     compute_reward: Annotated[bool, Field(default=True, description="Whether to compute the reward. If not set, will set reward to 0.")]
 
     def __str__(self) -> str:
@@ -329,11 +315,40 @@ class RLConfig(BaseConfig):
         ),
     ]
 
-    max_async: Annotated[
+    async_level: Annotated[
         int,
         Field(
             default=2,
             description="Maximum number of steps that inference can be ahead of training.",
+        ),
+    ]
+
+
+class TopLocConfig(BaseConfig):
+    """Configures TOPLOC."""
+
+    topk: Annotated[int, Field(default=128, description="Number of top tokens to consider.")]
+    enable_toploc1: Annotated[bool, Field(default=False, description="Whether to enable toploc proofs")]
+    enable_toploc2: Annotated[bool, Field(default=False, description="Whether to use the toploc2 sampler.")]
+
+
+class LogConfig(BaseConfig):
+    """Configures the logger."""
+
+    level: Annotated[
+        Literal["debug", "info"],
+        Field(default="info", description="Logging level for the inference run. Will determine the logging verbosity and format."),
+    ]
+
+    all_ranks: Annotated[
+        bool, Field(default=False, description="Whether to log from all DP ranks. If False, will only log from the main rank (DP rank 0).")
+    ]
+
+    utc: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Whether to use UTC time in the logger. If False, it will default to the local time. If the local time is wrong, you can set it by setting the `TZ` environment variable. For example, `TZ=America/Los_Angeles` will set the local time to SF time.",
         ),
     ]
 
@@ -359,30 +374,34 @@ class Config(BaseSettings):
     # The monitor configuration
     monitor: Annotated[MultiMonitorConfig, Field(default=MultiMonitorConfig())]
 
+    # The logging configuration
+    log: Annotated[LogConfig, Field(default=LogConfig())]
+
     # The RL configuration. If None, inference will run in a non-RL setting.
-    rl: Annotated[RLConfig | None, Field(default=None)]
+    rl: Annotated[RLConfig | None, Field(default=RLConfig())]
 
-    toploc: Annotated[
-        bool,
-        Field(
-            default=False,
-            description="Whether to produce TOPLOC proofs for the inference outputs.",
-        ),
-    ]
+    toploc: Annotated[TopLocConfig, Field(default=TopLocConfig())]
 
-    toploc2: Annotated[
-        bool,
-        Field(
-            default=True,
-            description="Whether to use the TOPLOC2 Sampler",
-        ),
+    syn2: Annotated[
+        bool, Field(default=False, description="A flag for SYNTHETIC-2 run. Will enforce auto-computing the max batch size for groups.")
     ]
 
     max_batch_size: Annotated[
         int | Literal["auto"],
         Field(
             default="auto",
-            description="Maximum number of of sequences to decode in parallel. If 'auto', the maximum batch size is automatically computed.",
+            description="Maximum number of of sequences to decode in parallel. If 'auto', it will compute a conservative estimate that never triggers cache eviction assuming that all sequences reach the maximum context length.",
+        ),
+    ]
+
+    contexts: Annotated[list[int] | None, Field(default=None, description="List of contexts to use for chunked inference.")]
+
+    scale_factor: Annotated[
+        float,
+        Field(
+            default=1.0,
+            ge=1,
+            description="Scale factor for the automatically computed maximum batch size. By default, we use the maximum batch size as is which will never trigger cache eviction. Can be set >1 to allow for more sequences to be decoded in parallel in case sequences are typically shorter than the maximum context length.",
         ),
     ]
 
@@ -419,19 +438,19 @@ class Config(BaseSettings):
         ),
     ]
 
+    use_tqdm: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="Whether to use tqdm to display progress bars during generation.",
+        ),
+    ]
+
     seed: Annotated[
         int | None,
         Field(
             default=None,
             description="Random seed used across inference components. If None, no seeding is used.",
-        ),
-    ]
-
-    log_level: Annotated[
-        Literal["debug", "info", "warning", "critical"],
-        Field(
-            default="info",
-            description="Logging level for the inference run.",
         ),
     ]
 
@@ -451,10 +470,13 @@ class Config(BaseSettings):
         ),
     ]
 
-    @model_validator(mode="after")
-    def set_log_level(self):
-        os.environ["PRIME_LOG_LEVEL"] = self.log_level
-        return self
+    step_path: Annotated[
+        Path | None,
+        Field(
+            default=None,
+            description="Path to file to write the current inference step to. Used in production by protocol worker for restarting a task after re-grouping. The file will be automatically created and and only contain a single integer.",
+        ),
+    ]
 
     @model_validator(mode="after")
     def enforce_eager_for_pp(self):
@@ -465,37 +487,5 @@ class Config(BaseSettings):
     @model_validator(mode="after")
     def disable_toploc_for_fp32(self):
         if self.model.dtype == "float32":
-            self.toploc = False
+            self.toploc.enable_toploc1 = False
         return self
-
-    # Pydantic settings configuration
-    model_config = SettingsConfigDict(
-        env_prefix="PRIME_",
-        env_nested_delimiter="__",
-        # By default, we do not parse CLI. To activate, set `_cli_parse_args` to true or a list of arguments at init time.
-        cli_parse_args=False,
-        cli_kebab_case=True,
-        cli_avoid_json=True,
-        cli_implicit_flags=True,
-        cli_use_class_docs_for_groups=True,
-    )
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        # This is a hacky way to dynamically load TOML file paths from CLI
-        # https://github.com/pydantic/pydantic-settings/issues/259
-        global TOML_PATHS
-        return (
-            TomlConfigSettingsSource(settings_cls, toml_file=TOML_PATHS),
-            init_settings,
-            env_settings,
-            dotenv_settings,
-            file_secret_settings,
-        )

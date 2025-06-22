@@ -129,11 +129,11 @@ def test_toploc_with_hook(llm, max_seqs: int, num_output_tokens: int):
         prompt_tokens = list(generation.prompt_token_ids)
         output_tokens = list(generation.outputs[0].token_ids)
 
-        token_input = TokensPrompt(prompt_token_ids=prompt_tokens + output_tokens)
+        token_input = TokensPrompt(prompt_token_ids=prompt_tokens + output_tokens[:-1])
         llm.generate(token_input, sampling_params=SamplingParams(max_tokens=1), use_tqdm=False)
 
         # Only grab non-prompt tokens (exclude BOS)
-        decode_activations = torch.concat(full_activations, dim=0)[len(prompt_tokens) :]
+        decode_activations = torch.concat(full_activations, dim=0)[len(prompt_tokens) - 1 :]
         full_activations.clear()
         assert decode_activations.shape == (num_output_tokens, hidden_size)
 
