@@ -70,11 +70,9 @@ def compute_git_diff_reward(completion: str, verification_info: Dict) -> float:
     Returns:
         Float score (0.0 to 1.0) representing diff similarity
     """
-    # Extract the response after thinking (if present)
-    if "</think>" in completion:
-        response = completion.split("</think>")[1].strip()
-    else:
-        response = completion.strip()
+    # Extract the response after thinking
+    think_splits = completion.split("</think>")
+    response = think_splits[1].strip() if len(think_splits) == 2 else ""
 
     if not response:
         return 0.0
