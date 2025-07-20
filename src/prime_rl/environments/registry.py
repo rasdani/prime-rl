@@ -465,6 +465,176 @@ def load_pydantic_adherence_environment(env_args: dict = {}) -> Environment:
     return vf_env
 
 
+def load_swe_rl_environment(env_args: dict = {}) -> Environment:
+    import json
+    import re
+    from collections import defaultdict
+    from typing import Callable, Dict, List, Tuple
+
+    import cydifflib
+    from swebench.harness.utils import extract_minimal_patch
+    from unidiff import PatchSet, UnidiffParseError
+
+    EDITS_PATTERN = re.compile(
+        r"```.*?\n"
+        r"### (.*)\n"
+        r"<<<<<<< SEARCH\n"
+        r"([\s\S]*?)\n"
+        r"=======\n"
+        r"([\s\S]*?)\n"
+        r">>>>>>> REPLACE\n"
+        r"```"
+    )
+
+    def parse_edits(input_text: str) -> Dict[str, List[Tuple[str, str]]]:
+        """Parse SEARCH/REPLACE edits from input text."""
+        edits = defaultdict(list)
+        matches = EDITS_PATTERN.finditer(input_text)
+        for match in matches:
+            file_path = match.group(1)
+            search_content = match.group(2)
+            replace_content = match.group(3)
+            edits[file_path].append((search_content, replace_content))
+        return edits
+
+    class SweRLParser(vf.ThinkParser):
+        def __init__(self, extract_fn: Callable[[str], Dict[str, List[Tuple[str, str]]]] = parse_edits, **kwargs):
+            super().__init__(**kwargs)
+            self.extract_fn = extract_fn
+
+        def parse(self, text: str) -> dict[str, List[Tuple[str, str]]]:
+            return super().parse(text)
+
+        def get_format_reward_func(self) -> Callable:
+            def format_reward_func(completion, **kwargs) -> float:
+                parsed = self.parse_answer(completion)
+                if parsed is None:
+                    return -1.0
+                return 0.0
+
+            return format_reward_func
+
+    dataset = load_dataset("rasdani/R2E-Gym-Subset-Oracle", split="train")
+    dataset = dataset.map(
+        lambda x: {"question": x["prompt"], "answer": x["patch"], "state": x["parsed_commit_content"], "task": "swe-rl"}
+    )
+
+    parser = SweRLParser(extract_fn=parse_edits)
+
+    format_reward_func = parser.get_format_reward_func()
+
+    def swe_rl_reward_func(completion, answer, state, **kwargs) -> float:
+        """Compute reward for SWE-RL by comparing generated edits to expected patch."""
+        parsed_commit_content = json.loads(state)
+        file_diffs = parsed_commit_content.get("file_diffs")
+        file_context = {file_diff["header"]["file"]["path"]: file_diff["old_file_content"] for file_diff in file_diffs}
+        gt_file_context = {
+            file_diff["header"]["file"]["path"]: file_diff["new_file_content"] for file_diff in file_diffs
+        }
+
+        parsed_edits = parser.parse_answer(completion)
+        if parsed_edits is None:
+            return -1.0
+
+        def apply_edits(file_context: Dict[str, str], edits: Dict[str, List[Tuple[str, str]]]) -> Dict[str, str] | None:
+            """Apply search/replace edits to file context."""
+            edited_file_context = {}
+            for file_path, file_edits in edits.items():
+                edited_file_content = f"\n{file_context.get(file_path, '')}"
+                for search_str, replace_str in file_edits:
+                    if search_str not in edited_file_content:
+                        return None
+                    edited_file_content = edited_file_content.replace(f"\n{search_str}", f"\n{replace_str}")
+                edited_file_context[file_path] = edited_file_content.lstrip("\n")
+            return edited_file_context
+
+        def generate_file_diff(old_file_content: str, new_file_content: str, path: str) -> None:
+            """Generate hunks from old and new file content."""
+            if not old_file_content or not new_file_content:
+                return
+
+            old_lines = old_file_content.splitlines()
+            new_lines = new_file_content.splitlines()
+
+            diff = list(
+                cydifflib.unified_diff(
+                    old_lines,
+                    new_lines,
+                    fromfile=f"a/{path}",
+                    tofile=f"b/{path}",
+                    n=3,  # context lines
+                )
+            )
+            return diff
+
+        def create_patched_file_context(
+            edited_file_context: Dict[str, str],
+            gt_file_context: Dict[str, str],
+        ) -> Dict[str, str]:
+            """Create patched file context from edited file context and file diffs."""
+            patched_file_context = {}
+            for file_path, gt_file_content in gt_file_context.items():
+                edited_file_content = edited_file_context.get(file_path, "")
+                file_diff = generate_file_diff(gt_file_content, edited_file_content, file_path)
+                if file_diff.strip():
+                    patched_file_context[file_path] = file_diff
+                else:
+                    patched_file_context[file_path] = ""
+            return patched_file_context
+
+        def get_unidiff_from_patched_file_context(patched_file_context: Dict[str, str]) -> str:
+            """Convert patched file context to unified diff format."""
+            try:
+                patches = list(patched_file_context.values())
+                if not patches:
+                    return ""
+                first_patch = patches.pop(0)
+                patch_set = PatchSet(first_patch)
+                for patch in patches:
+                    patch_set.extend(PatchSet(patch))
+                return str(patch_set)
+            except UnidiffParseError:
+                return ""
+
+        def score_patch(pred_patch: str, oracle_patch: str) -> float:
+            """Score predicted patch against oracle patch using sequence matching."""
+            try:
+                score = cydifflib.SequenceMatcher(
+                    None,
+                    a=pred_patch,
+                    b=oracle_patch,
+                    autojunk=False,
+                ).ratio()
+                return score
+            except Exception:
+                return -1.0
+
+        try:
+            edited_file_context = apply_edits(file_context, parsed_edits)
+            if edited_file_context is None:
+                return -1.0
+            patched_file_context = create_patched_file_context(edited_file_context, gt_file_context)
+            pred_patch = get_unidiff_from_patched_file_context(patched_file_context)
+            min_pred_patch = extract_minimal_patch(pred_patch)
+            min_oracle_patch = extract_minimal_patch(answer)
+            return score_patch(min_pred_patch, min_oracle_patch)
+
+        except Exception as e:
+            print(f"Error in swe_rl_reward_func: {e}")
+            return 0.0
+
+    rubric = vf.Rubric(
+        funcs=[
+            swe_rl_reward_func,
+            format_reward_func,
+        ],
+        weights=[1.0, 0.1],
+    )
+
+    vf_env = vf.SingleTurnEnv(dataset=dataset, parser=parser, rubric=rubric)
+    return vf_env
+
+
 REGISTRY = {
     "gsm8k": load_gsm8k_environment,
     "reverse-text": load_reverse_environment,
@@ -473,6 +643,7 @@ REGISTRY = {
     "unscramble": load_unscramble_environment,
     "ascii-tree": load_ascii_tree_environment,
     "pydantic-adherence": load_pydantic_adherence_environment,
+    "swe-rl": load_swe_rl_environment,
 }
 
 
@@ -480,3 +651,114 @@ def load_environment(env_id: str, env_args: dict = {}) -> Environment:
     if env_id not in REGISTRY:
         raise ValueError(f"Environment {env_id} not found")
     return REGISTRY[env_id](env_args)
+
+
+if __name__ == "__main__":
+    """
+    Debug script for SWE-RL environment.
+    
+    This script demonstrates how to:
+    1. Load the SWE-RL environment 
+    2. Get a sample problem
+    3. Create a mock completion with SEARCH/REPLACE edits
+    4. Compute rewards using the environment's rubric
+    
+    This matches the exact interface used by the orchestrator and training pipeline.
+    """
+    print("=== SWE-RL Environment Debug Script ===")
+
+    # Step 1: Load the SWE-RL environment (same as orchestrator does)
+    print("Loading SWE-RL environment...")
+    try:
+        swe_env = load_environment("swe-rl", {})
+        print("✓ Environment loaded successfully")
+    except Exception as e:
+        print(f"✗ Failed to load environment: {e}")
+        exit(1)
+
+    # Step 2: Get the dataset and sample a problem
+    print("\nGetting dataset...")
+    try:
+        dataset = swe_env.get_dataset(seed=42)
+        sample = dataset[0]  # Get first sample
+        print(f"✓ Dataset loaded with {len(dataset)} samples")
+        print(f"Sample problem ID: {sample.get('question', 'N/A')[:100]}...")
+    except Exception as e:
+        print(f"✗ Failed to get dataset: {e}")
+        exit(1)
+
+    # Step 3: Create a mock completion with SEARCH/REPLACE format
+    # (This simulates what a model would generate)
+    print("\nCreating mock completion...")
+    mock_completion = """
+<think>
+The issue is that `view.flows.add` command doesn't exist but is being used in the example.
+Looking at the code, I need to change the command name to something that exists.
+Based on the problem description, it should be `view.flows.duplicate` instead.
+</think>
+
+Looking at the issue, the problem is that `view.flows.add` command does not exist but is referenced in the example code. I need to change this to the correct command name.
+
+```python
+### examples/addons/duplicate-modify-replay.py
+<<<<<<< SEARCH
+        ctx.master.commands.call("view.flows.add", [flow])
+=======
+        ctx.master.commands.call("view.flows.duplicate", [flow])
+>>>>>>> REPLACE
+```
+"""
+
+    # Step 4: Use the environment's parser to extract edits
+    print("Parsing completion...")
+    try:
+        parser = swe_env.parser
+        parsed_edits = parser.parse_answer(mock_completion)
+        print(f"✓ Parsed edits: {parsed_edits}")
+    except Exception as e:
+        print(f"✗ Failed to parse completion: {e}")
+
+    # Step 5: Compute rewards using the environment's rubric
+    print("\nComputing rewards...")
+    try:
+        # Create inputs that match what the orchestrator would pass
+        inputs = {
+            "completion": mock_completion,
+            "answer": sample.get("answer", ""),
+            "state": sample.get("state", {}),
+            "question": sample.get("question", ""),
+            "task": sample.get("task", "swe-rl"),
+        }
+
+        # Use the environment's rubric to compute rewards
+        # This is exactly how rewards are computed in the training pipeline
+        rubric = swe_env.rubric
+
+        total_reward = 0.0
+        for i, (func, weight) in enumerate(zip(rubric.reward_funcs, rubric.reward_weights)):
+            try:
+                reward = func(**inputs)
+                weighted_reward = reward * weight
+                total_reward += weighted_reward
+                func_name = func.__name__ if hasattr(func, "__name__") else f"func_{i}"
+                print(f"  {func_name}: {reward:.3f} (weight: {weight}) = {weighted_reward:.3f}")
+            except Exception as e:
+                print(f"  {func_name}: ERROR - {e}")
+
+        print(f"\n✓ Total reward: {total_reward:.3f}")
+
+    except Exception as e:
+        print(f"✗ Failed to compute rewards: {e}")
+        import traceback
+
+        traceback.print_exc()
+
+    # Step 6: Show example of how this integrates with the rest of the system
+    print("\n=== Integration Example ===")
+    print("This environment can be used in training with:")
+    print("1. Config file: environment.id = 'swe-rl'")
+    print("2. Orchestrator: vf_env = load_environment('swe-rl', {})")
+    print("3. Training: outputs = await vf_env.a_generate(inputs=..., client=..., model=...)")
+    print("4. Rewards: rewards = outputs['reward']")
+
+    print("\n=== Debug Complete ===")
