@@ -564,7 +564,7 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
 
         parsed_edits = parser.parse_answer(completion)
         if parsed_edits is None:
-            return -1.0
+            return 0.0  # format reward already returned -1.0 in this case
 
         def apply_edits(file_context: Dict[str, str], edits: Dict[str, List[Tuple[str, str]]]) -> Dict[str, str] | None:
             """Apply search/replace edits to file context."""

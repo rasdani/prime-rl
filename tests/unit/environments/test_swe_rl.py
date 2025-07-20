@@ -1,23 +1,8 @@
-if __name__ == "__main__":
-    import datasets
+from datasets import load_dataset
 
-    swe_env = load_environment("swe-rl", {})
-    dataset = datasets.load_dataset("rasdani/SkyRL-v0-293-data-oracle-8k-context", split="train")
-    dataset = dataset.map(
-        lambda x: {
-            "question": x["prompt"],
-            "answer": x["patch"],
-            "info": {"parsed_commit_content": x["parsed_commit_content"]},
-            "task": "swe-rl",
-        }
-    )
-    # print(dataset[0]['patch'])
-    # exit()
-    # dataset = swe_env.get_dataset(seed=42)
-    sample = dataset[0]  # Get first sample
-    print(f"Sample problem ID: {sample.get('question', 'N/A')[:100]}...")
+from prime_rl.environments.registry import load_environment
 
-    mock_completion = '''\
+COMPLETION_TEMPLATE = """\
 <think>
 Okay, let's try to figure out why the user is getting that error. The issue is about the `sliding_window_inference` function in MONAI not preserving gradients. The user provided a code example where they create a tensor with `requires_grad=True`, pass it through the sliding window inference, and then try to do a backward pass. But they get an error saying that the result tensor doesn't require grad and has no grad_fn.
 
@@ -46,6 +31,12 @@ So the SEARCH block would find this line, and the REPLACE block would remove the
 The issue arises because the `sliding_window_inference` function is detaching the output tensors, which prevents gradient tracking. This is done in the line `output_image_list[ss] = output_image_list[ss].detach()`. To fix this, we need to remove the `.detach()` call so gradients can flow through the inference process.
 
 Here is the fix:
+{edits}
+</solution>
+"""
+
+EDITS = [
+    """
 ```python
 ### monai/losses/contrastive.py
 <<<<<<< SEARCH
@@ -60,7 +51,8 @@ from torch.nn import functional as F
 from torch.nn.modules.loss import _Loss
 >>>>>>> REPLACE
 ```
-
+""",
+    '''
 ```python
 ### monai/losses/contrastive.py
 <<<<<<< SEARCH
@@ -111,7 +103,8 @@ from torch.nn.modules.loss import _Loss
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 >>>>>>> REPLACE
 ```
-
+''',
+    """
 ```python
 ### monai/losses/contrastive.py
 <<<<<<< SEARCH
@@ -122,7 +115,8 @@ from torch.nn.modules.loss import _Loss
         negatives_mask = torch.clone(negatives_mask.type(torch.float)).to(input.device)
 >>>>>>> REPLACE
 ```
-
+""",
+    """
 ```python
 ### monai/losses/contrastive.py
 <<<<<<< SEARCH
@@ -142,7 +136,8 @@ from torch.nn.modules.loss import _Loss
         norm_i = F.normalize(input, dim=1)
 >>>>>>> REPLACE
 ```
-
+""",
+    """
 ```python
 ### monai/losses/contrastive.py
 <<<<<<< SEARCH
@@ -154,7 +149,8 @@ from torch.nn.modules.loss import _Loss
         sim_ji = torch.diag(sim_matrix, -input.shape[0])
 >>>>>>> REPLACE
 ```
-
+""",
+    """
 ```python
 ### monai/losses/contrastive.py
 <<<<<<< SEARCH
@@ -167,34 +163,60 @@ from torch.nn.modules.loss import _Loss
         return torch.sum(loss_partial) / (2 * batch_size)
 >>>>>>> REPLACE
 ```
-</solution>
-'''
+""",
+]
+
+
+def test_swe_rl_environment_reward_computation():
+    """Test reward computation for SWE-RL environment"""
+    swe_env = load_environment("swe-rl", {})
+    dataset = load_dataset("rasdani/SkyRL-v0-293-data-oracle-8k-context", split="train")
+    dataset = dataset.map(
+        lambda x: {
+            "question": x["prompt"],
+            "answer": x["patch"],
+            "info": {"parsed_commit_content": x["parsed_commit_content"]},
+            "task": "swe-rl",
+        }
+    )
+
+    sample = dataset[0]
 
     parser = swe_env.parser
-    parsed_edits = parser.parse_answer(mock_completion)
-    print(f"✓ Parsed edits: {parsed_edits}")
 
-    # Create inputs that match what the orchestrator would pass
-    inputs = {
-        "completion": mock_completion,
-        "answer": sample.get("answer", ""),
-        "info": sample.get("info", {}),
-        "question": sample.get("question", ""),
-        "task": sample.get("task", "swe-rl"),
-    }
+    total_rewards = []
+    for i in range(len(EDITS) + 1):
+        joined_edits = "\n".join(EDITS[:i])
+        completion = COMPLETION_TEMPLATE.format(edits=joined_edits)
+        parsed_edits = parser.parse_answer(completion)
+        assert parsed_edits is not None, "Parser should successfully parse the completion"
 
-    # Use the environment's rubric to compute rewards
-    # This is exactly how rewards are computed in the training pipeline
-    rubric = swe_env.rubric
+        # Create inputs that match what the orchestrator would pass
+        inputs = {
+            "completion": completion,
+            "answer": sample.get("answer", ""),
+            "info": sample.get("info", {}),
+            "question": sample.get("question", ""),
+            "task": sample.get("task", "swe-rl"),
+        }
 
-    total_reward = 0.0
-    from time import perf_counter
+        # Test reward computation
+        rubric = swe_env.rubric
+        total_reward = 0.0
 
-    start = perf_counter()
-    for i, (func, weight) in enumerate(zip(rubric.reward_funcs, rubric.reward_weights)):
-        reward = func(**inputs)
-        weighted_reward = reward * weight
-        total_reward += weighted_reward
-    end = perf_counter()
-    print(f"\n✓ Total reward: {total_reward:.3f}")
-    print(f"Time taken: {end - start:.2f} seconds")
+        for func, weight in zip(rubric.reward_funcs, rubric.reward_weights):
+            reward = func(**inputs)
+            weighted_reward = reward * weight
+            total_reward += weighted_reward
+            print(total_reward)
+        total_rewards.append(total_reward)
+
+        # Reward should be computed without errors
+        assert isinstance(total_reward, float), "Total reward should be a float"
+        assert -1.0 <= total_reward <= 1.0, "Total reward should be between -1.0 and 1.0"
+
+    assert total_rewards[0] == -1.0, "Empty edits should return -1.0"
+    assert all(total_rewards[i] < total_rewards[i + 1] for i in range(6)), (
+        "Reward should increase with more correct edits"
+    )
+    assert total_rewards[6] > 0.9, "Reward should be close to 1.0 for the full solution"
