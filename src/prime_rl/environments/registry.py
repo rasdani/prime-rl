@@ -545,9 +545,6 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
         )
         file_diffs = parsed_commit_content.get("file_diffs")
         file_context = {file_diff["header"]["file"]["path"]: file_diff["old_file_content"] for file_diff in file_diffs}
-        gt_file_context = {
-            file_diff["header"]["file"]["path"]: file_diff["new_file_content"] for file_diff in file_diffs
-        }
 
         parsed_edits = parser.parse_answer(completion)
         if parsed_edits is None:
@@ -592,14 +589,14 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
             return "\n".join(diff)
 
         def create_patched_file_context(
+            file_context: Dict[str, str],
             edited_file_context: Dict[str, str],
-            gt_file_context: Dict[str, str],
         ) -> Dict[str, str]:
-            """Create patched file context from edited file context and file diffs."""
+            """Create patched file context from before and after file context."""
             patched_file_context = {}
-            for file_path, gt_file_content in gt_file_context.items():
-                edited_file_content = edited_file_context.get(file_path, "")
-                file_diff = generate_file_diff(edited_file_content, gt_file_content, file_path)
+            for file_path, edited_file_content in edited_file_context.items():
+                file_content = file_context.get(file_path, "")
+                file_diff = generate_file_diff(file_content, edited_file_content, file_path)
                 if file_diff.strip():
                     patched_file_context[file_path] = file_diff
                 else:
@@ -673,9 +670,9 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
             edited_file_context = apply_edits(file_context, parsed_edits)
             if edited_file_context is None:
                 return -1.0
-            # breakpoint()
-            patched_file_context = create_patched_file_context(edited_file_context, gt_file_context)
+            patched_file_context = create_patched_file_context(file_context, edited_file_context)
             pred_patch = get_unidiff_from_patched_file_context(patched_file_context)
+            # breakpoint()
             min_pred_patch = extract_minimal_patch(pred_patch)
             min_oracle_patch = extract_minimal_patch(answer)
             return score_patch(min_pred_patch, min_oracle_patch)
@@ -760,7 +757,6 @@ So the SEARCH block would find this line, and the REPLACE block would remove the
 The issue arises because the `sliding_window_inference` function is detaching the output tensors, which prevents gradient tracking. This is done in the line `output_image_list[ss] = output_image_list[ss].detach()`. To fix this, we need to remove the `.detach()` call so gradients can flow through the inference process.
 
 Here is the fix:
-
 ```python
 ### monai/losses/contrastive.py
 <<<<<<< SEARCH
@@ -816,9 +812,13 @@ Here is the fix:
     rubric = swe_env.rubric
 
     total_reward = 0.0
+    from time import perf_counter
+
+    start = perf_counter()
     for i, (func, weight) in enumerate(zip(rubric.reward_funcs, rubric.reward_weights)):
         reward = func(**inputs)
         weighted_reward = reward * weight
         total_reward += weighted_reward
-
+    end = perf_counter()
     print(f"\n✓ Total reward: {total_reward:.3f}")
+    print(f"Time taken: {end - start:.2f} seconds")
