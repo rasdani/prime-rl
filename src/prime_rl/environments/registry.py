@@ -468,7 +468,7 @@ def load_pydantic_adherence_environment(env_args: dict = {}) -> Environment:
 def load_swe_rl_environment(env_args: dict = {}) -> Environment:
     """
     Adapted from https://github.com/facebookresearch/swe-rl
-    Compatible with datasets in R2E-Gym format like DeepSWE uses.
+    Compatible with datasets in R2E-Gym format like DeepSWE used.
 
     @article{wei2025swerl,
         title={SWE-RL: Advancing LLM Reasoning via Reinforcement Learning on Open Software Evolution},
@@ -693,7 +693,7 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
             return score_patch(min_pred_patch, min_oracle_patch)
 
         except Exception as e:
-            print(f"Error in swe_rl_reward_func: {e}")
+            print(f"Error in swe_rl_reward_func: {repr(e)}")
             return 0.0
 
     rubric = vf.Rubric(
