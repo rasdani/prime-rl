@@ -466,6 +466,23 @@ def load_pydantic_adherence_environment(env_args: dict = {}) -> Environment:
 
 
 def load_swe_rl_environment(env_args: dict = {}) -> Environment:
+    """
+    Adapted from https://github.com/facebookresearch/swe-rl
+    Compatible with datasets in R2E-Gym format like DeepSWE uses.
+
+    @article{wei2025swerl,
+        title={SWE-RL: Advancing LLM Reasoning via Reinforcement Learning on Open Software Evolution},
+        author={Yuxiang Wei and Olivier Duchenne and Jade Copet and Quentin Carbonneaux and Lingming Zhang and Daniel Fried and Gabriel Synnaeve and Rishabh Singh and Sida I. Wang},
+        year={2025},
+        journal={arXiv preprint arXiv:2502.18449}
+    }
+    @article{jain2025r2e,
+        title={R2e-gym: Procedural environments and hybrid verifiers for scaling open-weights swe agents},
+        author={Jain, Naman and Singh, Jaskirat and Shetty, Manish and Zheng, Liang and Sen, Koushik and Stoica, Ion},
+        journal={arXiv preprint arXiv:2504.07164},
+        year={2025}
+    }
+    """
     import json
     import re
     from collections import defaultdict
@@ -521,8 +538,7 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
 
             return format_reward_func
 
-    # dataset = load_dataset("rasdani/R2E-Gym-Subset-Oracle", split="train")
-    dataset = datasets.load_dataset("rasdani/SkyRL-v0-293-data-oracle-8k-context", split="train")
+    dataset = load_dataset("rasdani/R2E-Gym-Subset-Oracle", split="train")
     dataset = dataset.map(
         lambda x: {
             "question": x["prompt"],
@@ -557,7 +573,6 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
                 edited_file_content = f"\n{file_context.get(file_path, '')}"
                 for search_str, replace_str in file_edits:
                     if search_str not in edited_file_content:
-                        breakpoint()
                         return None
                     edited_file_content = edited_file_content.replace(f"\n{search_str}", f"\n{replace_str}")
                 edited_file_context[file_path] = edited_file_content.lstrip("\n")
@@ -668,7 +683,6 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
                 return -1.0
 
         try:
-            # breakpoint()
             edited_file_context = apply_edits(file_context, parsed_edits)
             if edited_file_context is None:
                 return -1.0
@@ -710,139 +724,3 @@ def load_environment(env_id: str, env_args: dict = {}) -> Environment:
     if env_id not in REGISTRY:
         raise ValueError(f"Environment {env_id} not found")
     return REGISTRY[env_id](env_args)
-
-
-if __name__ == "__main__":
-    import datasets
-
-    swe_env = load_environment("swe-rl", {})
-    dataset = datasets.load_dataset("rasdani/SkyRL-v0-293-data-oracle-8k-context", split="train")
-    dataset = dataset.map(
-        lambda x: {
-            "question": x["prompt"],
-            "answer": x["patch"],
-            "info": {"parsed_commit_content": x["parsed_commit_content"]},
-            "task": "swe-rl",
-        }
-    )
-    # print(dataset[0]['patch'])
-    # exit()
-    # dataset = swe_env.get_dataset(seed=42)
-    sample = dataset[0]  # Get first sample
-    print(f"Sample problem ID: {sample.get('question', 'N/A')[:100]}...")
-
-    mock_completion = """\
-<think>
-Okay, let's try to figure out why the user is getting that error. The issue is about the `sliding_window_inference` function in MONAI not preserving gradients. The user provided a code example where they create a tensor with `requires_grad=True`, pass it through the sliding window inference, and then try to do a backward pass. But they get an error saying that the result tensor doesn't require grad and has no grad_fn.
-
-Hmm. The error message points to the line where they call `result.sum().backward()`. The traceback shows that the result tensor doesn't require grad. So, the problem is that the `sliding_window_inference` function is somehow detaching the gradient, which is not desired here.
-
-Looking at the code for `sliding_window_inference`, I need to find where gradients might be detached. The user mentioned that the detach is happening in the line where they do `output_image_list[ss] = output_image_list[ss].detach()`. Wait, that's in the code after processing all the slices. So, the function is detaching the output tensors, which would prevent gradients from flowing back through that operation.
-
-But why is that happening? The user says that the function shouldn't always remove gradients. The original code probably detaches the output to avoid accumulating gradients during the sliding window process, but in this case, the user is trying to compute gradients with respect to the input, so detaching is causing the problem.
-
-So the fix would be to remove the `.detach()` call from the output tensors. Let me check the code again. In the part where they process the outputs, there's a loop where they do:
-
-output_image_list[ss] = output_image_list[ss].detach()
-
-That's the line that's detaching the tensor. If we remove that line, the gradients should flow through the inference process. But wait, why was that line there in the first place? Maybe the original intention was to prevent the gradients from being accumulated during the sliding window steps, but in this case, the user wants to track gradients through the entire process.
-
-So the correct fix is to remove the `.detach()` call from the output tensors. That way, when the backward pass is called, the gradients can be computed properly.
-
-Looking at the code in the provided file, the line in question is:
-
-output_image_list[ss] = output_image_list[ss].detach()
-
-So the SEARCH block would find this line, and the REPLACE block would remove the `.detach()` part. That should fix the issue where the gradients are being detached, allowing the backward pass to work as intended.
-</think>
-
-<solution>
-The issue arises because the `sliding_window_inference` function is detaching the output tensors, which prevents gradient tracking. This is done in the line `output_image_list[ss] = output_image_list[ss].detach()`. To fix this, we need to remove the `.detach()` call so gradients can flow through the inference process.
-
-Here is the fix:
-```python
-### monai/losses/contrastive.py
-<<<<<<< SEARCH
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import torch
-from torch.nn import functional as F
-from torch.nn.modules.loss import _Loss
-=======
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-from distutils.log import warn
-
-import torch
-from torch.nn import functional as F
-from torch.nn.modules.loss import _Loss
->>>>>>> REPLACE
-```
-
-```python
-### monai/losses/contrastive.py
-<<<<<<< SEARCH
-        self.batch_size = batch_size
-        self.temperature = temperature
-=======
-        # comment out the line below
-        self.temperature = temperature
-        # comment out the line below
->>>>>>> REPLACE
-```
-
-```python
-### monai/losses/contrastive.py
-<<<<<<< SEARCH
-        negatives_mask = ~torch.eye(self.batch_size * 2, self.batch_size * 2, dtype=torch.bool)
-        negatives_mask = torch.clone(negatives_mask.type(torch.float)).to(input.device)
-=======
-        negatives_mask = ~torch.eye(input.shape[0] * 2, input.shape[0] * 2, dtype=torch.bool)
-        negatives_mask = torch.clone(negatives_mask.type(torch.float)).to(input.device)
->>>>>>> REPLACE
-```
-
-```python
-### monai/losses/contrastive.py
-<<<<<<< SEARCH
-        sim_ij = torch.diag(sim_matrix, self.batch_size)
-        sim_ji = torch.diag(sim_matrix, -self.batch_size)
-=======
-        sim_ij = torch.diag(sim_matrix, input.shape[0])
-        # comment out the line below
-        sim_ji = torch.diag(sim_matrix, -input.shape[0])
->>>>>>> REPLACE
-```
-</solution>
-"""
-
-    parser = swe_env.parser
-    parsed_edits = parser.parse_answer(mock_completion)
-    print(f"✓ Parsed edits: {parsed_edits}")
-
-    # Create inputs that match what the orchestrator would pass
-    inputs = {
-        "completion": mock_completion,
-        "answer": sample.get("answer", ""),
-        "info": sample.get("info", {}),
-        "question": sample.get("question", ""),
-        "task": sample.get("task", "swe-rl"),
-    }
-
-    # Use the environment's rubric to compute rewards
-    # This is exactly how rewards are computed in the training pipeline
-    rubric = swe_env.rubric
-
-    total_reward = 0.0
-    from time import perf_counter
-
-    start = perf_counter()
-    for i, (func, weight) in enumerate(zip(rubric.reward_funcs, rubric.reward_weights)):
-        reward = func(**inputs)
-        weighted_reward = reward * weight
-        total_reward += weighted_reward
-    end = perf_counter()
-    print(f"\n✓ Total reward: {total_reward:.3f}")
-    print(f"Time taken: {end - start:.2f} seconds")
