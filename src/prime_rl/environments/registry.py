@@ -567,7 +567,13 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
 
         def generate_file_diff(old_file_content: str, new_file_content: str, path: str) -> str:
             """Generate hunks from old and new file content."""
-            if not old_file_content or not new_file_content:
+            if old_file_content is None:
+                old_file_content = ""
+            if new_file_content is None:
+                new_file_content = ""
+
+            # If both are empty, no diff needed
+            if not old_file_content and not new_file_content:
                 return ""
 
             old_lines = old_file_content.splitlines()
@@ -580,6 +586,7 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
                     fromfile=f"a/{path}",
                     tofile=f"b/{path}",
                     n=3,  # context lines
+                    lineterm="",  # Prevent extra newlines
                 )
             )
             return "\n".join(diff)
@@ -592,7 +599,7 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
             patched_file_context = {}
             for file_path, gt_file_content in gt_file_context.items():
                 edited_file_content = edited_file_context.get(file_path, "")
-                file_diff = generate_file_diff(gt_file_content, edited_file_content, file_path)
+                file_diff = generate_file_diff(edited_file_content, gt_file_content, file_path)
                 if file_diff.strip():
                     patched_file_context[file_path] = file_diff
                 else:
@@ -649,6 +656,8 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
 
         def score_patch(pred_patch: str, oracle_patch: str) -> float:
             """Score predicted patch against oracle patch using LCS ratio."""
+            if not pred_patch.strip():
+                return -1.0
             try:
                 score = cydifflib.SequenceMatcher(
                     None,
