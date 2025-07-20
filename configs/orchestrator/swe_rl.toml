@@ -1,0 +1,25 @@
+max_steps = 10
+batch_size = 2
+micro_batch_size = 1
+rollouts_per_prompt = 2
+seq_len = 4096
+mask_truncated_completions = false
+
+[model]
+name = "Qwen/Qwen3-0.6B"
+
+[environment]
+id = "swe-rl"
+
+[sampling]
+max_tokens = 2048
+temperature = 0.7
+
+[monitor.wandb]
+
+[monitor.wandb.log_samples]
+interval = 5
+num_samples = 2
+
+[eval]
+interval = 10

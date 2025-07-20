@@ -1,0 +1,6 @@
+[model]
+name = "Qwen/Qwen3-0.6B"
+
+[server]
+max_model_len = 4096
+gpu_memory_utilization = 0.8
