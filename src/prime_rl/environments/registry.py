@@ -515,17 +515,34 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
             return format_reward_func
 
     dataset = load_dataset("rasdani/R2E-Gym-Subset-Oracle", split="train")
+    # dataset = datasets.load_dataset("rasdani/SkyRL-v0-293-data-oracle-8k-context", split="train")
+    print("Original dataset columns:", dataset.column_names)
+    print("Sample original keys:", list(dataset[0].keys()))
+    print("Has parsed_commit_content?", "parsed_commit_content" in dataset[0])
     dataset = dataset.map(
-        lambda x: {"question": x["prompt"], "answer": x["patch"], "state": x["parsed_commit_content"], "task": "swe-rl"}
+        lambda x: {
+            "question": x["prompt"],
+            "answer": x["patch"],
+            "info": {"parsed_commit_content": x["parsed_commit_content"]},
+            "task": "swe-rl",
+        }
     )
+    print("Mapped dataset columns:", dataset.column_names)
+    print("Sample mapped keys:", list(dataset[0].keys()))
+    print("Sample info:", dataset[0]["info"])
 
     parser = SweRLParser(extract_fn=parse_edits)
 
     format_reward_func = parser.get_format_reward_func()
 
-    def swe_rl_reward_func(completion, answer, state, **kwargs) -> float:
+    def swe_rl_reward_func(completion, answer, info, **kwargs) -> float:
         """Compute reward for SWE-RL by comparing generated edits to expected patch."""
-        parsed_commit_content = json.loads(state)
+        breakpoint()
+        parsed_commit_content = (
+            json.loads(info["parsed_commit_content"])
+            if isinstance(info["parsed_commit_content"], str)
+            else info["parsed_commit_content"]
+        )
         file_diffs = parsed_commit_content.get("file_diffs")
         file_context = {file_diff["header"]["file"]["path"]: file_diff["old_file_content"] for file_diff in file_diffs}
         gt_file_context = {
@@ -611,6 +628,7 @@ def load_swe_rl_environment(env_args: dict = {}) -> Environment:
 
         try:
             edited_file_context = apply_edits(file_context, parsed_edits)
+            breakpoint()
             if edited_file_context is None:
                 return -1.0
             patched_file_context = create_patched_file_context(edited_file_context, gt_file_context)
@@ -654,111 +672,102 @@ def load_environment(env_id: str, env_args: dict = {}) -> Environment:
 
 
 if __name__ == "__main__":
-    """
-    Debug script for SWE-RL environment.
-    
-    This script demonstrates how to:
-    1. Load the SWE-RL environment 
-    2. Get a sample problem
-    3. Create a mock completion with SEARCH/REPLACE edits
-    4. Compute rewards using the environment's rubric
-    
-    This matches the exact interface used by the orchestrator and training pipeline.
-    """
-    print("=== SWE-RL Environment Debug Script ===")
+    import datasets
 
-    # Step 1: Load the SWE-RL environment (same as orchestrator does)
-    print("Loading SWE-RL environment...")
-    try:
-        swe_env = load_environment("swe-rl", {})
-        print("✓ Environment loaded successfully")
-    except Exception as e:
-        print(f"✗ Failed to load environment: {e}")
-        exit(1)
+    swe_env = load_environment("swe-rl", {})
+    dataset = datasets.load_dataset("rasdani/SkyRL-v0-293-data-oracle-8k-context", split="train")
+    # dataset = swe_env.get_dataset(seed=42)
+    sample = dataset[0]  # Get first sample
+    print(f"Sample problem ID: {sample.get('question', 'N/A')[:100]}...")
 
-    # Step 2: Get the dataset and sample a problem
-    print("\nGetting dataset...")
-    try:
-        dataset = swe_env.get_dataset(seed=42)
-        sample = dataset[0]  # Get first sample
-        print(f"✓ Dataset loaded with {len(dataset)} samples")
-        print(f"Sample problem ID: {sample.get('question', 'N/A')[:100]}...")
-    except Exception as e:
-        print(f"✗ Failed to get dataset: {e}")
-        exit(1)
-
-    # Step 3: Create a mock completion with SEARCH/REPLACE format
-    # (This simulates what a model would generate)
-    print("\nCreating mock completion...")
-    mock_completion = """
+    mock_completion = """\
 <think>
-The issue is that `view.flows.add` command doesn't exist but is being used in the example.
-Looking at the code, I need to change the command name to something that exists.
-Based on the problem description, it should be `view.flows.duplicate` instead.
+Okay, let's try to figure out why the user is getting that error. The issue is about the `sliding_window_inference` function in MONAI not preserving gradients. The user provided a code example where they create a tensor with `requires_grad=True`, pass it through the sliding window inference, and then try to do a backward pass. But they get an error saying that the result tensor doesn't require grad and has no grad_fn.
+
+Hmm. The error message points to the line where they call `result.sum().backward()`. The traceback shows that the result tensor doesn't require grad. So, the problem is that the `sliding_window_inference` function is somehow detaching the gradient, which is not desired here.
+
+Looking at the code for `sliding_window_inference`, I need to find where gradients might be detached. The user mentioned that the detach is happening in the line where they do `output_image_list[ss] = output_image_list[ss].detach()`. Wait, that's in the code after processing all the slices. So, the function is detaching the output tensors, which would prevent gradients from flowing back through that operation.
+
+But why is that happening? The user says that the function shouldn't always remove gradients. The original code probably detaches the output to avoid accumulating gradients during the sliding window process, but in this case, the user is trying to compute gradients with respect to the input, so detaching is causing the problem.
+
+So the fix would be to remove the `.detach()` call from the output tensors. Let me check the code again. In the part where they process the outputs, there's a loop where they do:
+
+output_image_list[ss] = output_image_list[ss].detach()
+
+That's the line that's detaching the tensor. If we remove that line, the gradients should flow through the inference process. But wait, why was that line there in the first place? Maybe the original intention was to prevent the gradients from being accumulated during the sliding window steps, but in this case, the user wants to track gradients through the entire process.
+
+So the correct fix is to remove the `.detach()` call from the output tensors. That way, when the backward pass is called, the gradients can be computed properly.
+
+Looking at the code in the provided file, the line in question is:
+
+output_image_list[ss] = output_image_list[ss].detach()
+
+So the SEARCH block would find this line, and the REPLACE block would remove the `.detach()` part. That should fix the issue where the gradients are being detached, allowing the backward pass to work as intended.
 </think>
 
-Looking at the issue, the problem is that `view.flows.add` command does not exist but is referenced in the example code. I need to change this to the correct command name.
+<solution>
+The issue arises because the `sliding_window_inference` function is detaching the output tensors, which prevents gradient tracking. This is done in the line `output_image_list[ss] = output_image_list[ss].detach()`. To fix this, we need to remove the `.detach()` call so gradients can flow through the inference process.
+
+Here is the fix:
 
 ```python
-### examples/addons/duplicate-modify-replay.py
+### monai/losses/contrastive.py
 <<<<<<< SEARCH
-        ctx.master.commands.call("view.flows.add", [flow])
+        self.batch_size = batch_size
+        self.temperature = temperature
 =======
-        ctx.master.commands.call("view.flows.duplicate", [flow])
+        # comment out the line below
+        self.temperature = temperature
+        # comment out the line below
 >>>>>>> REPLACE
 ```
+
+```python
+### monai/losses/contrastive.py
+<<<<<<< SEARCH
+        negatives_mask = ~torch.eye(self.batch_size * 2, self.batch_size * 2, dtype=torch.bool)
+        negatives_mask = torch.clone(negatives_mask.type(torch.float)).to(input.device)
+=======
+        negatives_mask = ~torch.eye(input.shape[0] * 2, input.shape[0] * 2, dtype=torch.bool)
+        negatives_mask = torch.clone(negatives_mask.type(torch.float)).to(input.device)
+>>>>>>> REPLACE
+```
+
+```python
+### monai/losses/contrastive.py
+<<<<<<< SEARCH
+        sim_ij = torch.diag(sim_matrix, self.batch_size)
+        sim_ji = torch.diag(sim_matrix, -self.batch_size)
+=======
+        sim_ij = torch.diag(sim_matrix, input.shape[0])
+        # comment out the line below
+        sim_ji = torch.diag(sim_matrix, -input.shape[0])
+>>>>>>> REPLACE
+```
+</solution>
 """
 
-    # Step 4: Use the environment's parser to extract edits
-    print("Parsing completion...")
-    try:
-        parser = swe_env.parser
-        parsed_edits = parser.parse_answer(mock_completion)
-        print(f"✓ Parsed edits: {parsed_edits}")
-    except Exception as e:
-        print(f"✗ Failed to parse completion: {e}")
+    parser = swe_env.parser
+    parsed_edits = parser.parse_answer(mock_completion)
+    print(f"✓ Parsed edits: {parsed_edits}")
 
-    # Step 5: Compute rewards using the environment's rubric
-    print("\nComputing rewards...")
-    try:
-        # Create inputs that match what the orchestrator would pass
-        inputs = {
-            "completion": mock_completion,
-            "answer": sample.get("answer", ""),
-            "state": sample.get("state", {}),
-            "question": sample.get("question", ""),
-            "task": sample.get("task", "swe-rl"),
-        }
+    # Create inputs that match what the orchestrator would pass
+    inputs = {
+        "completion": mock_completion,
+        "answer": sample.get("answer", ""),
+        "info": sample.get("info", {}),
+        "question": sample.get("question", ""),
+        "task": sample.get("task", "swe-rl"),
+    }
 
-        # Use the environment's rubric to compute rewards
-        # This is exactly how rewards are computed in the training pipeline
-        rubric = swe_env.rubric
+    # Use the environment's rubric to compute rewards
+    # This is exactly how rewards are computed in the training pipeline
+    rubric = swe_env.rubric
 
-        total_reward = 0.0
-        for i, (func, weight) in enumerate(zip(rubric.reward_funcs, rubric.reward_weights)):
-            try:
-                reward = func(**inputs)
-                weighted_reward = reward * weight
-                total_reward += weighted_reward
-                func_name = func.__name__ if hasattr(func, "__name__") else f"func_{i}"
-                print(f"  {func_name}: {reward:.3f} (weight: {weight}) = {weighted_reward:.3f}")
-            except Exception as e:
-                print(f"  {func_name}: ERROR - {e}")
+    total_reward = 0.0
+    for i, (func, weight) in enumerate(zip(rubric.reward_funcs, rubric.reward_weights)):
+        reward = func(**inputs)
+        weighted_reward = reward * weight
+        total_reward += weighted_reward
 
-        print(f"\n✓ Total reward: {total_reward:.3f}")
-
-    except Exception as e:
-        print(f"✗ Failed to compute rewards: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-    # Step 6: Show example of how this integrates with the rest of the system
-    print("\n=== Integration Example ===")
-    print("This environment can be used in training with:")
-    print("1. Config file: environment.id = 'swe-rl'")
-    print("2. Orchestrator: vf_env = load_environment('swe-rl', {})")
-    print("3. Training: outputs = await vf_env.a_generate(inputs=..., client=..., model=...)")
-    print("4. Rewards: rewards = outputs['reward']")
-
-    print("\n=== Debug Complete ===")
+    print(f"\n✓ Total reward: {total_reward:.3f}")
