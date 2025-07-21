@@ -1,18 +1,17 @@
-max_steps = 10
-batch_size = 2
-micro_batch_size = 1
-rollouts_per_prompt = 2
-seq_len = 16384
+batch_size = 4
+micro_batch_size = 4
+rollouts_per_prompt = 4
+seq_len = 12288
 mask_truncated_completions = true
 
 [model]
-name = "Qwen/Qwen3-0.6B"
+name = "Qwen/Qwen3-1.7B"
 
 [environment]
 id = "swe-rl"
 
 [sampling]
-max_tokens = 8192
+max_tokens = 4096
 temperature = 0.6
 
 [monitor.wandb]

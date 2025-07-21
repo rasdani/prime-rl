@@ -1,7 +1,5 @@
-max_steps = 10
-
 [model]
-name = "Qwen/Qwen3-0.6B"
+name = "Qwen/Qwen3-1.7B"
 ac = true
 
 [optim]

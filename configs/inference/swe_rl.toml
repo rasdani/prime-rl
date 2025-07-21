@@ -1,6 +1,6 @@
 [model]
-name = "Qwen/Qwen3-0.6B"
-max_model_len = 16384
+name = "Qwen/Qwen3-1.7B"
+max_model_len = 12288
 
 [parallel]
-dp = 4
+dp = 2
