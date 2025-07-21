@@ -2,8 +2,12 @@ max_steps = 10
 
 [model]
 name = "Qwen/Qwen3-0.6B"
+ac = true
 
 [optim]
-lr = 3e-6
+lr = 1e-6
+
+[ckpt]
+interval = 100
 
 [monitor.wandb]
