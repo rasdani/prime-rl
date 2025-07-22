@@ -27,7 +27,7 @@ max_steps = 30
 batch_size = 128
 micro_batch_size = 8
 rollouts_per_prompt = 8
-seq_len = 128
+seq_len = 512
 
 [orchestrator.model]
 name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
@@ -41,7 +41,7 @@ interval = 10
 # Inference configuration (8 H100s with data parallelism)
 [inference.model]
 name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
-max_model_len = 128
+max_model_len = 512
 
 [inference.server]
 host = "0.0.0.0"
