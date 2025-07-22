@@ -8,10 +8,6 @@ master_addr = "10.15.35.113"
 inference_addr = "10.15.35.113"
 inference_port = 8000
 
-# Trainer configuration
-[trainer]
-max_steps = 1000
-
 [trainer.model]
 name = "Qwen/Qwen3-1.7B"
 ac = true
@@ -34,11 +30,10 @@ project = "prime-rl-swe-rl"
 
 # Orchestrator configuration  
 [orchestrator]
-max_steps = 1000
-batch_size = 4
-micro_batch_size = 4
-rollouts_per_prompt = 4
-seq_len = 12288
+batch_size = 32
+micro_batch_size = 8
+rollouts_per_prompt = 8
+seq_len = 16384
 mask_truncated_completions = true
 
 [orchestrator.model]
@@ -48,11 +43,11 @@ name = "Qwen/Qwen3-1.7B"
 id = "swe-rl"
 
 [orchestrator.sampling]
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.6
 
 [orchestrator.ckpt]
-interval = 100
+interval = 1
 
 [orchestrator.monitor.wandb.log_samples]
 interval = 5
@@ -61,7 +56,7 @@ num_samples = 2
 # Inference configuration (8 H100s with data parallelism)
 [inference.model]
 name = "Qwen/Qwen3-1.7B"
-max_model_len = 12288
+max_model_len = 16384
 
 [inference.server]
 host = "0.0.0.0"

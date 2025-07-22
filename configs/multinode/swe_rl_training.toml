@@ -13,9 +13,6 @@ inference_port = 8000
 nnodes = 1  # Single-node mode
 node_rank = 0
 
-# Trainer configuration
-[trainer]
-max_steps = 1000
 
 [trainer.model]
 name = "Qwen/Qwen3-1.7B"
@@ -25,7 +22,7 @@ ac = true
 lr = 1e-6
 
 [trainer.ckpt]
-interval = 100
+interval = 1
 path = "/mnt/shared-weights/checkpoints"
 
 [trainer.data]
@@ -39,11 +36,10 @@ project = "prime-rl-swe-rl"
 
 # Orchestrator configuration (points to inference node)
 [orchestrator]
-max_steps = 1000
-batch_size = 4
-micro_batch_size = 4
-rollouts_per_prompt = 4
-seq_len = 12288
+batch_size = 32
+micro_batch_size = 8
+rollouts_per_prompt = 8
+seq_len = 16384
 mask_truncated_completions = true
 
 [orchestrator.model]
@@ -57,8 +53,8 @@ port = 8000
 id = "swe-rl"
 
 [orchestrator.sampling]
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.6
 
 [orchestrator.ckpt]
-interval = 100
+interval = 1

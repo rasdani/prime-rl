@@ -1,0 +1,21 @@
+batch_size = 32
+micro_batch_size = 8
+rollouts_per_prompt = 8
+seq_len = 16384
+mask_truncated_completions = true
+
+[model]
+name = "Qwen/Qwen3-1.7B"
+
+[environment]
+id = "swe-rl"
+
+[sampling]
+max_tokens = 8192
+temperature = 0.6
+
+[monitor.wandb]
+
+[monitor.wandb.log_samples]
+interval = 5
+num_samples = 2
