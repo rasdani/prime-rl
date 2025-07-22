@@ -1,8 +1,6 @@
 # Configuration for TRAINING node (10.15.35.65)
 # Usage: uv run rl_multinode @ configs/multinode/reverse_text_training.toml
 
-max_steps = 30
-
 # Multi-node configuration
 [multinode]
 mode = "training"
@@ -12,7 +10,10 @@ inference_port = 8000
 nnodes = 1  # Only this training node
 node_rank = 0
 
-# Model configuration
+# Trainer configuration
+[trainer]
+max_steps = 30
+
 [trainer.model]
 name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
 
