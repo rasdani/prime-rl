@@ -34,6 +34,7 @@ dependencies = [
 
 [project.scripts]
 rl = "prime_rl.rl:main"
+rl_multinode = "prime_rl.rl_multinode:main"
 trainer = "prime_rl.trainer.train:main"
 orchestrator = "prime_rl.orchestrator.orchestrator:main"
 inference = "prime_rl.inference.server:main"

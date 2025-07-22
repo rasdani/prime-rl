@@ -1,0 +1,44 @@
+# Configuration for TRAINING node (10.15.35.65)
+# Usage: uv run rl_multinode @ configs/multinode/reverse_text_training.toml
+
+max_steps = 30
+
+# Multi-node configuration
+[multinode]
+mode = "training"
+master_addr = "10.15.35.113"  # Inference node coordinates torchrun
+inference_addr = "10.15.35.113"
+inference_port = 8000
+nnodes = 1  # Only this training node
+node_rank = 0
+
+# Model configuration
+[trainer.model]
+name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
+
+[trainer.optim] 
+lr = 3e-6
+
+[trainer.ckpt]
+interval = 10
+
+# Orchestrator configuration (points to inference node)
+[orchestrator]
+max_steps = 30
+batch_size = 128
+micro_batch_size = 8
+rollouts_per_prompt = 8
+seq_len = 128
+
+[orchestrator.model]
+name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
+
+[orchestrator.client]
+host = "10.15.35.113"
+port = 8000
+
+[orchestrator.environment]
+id = "reverse-text"
+
+[orchestrator.ckpt]
+interval = 10

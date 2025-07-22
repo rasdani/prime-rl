@@ -1,0 +1,51 @@
+# Configuration for INFERENCE node (10.15.35.113)
+# Usage: uv run rl_multinode @ configs/multinode/reverse_text_inference.toml
+
+max_steps = 30
+
+# Multi-node configuration
+[multinode]
+mode = "inference"
+master_addr = "10.15.35.113"
+inference_addr = "10.15.35.113"
+inference_port = 8000
+
+# Model configuration
+[trainer.model]
+name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
+
+[trainer.optim]
+lr = 3e-6
+
+[trainer.ckpt]
+interval = 10
+
+# Orchestrator configuration  
+[orchestrator]
+max_steps = 30
+batch_size = 128
+micro_batch_size = 8
+rollouts_per_prompt = 8
+seq_len = 128
+
+[orchestrator.model]
+name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
+
+[orchestrator.environment]
+id = "reverse-text"
+
+[orchestrator.ckpt]
+interval = 10
+
+# Inference configuration (8 H100s with data parallelism)
+[inference.model]
+name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
+max_model_len = 128
+
+[inference.server]
+host = "0.0.0.0"
+port = 8000
+
+[inference.parallel]
+dp = 8  # Will be auto-configured based on available GPUs
+tp = 1
