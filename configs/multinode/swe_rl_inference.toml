@@ -1,0 +1,72 @@
+# Configuration for INFERENCE node (10.15.35.113)
+# Usage: uv run rl_multinode @ configs/multinode/swe_rl_inference.toml
+
+# Multi-node configuration
+[multinode]
+mode = "inference"
+master_addr = "10.15.35.113"
+inference_addr = "10.15.35.113"
+inference_port = 8000
+
+# Trainer configuration
+[trainer]
+max_steps = 1000
+
+[trainer.model]
+name = "Qwen/Qwen3-1.7B"
+ac = true
+
+[trainer.optim]
+lr = 1e-6
+
+[trainer.ckpt]
+interval = 100
+path = "/tmp/prime-rl-shared/checkpoints"
+
+[trainer.data]
+path = "/tmp/prime-rl-shared/data"
+
+[trainer.weights]
+path = "/tmp/prime-rl-shared/weights"
+
+[trainer.monitor.wandb]
+project = "prime-rl-swe-rl"
+
+# Orchestrator configuration  
+[orchestrator]
+max_steps = 1000
+batch_size = 4
+micro_batch_size = 4
+rollouts_per_prompt = 4
+seq_len = 12288
+mask_truncated_completions = true
+
+[orchestrator.model]
+name = "Qwen/Qwen3-1.7B"
+
+[orchestrator.environment]
+id = "swe-rl"
+
+[orchestrator.sampling]
+max_tokens = 4096
+temperature = 0.6
+
+[orchestrator.ckpt]
+interval = 100
+
+[orchestrator.monitor.wandb.log_samples]
+interval = 5
+num_samples = 2
+
+# Inference configuration (8 H100s with data parallelism)
+[inference.model]
+name = "Qwen/Qwen3-1.7B"
+max_model_len = 12288
+
+[inference.server]
+host = "0.0.0.0"
+port = 8000
+
+[inference.parallel]
+dp = 8  # Will be auto-configured based on available GPUs
+tp = 1
