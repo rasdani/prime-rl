@@ -33,6 +33,9 @@ path = "/mnt/shared-weights/data"
 [trainer.weights]
 path = "/mnt/shared-weights/weights"
 
+[trainer.monitor.wandb]
+project = "prime-rl-swe-rl"
+
 # Orchestrator configuration (points to inference node)
 [orchestrator]
 max_steps = 30

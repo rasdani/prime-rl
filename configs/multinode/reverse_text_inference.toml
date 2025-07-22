@@ -28,6 +28,9 @@ path = "/tmp/prime-rl-shared/data"
 [trainer.weights]
 path = "/tmp/prime-rl-shared/weights"
 
+[trainer.monitor.wandb]
+project = "prime-rl-swe-rl"
+
 # Orchestrator configuration  
 [orchestrator]
 max_steps = 30
