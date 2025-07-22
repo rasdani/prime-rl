@@ -97,9 +97,9 @@ class MultiNodeRLConfig(BaseSettings):
             self.trainer_gpus = 0
             
         elif self.multinode.mode == "training":
-            # Training node uses all available GPUs for training
+            # Training node uses configured trainer_gpus (don't override)
             available_gpus = torch.cuda.device_count()
-            self.trainer_gpus = available_gpus
+            # self.trainer_gpus = available_gpus  # Commented out to respect config
             self.inference_gpus = 0
             self.inference = None  # No inference process on training node
             
