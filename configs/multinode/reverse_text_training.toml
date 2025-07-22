@@ -4,10 +4,10 @@
 # Multi-node configuration
 [multinode]
 mode = "training"
-master_addr = "10.15.35.113"  # Inference node coordinates torchrun
+master_addr = "localhost"  # Single-node training - no coordination needed
 inference_addr = "10.15.35.113"
 inference_port = 8000
-nnodes = 1  # Only this training node
+nnodes = 1  # Single-node mode
 node_rank = 0
 
 # Trainer configuration
@@ -22,6 +22,13 @@ lr = 3e-6
 
 [trainer.ckpt]
 interval = 10
+path = "/mnt/shared-weights/checkpoints"
+
+[trainer.data]
+path = "/mnt/shared-weights/data"
+
+[trainer.weights]
+path = "/mnt/shared-weights/weights"
 
 # Orchestrator configuration (points to inference node)
 [orchestrator]

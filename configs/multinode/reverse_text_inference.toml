@@ -20,6 +20,13 @@ lr = 3e-6
 
 [trainer.ckpt]
 interval = 10
+path = "/tmp/prime-rl-shared/checkpoints"
+
+[trainer.data]
+path = "/tmp/prime-rl-shared/data"
+
+[trainer.weights]
+path = "/tmp/prime-rl-shared/weights"
 
 # Orchestrator configuration  
 [orchestrator]
