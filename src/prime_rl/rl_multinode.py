@@ -218,14 +218,18 @@ class MultiNodeRLConfig(BaseSettings):
         return self
 
 
-def wait_for_inference_server(host: str, port: int, timeout: int = 60) -> bool:
+def wait_for_inference_server(host: str, port: int, logger, timeout: int = 120) -> bool:
     """Wait for inference server to be ready."""
+    logger.info(f"Waiting for inference server at http://{host}:{port}/health")
     import requests
     
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
             response = requests.get(f"http://{host}:{port}/health", timeout=2)
+            logger.info(f"Pinging inference server at http://{host}:{port}/health")
+            logger.info(f"Status code: {response.status_code}")
+            logger.info(f"Response: {response.text}")
             if response.status_code == 200:
                 return True
         except:
@@ -263,7 +267,7 @@ def rl_multinode(config: MultiNodeRLConfig):
     stop_events: dict[str, Event] = {}
 
     try:
-        # INFERENCE NODE: Start inference server and orchestrator
+        # INFERENCE NODE: Start inference server, orchestrator, and master torchrun
         if config.multinode.mode in ["inference", "both"]:
             if config.inference:
                 logger.info(f"Starting inference server on {config.inference_gpus} GPUs")
@@ -295,7 +299,7 @@ def rl_multinode(config: MultiNodeRLConfig):
                 
                 # Wait for inference server to be ready
                 logger.info("Waiting for inference server to start...")
-                if not wait_for_inference_server(config.multinode.inference_addr, config.multinode.inference_port):
+                if not wait_for_inference_server(config.multinode.inference_addr, config.multinode.inference_port, logger):
                     raise RuntimeError("Inference server failed to start")
                 logger.success("Inference server ready!")
 
@@ -326,12 +330,58 @@ def rl_multinode(config: MultiNodeRLConfig):
             monitor_thread.start()
             monitor_threads.append(monitor_thread)
 
+            # For multi-node training, start master torchrun process on inference node  
+            if config.multinode.mode == "inference" and config.multinode.nnodes > 1:
+                logger.info("Starting master torchrun rendezvous for multi-node training")
+                # Create a dummy trainer config for the master node (won't actually train)
+                master_trainer_file = get_temp_toml_file()
+                with open(master_trainer_file, "wb") as f:
+                    tomli_w.dump(config.trainer.model_dump(exclude_none=True, mode="json"), f)
+
+                master_cmd = [
+                    "uv", "run", "torchrun",
+                    f"--rdzv-backend=c10d",
+                    f"--rdzv-endpoint={config.multinode.master_addr}:{config.multinode.master_port}",
+                    f"--rdzv-id={config.exp_id}",
+                    f"--nnodes={config.multinode.nnodes + 1}",  # +1 for this master node
+                    f"--node-rank=0",  # Master is rank 0
+                    f"--nproc-per-node=1",  # Just 1 process to establish rendezvous
+                    "src/prime_rl/trainer/train.py",
+                    "@", master_trainer_file.as_posix(),
+                    "--dry-run",  # Don't actually train
+                ]
+
+                logger.info(f"Master torchrun command: {' '.join(master_cmd)}")
+                
+                with open(config.log.path / "master_trainer.log", "w") as log_file:
+                    master_process = Popen(
+                        master_cmd,
+                        env={
+                            **os.environ,
+                            "CUDA_VISIBLE_DEVICES": "",  # No GPU for master
+                            "LOGURU_FORCE_COLORS": "1",
+                        },
+                        stdout=log_file,
+                        stderr=log_file,
+                    )
+                processes.append(master_process)
+
+                stop_event = Event()
+                stop_events["master_trainer"] = stop_event  
+                monitor_thread = Thread(
+                    target=monitor_process,
+                    args=(master_process, stop_event, error_queue, "master_trainer"),
+                    daemon=True,
+                )
+                monitor_thread.start()
+                monitor_threads.append(monitor_thread)
+
         # TRAINING NODE: Wait for inference, then start training
         if config.multinode.mode in ["training", "both"]:
             # For training nodes, wait for inference server
             if config.multinode.mode == "training":
                 logger.info(f"Waiting for inference server at {config.multinode.inference_addr}:{config.multinode.inference_port}")
-                if not wait_for_inference_server(config.multinode.inference_addr, config.multinode.inference_port):
+                if not wait_for_inference_server(config.multinode.inference_addr, config.multinode.inference_port, logger):
                     raise RuntimeError("Cannot connect to inference server")
                 logger.success("Connected to inference server!")
 
@@ -341,6 +391,7 @@ def rl_multinode(config: MultiNodeRLConfig):
             with open(trainer_file, "wb") as f:
                 tomli_w.dump(config.trainer.model_dump(exclude_none=True, mode="json"), f)
 
+            # Use simple single-node torchrun for nnodes=1
             trainer_cmd = [
                 "uv", "run", "torchrun",
                 f"--rdzv-backend=c10d",
