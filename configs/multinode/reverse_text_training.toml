@@ -1,8 +1,8 @@
 # Configuration for TRAINING node (10.15.35.65)
 # Usage: uv run rl_multinode @ configs/multinode/reverse_text_training.toml
 
-# Temporary: single GPU for debugging
-trainer_gpus = 1
+# Use all 8 H100s for training
+trainer_gpus = 8
 
 # Multi-node configuration
 [multinode]

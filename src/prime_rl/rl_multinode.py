@@ -213,7 +213,12 @@ class MultiNodeRLConfig(BaseSettings):
 
     @model_validator(mode="after")
     def auto_setup_num_train_workers(self):
-        if self.trainer_gpus > 1:
+        # For multi-node: orchestrator needs to know total training workers across all nodes
+        if self.multinode.mode == "inference":
+            # Inference node: use remote training node's GPU count
+            # For now, assume 8 GPUs on training node (TODO: make configurable)
+            self.orchestrator.num_train_workers = 8  
+        elif self.trainer_gpus > 1:
             self.orchestrator.num_train_workers = self.trainer_gpus
         return self
 
