@@ -36,7 +36,7 @@ project = "prime-rl-swe-rl"
 
 # Orchestrator configuration (points to inference node)
 [orchestrator]
-batch_size = 16
+batch_size = 8
 micro_batch_size = 8
 rollouts_per_prompt = 8
 seq_len = 12288
