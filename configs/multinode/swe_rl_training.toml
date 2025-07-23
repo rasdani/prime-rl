@@ -1,4 +1,4 @@
-# Configuration for TRAINING node (10.15.24.49)
+# Configuration for TRAINING node (10.15.22.105)
 # Usage: uv run rl_multinode @ configs/multinode/swe_rl_training.toml
 
 # Use all 8 H100s for training
@@ -8,7 +8,7 @@ trainer_gpus = 8
 [multinode]
 mode = "training"
 master_addr = "localhost"  # Single-node training - no coordination needed
-inference_addr = "10.15.24.57"
+inference_addr = "10.15.22.73"
 inference_port = 8000
 nnodes = 1  # Single-node mode
 node_rank = 0
@@ -46,7 +46,7 @@ mask_truncated_completions = true
 name = "Qwen/Qwen3-4B"
 
 [orchestrator.client]
-host = "10.15.24.57"
+host = "10.15.22.73"
 port = 8000
 
 [orchestrator.environment]

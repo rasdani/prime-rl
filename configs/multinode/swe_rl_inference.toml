@@ -1,11 +1,11 @@
-# Configuration for INFERENCE node (10.15.24.57)
+# Configuration for INFERENCE node (10.15.22.73)
 # Usage: uv run rl_multinode @ configs/multinode/swe_rl_inference.toml
 
 # Multi-node configuration
 [multinode]
 mode = "inference"
-master_addr = "10.15.24.57"
-inference_addr = "10.15.24.57"
+master_addr = "10.15.22.73"
+inference_addr = "10.15.22.73"
 inference_port = 8000
 
 [trainer.model]
