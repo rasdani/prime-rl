@@ -1,7 +1,7 @@
 batch_size = 4
 micro_batch_size = 4
 rollouts_per_prompt = 4
-seq_len = 12288
+seq_len = 8192
 mask_truncated_completions = true
 
 [model]

@@ -1,11 +1,11 @@
-# Configuration for INFERENCE node (10.15.35.113)
+# Configuration for INFERENCE node (10.15.24.57)
 # Usage: uv run rl_multinode @ configs/multinode/swe_rl_inference.toml
 
 # Multi-node configuration
 [multinode]
 mode = "inference"
-master_addr = "10.15.35.113"
-inference_addr = "10.15.35.113"
+master_addr = "10.15.24.57"
+inference_addr = "10.15.24.57"
 inference_port = 8000
 
 [trainer.model]
@@ -33,7 +33,7 @@ project = "prime-rl-swe-rl"
 batch_size = 4
 micro_batch_size = 4
 rollouts_per_prompt = 4
-seq_len = 12288
+seq_len = 8192
 mask_truncated_completions = true
 
 [orchestrator.model]
@@ -56,7 +56,7 @@ num_samples = 2
 # Inference configuration (8 H100s with data parallelism)
 [inference.model]
 name = "Qwen/Qwen3-4B"
-max_model_len = 12288
+max_model_len = 8192
 
 [inference.server]
 host = "0.0.0.0"
