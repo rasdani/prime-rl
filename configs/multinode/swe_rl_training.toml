@@ -23,13 +23,13 @@ lr = 1e-6
 
 [trainer.ckpt]
 interval = 1
-path = "/mnt/shared-weights/checkpoints"
+path = "/workspace/mnt/shared-weights/checkpoints"
 
 [trainer.data]
-path = "/mnt/shared-weights/data"
+path = "/workspace/mnt/shared-weights/data"
 
 [trainer.weights]
-path = "/mnt/shared-weights/weights"
+path = "/workspace/mnt/shared-weights/weights"
 
 [trainer.monitor.wandb]
 project = "prime-rl-swe-rl"
