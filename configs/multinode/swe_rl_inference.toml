@@ -9,7 +9,7 @@ inference_addr = "10.15.35.113"
 inference_port = 8000
 
 [trainer.model]
-name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+name = "Qwen/Qwen3-4B"
 ac = true
 
 [trainer.optim]
@@ -37,7 +37,7 @@ seq_len = 12288
 mask_truncated_completions = true
 
 [orchestrator.model]
-name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+name = "Qwen/Qwen3-4B"
 
 [orchestrator.environment]
 id = "swe-rl"
@@ -55,7 +55,7 @@ num_samples = 2
 
 # Inference configuration (8 H100s with data parallelism)
 [inference.model]
-name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+name = "Qwen/Qwen3-4B"
 max_model_len = 12288
 
 [inference.server]

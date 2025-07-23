@@ -5,7 +5,7 @@ seq_len = 12288
 mask_truncated_completions = true
 
 [model]
-name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+name = "Qwen/Qwen3-4B"
 
 [environment]
 id = "swe-rl"

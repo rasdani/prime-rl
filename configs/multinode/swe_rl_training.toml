@@ -15,7 +15,7 @@ node_rank = 0
 
 
 [trainer.model]
-name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+name = "Qwen/Qwen3-4B"
 ac = true
 
 [trainer.optim]
