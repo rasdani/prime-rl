@@ -30,9 +30,9 @@ project = "prime-rl-swe-rl"
 
 # Orchestrator configuration  
 [orchestrator]
-batch_size = 4
-micro_batch_size = 4
-rollouts_per_prompt = 4
+batch_size = 16
+micro_batch_size = 8
+rollouts_per_prompt = 8
 seq_len = 12288
 mask_truncated_completions = true
 
@@ -47,7 +47,7 @@ max_tokens = 4096
 temperature = 0.6
 
 [orchestrator.ckpt]
-interval = 1
+interval = 100
 
 [orchestrator.monitor.wandb.log_samples]
 interval = 5
