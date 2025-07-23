@@ -1,11 +1,11 @@
-batch_size = 4
-micro_batch_size = 4
-rollouts_per_prompt = 4
-seq_len = 12288
+batch_size = 32
+micro_batch_size = 8
+rollouts_per_prompt = 8
+seq_len = 8192
 mask_truncated_completions = true
 
 [model]
-name = "Qwen/Qwen3-1.7B"
+name = "Qwen/Qwen3-4B"
 
 [environment]
 id = "swe-rl"
