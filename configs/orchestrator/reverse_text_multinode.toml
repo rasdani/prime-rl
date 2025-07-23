@@ -1,0 +1,17 @@
+max_steps = 30
+batch_size = 128
+micro_batch_size = 8
+rollouts_per_prompt = 8
+seq_len = 128
+
+[model]
+name = "willcb/Qwen2.5-0.5B-Reverse-SFT"
+
+[monitor.wandb]
+
+[environment]
+id = "reverse-text"
+
+# Multi-node specific: checkpoint more frequently for fault tolerance  
+[ckpt]
+interval = 10

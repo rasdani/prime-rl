@@ -15,7 +15,7 @@ node_rank = 0
 
 
 [trainer.model]
-name = "Qwen/Qwen3-1.7B"
+name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 ac = true
 
 [trainer.optim]
@@ -36,14 +36,14 @@ project = "prime-rl-swe-rl"
 
 # Orchestrator configuration (points to inference node)
 [orchestrator]
-batch_size = 32
+batch_size = 8
 micro_batch_size = 8
 rollouts_per_prompt = 8
-seq_len = 16384
+seq_len = 12288
 mask_truncated_completions = true
 
 [orchestrator.model]
-name = "Qwen/Qwen3-1.7B"
+name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
 [orchestrator.client]
 host = "10.15.35.113"
@@ -53,7 +53,7 @@ port = 8000
 id = "swe-rl"
 
 [orchestrator.sampling]
-max_tokens = 8192
+max_tokens = 4096
 temperature = 0.6
 
 [orchestrator.ckpt]

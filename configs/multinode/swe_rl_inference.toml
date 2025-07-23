@@ -9,14 +9,14 @@ inference_addr = "10.15.35.113"
 inference_port = 8000
 
 [trainer.model]
-name = "Qwen/Qwen3-1.7B"
+name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 ac = true
 
 [trainer.optim]
 lr = 1e-6
 
 [trainer.ckpt]
-interval = 100
+interval = 1
 path = "/tmp/prime-rl-shared/checkpoints"
 
 [trainer.data]
@@ -30,20 +30,20 @@ project = "prime-rl-swe-rl"
 
 # Orchestrator configuration  
 [orchestrator]
-batch_size = 32
+batch_size = 8
 micro_batch_size = 8
 rollouts_per_prompt = 8
-seq_len = 16384
+seq_len = 12288
 mask_truncated_completions = true
 
 [orchestrator.model]
-name = "Qwen/Qwen3-1.7B"
+name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
 [orchestrator.environment]
 id = "swe-rl"
 
 [orchestrator.sampling]
-max_tokens = 8192
+max_tokens = 4096
 temperature = 0.6
 
 [orchestrator.ckpt]
@@ -55,8 +55,8 @@ num_samples = 2
 
 # Inference configuration (8 H100s with data parallelism)
 [inference.model]
-name = "Qwen/Qwen3-1.7B"
-max_model_len = 16384
+name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+max_model_len = 12288
 
 [inference.server]
 host = "0.0.0.0"

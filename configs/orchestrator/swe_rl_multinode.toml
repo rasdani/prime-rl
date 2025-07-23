@@ -1,17 +1,17 @@
-batch_size = 32
+batch_size = 8
 micro_batch_size = 8
 rollouts_per_prompt = 8
-seq_len = 16384
+seq_len = 12288
 mask_truncated_completions = true
 
 [model]
-name = "Qwen/Qwen3-1.7B"
+name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
 [environment]
 id = "swe-rl"
 
 [sampling]
-max_tokens = 8192
+max_tokens = 4096
 temperature = 0.6
 
 [monitor.wandb]
